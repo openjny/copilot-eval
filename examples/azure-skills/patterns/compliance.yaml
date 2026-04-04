@@ -1,0 +1,5 @@
+name: compliance
+type: write
+enabled: false
+prompt: "Check if resources in {resource_group} comply with security best practices"
+reset_script: # TODO: create reset script

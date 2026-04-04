@@ -1,0 +1,10 @@
+vars: {}
+
+runner:
+  epochs: 1
+  timeout_seconds: 120
+  container_image_base: copilot-eval
+  copilot_version: "1.0.18"
+  otel_endpoint: http://host.docker.internal:4318
+
+# For Azure Skills eval, use: --config-dir examples/azure-skills

@@ -1,0 +1,5 @@
+name: diagnostics
+type: write
+enabled: false
+prompt: "The App Service is returning 500 errors. Identify the root cause"
+reset_script: # TODO: create reset script

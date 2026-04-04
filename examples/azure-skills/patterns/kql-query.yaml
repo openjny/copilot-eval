@@ -1,0 +1,4 @@
+name: kql-query
+type: read
+enabled: false
+prompt: "Search Log Analytics for failed requests in the past 24 hours"

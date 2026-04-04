@@ -1,0 +1,6 @@
+name: app-deploy
+type: write
+enabled: false
+prompt: "Deploy this Node.js app to Azure App Service"
+fixture: app-deploy
+reset_script: # TODO: create reset script

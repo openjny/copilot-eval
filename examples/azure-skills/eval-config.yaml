@@ -1,0 +1,12 @@
+vars:
+  resource_group: rg-copilot-eval
+  location: southeastasia
+
+runner:
+  epochs: 1
+  timeout_seconds: 120
+  model: claude-sonnet-4
+  max_turns: 20
+  container_image_base: copilot-eval
+  copilot_version: "1.0.18"
+  otel_endpoint: http://host.docker.internal:4318

@@ -1,0 +1,4 @@
+name: cost-optimization
+type: read
+enabled: false
+prompt: "Suggest cost optimization for this subscription"

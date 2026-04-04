@@ -1,0 +1,12 @@
+using './main.bicep'
+
+param location = 'southeastasia'
+param tags = {
+  project: 'copilot-eval'
+  environment: 'test'
+  pattern: 'resource-explorer'
+}
+
+// Set this to the SP's Object ID:
+//   az ad sp show --id <AZURE_CLIENT_ID> --query id -o tsv
+param sqlAdminObjectId = '' // REQUIRED: fill before deploy

@@ -1,0 +1,6 @@
+name: baseline
+description: "Copilot CLI with Azure CLI (no plugins)"
+build:
+  script: examples/azure-skills/variants/scripts/build-baseline.sh
+run:
+  script: examples/azure-skills/setup/azure-login.sh
