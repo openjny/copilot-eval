@@ -12,7 +12,6 @@ RG="${EVAL_RESOURCE_GROUP:?EVAL_RESOURCE_GROUP not set}"
 LOCATION="${EVAL_LOCATION:-southeastasia}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BICEP_FILE="${SCRIPT_DIR}/../infra/main.bicep"
-PARAM_FILE="${SCRIPT_DIR}/../infra/main.bicepparam"
 
 echo "[reset] Resetting $RG to baseline state..."
 
@@ -20,19 +19,22 @@ echo "[reset] Resetting $RG to baseline state..."
 az group show --name "$RG" &>/dev/null || \
   az group create --name "$RG" --location "$LOCATION" --output none
 
-# Deploy in Complete mode: removes anything not in the template
-DEPLOY_ARGS=(
-  --resource-group "$RG"
-  --mode Complete
-  --template-file "$BICEP_FILE"
-  --parameters location="$LOCATION"
-  --output none
-)
-
-if [[ -f "$PARAM_FILE" ]]; then
-  DEPLOY_ARGS+=(--parameters "@${PARAM_FILE}")
+# Get SP object ID for SQL admin (from AZURE_CLIENT_ID in .env)
+SQL_ADMIN_OID=""
+if [[ -n "${AZURE_CLIENT_ID:-}" ]]; then
+  SQL_ADMIN_OID=$(az ad sp show --id "$AZURE_CLIENT_ID" --query id -o tsv 2>/dev/null || echo "")
+fi
+if [[ -z "$SQL_ADMIN_OID" ]]; then
+  echo "[reset] WARNING: Could not resolve SQL admin object ID, skipping reset"
+  exit 0
 fi
 
-az deployment group create "${DEPLOY_ARGS[@]}"
+# Deploy in Complete mode: removes anything not in the template
+az deployment group create \
+  --resource-group "$RG" \
+  --mode Complete \
+  --template-file "$BICEP_FILE" \
+  --parameters location="$LOCATION" sqlAdminObjectId="$SQL_ADMIN_OID" \
+  --output none
 
 echo "[reset] Environment reset complete"

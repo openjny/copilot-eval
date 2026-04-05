@@ -124,7 +124,7 @@ def _run_hook(script: str | None, config: Config, log_file: Path, label: str) ->
         print(f"    WARNING: {label} script not found: {script}")
         return
     print(f"    Running {label}...")
-    env = {**os.environ, **{f"EVAL_{k.upper()}": v for k, v in config.vars.items()}}
+    env = {**os.environ, **_load_env_file(config.env_file), **{f"EVAL_{k.upper()}": v for k, v in config.vars.items()}}
     with open(log_file, "a") as lf:
         subprocess.run(["bash", str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)
 
@@ -242,3 +242,18 @@ def _parse_json(text: str) -> dict | None:
         return json.loads(text.strip())
     except (json.JSONDecodeError, ValueError):
         return None
+
+
+def _load_env_file(env_file: Path) -> dict[str, str]:
+    """Parse a .env file into a dict, ignoring comments and empty lines."""
+    env: dict[str, str] = {}
+    if not env_file.exists():
+        return env
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, value = line.partition("=")
+            env[key.strip()] = value.strip()
+    return env

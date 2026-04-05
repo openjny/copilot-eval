@@ -12,6 +12,7 @@ services:
       - BADGER_DIRECTORY_KEY=/badger/key
     volumes:
       - jaeger-data:/badger
+    user: root
 
 volumes:
   jaeger-data:

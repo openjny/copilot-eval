@@ -98,11 +98,11 @@ def run(task: str | None, epochs: int | None, dry_run: bool, config_dir: str | N
                     results.append(result)
 
     # Summary
-    passed = sum(1 for r in results if r.result == "PASS")
-    failed = sum(1 for r in results if r.result == "FAIL")
+    passed = sum(1 for r in results if r.passed)
+    failed = sum(1 for r in results if not r.passed)
     click.echo("=" * 50)
     click.echo(f" Run complete: {run_id}")
-    click.echo(f" Results: {passed} PASS, {failed} FAIL, {len(results) - passed - failed} SKIP")
+    click.echo(f" Results: {passed} passed, {failed} failed")
     click.echo(f" Jaeger:  http://localhost:16686")
     click.echo(f" Analyze: python -m eval analyze --run-id {run_id}")
     click.echo("=" * 50)
