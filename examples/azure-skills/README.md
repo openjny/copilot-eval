@@ -155,72 +155,75 @@ Each Copilot CLI execution runs in an isolated Docker container. Containers are 
 
 ## Results
 
-Results from a full eval run (3 tasks × 2 variants × 3 epochs = 18 runs, model: claude-sonnet-4).
+Results from a full eval run (3 tasks × 2 variants × 3 epochs = 18 runs, model: claude-sonnet-4, run-id: `20260405-212819`).
 
 ### OTel Metrics (median across epochs)
 
 | Metric | azure-skills | baseline | Delta |
 |--------|--------:|--------:|------:|
-| Duration (s) | 238.7 | 204.0 | -14.5% |
-| Turn count | 18 | 26 | **+44.4%** |
-| Tool calls | 28 | 36 | **+28.6%** |
-| Tool duration (s) | 64.0 | 94.6 | **+47.8%** |
-| Input tokens | 1,084K | 751K | -30.7% |
-| Output tokens | 6,935 | 5,323 | -23.2% |
+| Duration (s) | 204.3 | 166.1 | -18.7% |
+| Turn count | 15 | 18 | **+20.0%** |
+| Tool calls | 29 | 32 | **+10.3%** |
+| Tool duration (s) | 54.5 | 85.4 | **+56.6%** |
+| Input tokens | 860K | 461K | -46.4% |
+| Output tokens | 5,381 | 5,055 | -6.1% |
 
 ### Tool Usage Patterns
 
-**azure-skills** used 14 distinct tool types including Azure MCP tools:
+**azure-skills** used 20 distinct tool types including Azure MCP tools:
 
 | Tool | Calls | Description |
 |------|------:|-------------|
-| `bash` | 110 | Shell commands (az CLI) |
-| `azure-appservice` | 24 | MCP: App Service operations |
-| `view` | 38 | File viewer |
-| `azure-monitor` | 15 | MCP: Metrics and logs |
-| `create` | 15 | File creation |
-| `report_intent` | 13 | Intent reporting |
-| `azure-group_resource_list` | 10 | MCP: Resource listing |
-| `skill` | 9 | Skill activation |
-| `azure-subscription_list` | 7 | MCP: Subscription queries |
-| `azure-applens` | 6 | MCP: App diagnostics |
+| `bash` | 108 | Shell commands (az CLI) |
+| `view` | 35 | File viewer |
+| `azure-appservice` | 26 | MCP: App Service operations |
+| `report_intent` | 12 | Intent reporting |
+| `skill` | 10 | Skill activation |
+| `create` | 10 | File creation |
+| `azure-group_resource_list` | 8 | MCP: Resource listing |
 | `azure-resourcehealth` | 6 | MCP: Resource health |
+| `azure-applens` | 6 | MCP: App diagnostics |
+| `azure-monitor` | 5 | MCP: Metrics and logs |
 | `azure-extension_azqr` | 5 | MCP: Azure Quick Review |
+| `azure-applicationinsights` | 3 | MCP: App Insights queries |
 
 **baseline** relied primarily on shell commands:
 
 | Tool | Calls |
 |------|------:|
-| `bash` | 233 |
-| `sql` | 24 |
-| `report_intent` | 22 |
-| `read_bash` | 18 |
-| `view` | 10 |
+| `bash` | 211 |
+| `sql` | 21 |
+| `report_intent` | 13 |
+| `read_bash` | 9 |
+| `view` | 9 |
 
 ### Judge Scores (median, 1-10 scale)
 
 | Judge | azure-skills | baseline | Winner |
 |-------|:-----------:|:--------:|--------|
-| deployment_approach | **7** | 2 | azure-skills |
-| diagnostic_depth | 2 | **6** | baseline |
-| coverage | 1 | **6** | baseline |
-| methodology | 2 | **7** | baseline |
-| tool_usage | 1 | **6** | baseline |
-| finding_accuracy | 1 | **4** | baseline |
-| remediation_quality | 1 | **3** | baseline |
-| actionability | 1 | **2** | baseline |
-| completeness | 2 | 2 | tie |
-| root_cause | 1 | 1 | tie |
-| verification | 1 | 1 | tie |
+| methodology | 7 | **8** | baseline |
+| coverage | 6 | **8** | baseline |
+| remediation_quality | 4 | **7** | baseline |
+| finding_accuracy | 5 | **7** | baseline |
+| tool_usage | 6 | **7** | baseline |
+| verification | 1 | **7** | baseline |
+| diagnostic_depth | 5 | **6** | baseline |
+| deployment_approach | **4** | 3 | azure-skills |
+| completeness | 2 | **3** | baseline |
+| actionability | 2 | 2 | tie |
+| root_cause | 2 | 2 | tie |
+| verify | 1 | 1 | tie |
 
 ### Key Insights
 
-1. **MCP tools are active**: azure-skills uses structured Azure MCP tools (`azure-appservice`, `azure-monitor`, `azure-applens`, `azure-resourcehealth`) instead of raw `az` CLI commands. The baseline variant uses 2× more shell commands (233 vs 110).
+1. **MCP tools are active and diverse**: azure-skills uses 12+ Azure MCP tools (`azure-appservice`, `azure-monitor`, `azure-applens`, `azure-resourcehealth`, `azure-applicationinsights`) for structured data retrieval. The baseline uses 2× more shell commands (211 vs 108).
 
-2. **Efficiency vs quality trade-off**: azure-skills completes tasks with fewer turns (18 vs 26) and faster tool execution (64s vs 95s), but the quality scores are lower on most judge evaluators.
+2. **Faster tool execution**: azure-skills tool duration is 36% faster (54.5s vs 85.4s) — MCP tools return structured results directly, avoiding the overhead of parsing `az` CLI output.
 
-3. **deployment_approach is the clear win**: azure-skills scores 7 vs 2 on deployment approach — the `azure-prepare` → `azure-validate` → `azure-deploy` workflow stands out.
+3. **Baseline wins on quality**: baseline consistently outscores azure-skills on judge evaluators. Particularly notable: `verification` (7 vs 1), `remediation_quality` (7 vs 4), and `coverage` (8 vs 6). The brute-force `az` CLI approach produces more thorough, verifiable results.
 
-4. **Compliance/diagnostics favor baseline**: baseline's brute-force approach (many `az` CLI + `sql` commands) produces more thorough audits and diagnostics, despite taking more turns and time.
+4. **deployment_approach slight edge for plugin**: azure-skills scores 4 vs 3 — the structured deploy workflow helps, but the advantage is smaller than expected.
 
-5. **High variance**: Per-run results show significant variance — azure-skills epoch 1 scored very differently from epoch 3 on the same task. More epochs would improve statistical confidence.
+5. **Input token cost**: azure-skills uses 86% more input tokens (860K vs 461K) due to MCP tool overhead and skill definitions. This is a significant efficiency concern despite fewer turns.
+
+6. **High variance**: Per-run results vary significantly (e.g., azure-skills epoch 2: 68s–228s duration). 3 epochs provide directional signal but not statistical confidence.
