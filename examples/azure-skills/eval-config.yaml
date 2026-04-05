@@ -62,6 +62,9 @@ tasks:
     hooks:
       before_run: scripts/reset-environment.sh
     evaluators:
+      - name: verify
+        type: script
+        script: scripts/verify-app-deploy.sh
       - name: deployment_approach
         type: judge
         prompt: |
@@ -76,12 +79,22 @@ tasks:
           10 = Covers app creation, code deployment, config, and verification.
           1 = Only partial steps.
           Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: verification
+        type: judge
+        prompt: |
+          Rate whether the deployment process included verification steps on a scale of 1-10.
+          10 = Verified the app is running after deployment (e.g., curl, browse, az webapp show).
+          1 = Deployed without any post-deployment check.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
 
   - name: diagnostics
     prompt: "There is an App Service in resource group {resource_group} that seems to be having issues. Find it, diagnose the application health, and check for any errors or warnings in the logs."
     hooks:
-      before_run: scripts/reset-environment.sh
+      before_run: scripts/prepare-diagnostics.sh
     evaluators:
+      - name: verify
+        type: script
+        script: scripts/verify-diagnostics.sh
       - name: diagnostic_depth
         type: judge
         prompt: |
@@ -89,10 +102,29 @@ tasks:
           10 = Checked multiple data sources (App Insights, logs, metrics, configuration).
           1 = Only superficial checks or generic advice.
           Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: root_cause
+        type: judge
+        prompt: |
+          The App Service has two intentional issues:
+          1. A wrong startup command ("node nonexistent-entry.js")
+          2. The app code has a missing module dependency (require('./config'))
+          Rate how accurately the root cause was identified on a scale of 1-10.
+          10 = Both issues correctly identified with specific evidence.
+          5 = One issue found or root cause partially identified.
+          1 = Root cause not identified or completely wrong diagnosis.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
       - name: actionability
         type: judge
         prompt: |
           Rate how actionable the diagnostic findings are on a scale of 1-10.
           10 = Specific findings with clear remediation steps.
           1 = Vague observations without actionable next steps.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: tool_usage
+        type: judge
+        prompt: |
+          Rate the breadth of Azure diagnostic tools and data sources used on a scale of 1-10.
+          10 = Used multiple sources: az webapp log, App Insights queries, metrics, configuration checks.
+          5 = Used 2-3 diagnostic approaches.
+          1 = Only used a single command or made generic suggestions.
           Output ONLY valid JSON: {"score": N, "reason": "..."}
