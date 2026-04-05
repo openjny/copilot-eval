@@ -72,7 +72,17 @@ def run(task: str | None, epochs: int | None, dry_run: bool, config_dir: str | N
     github_token = get_github_token()
     results: list[RunResult] = []
 
-    if config.runner.parallel and len(tasks) > 1:
+    if config.runner.parallel == "full":
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        work = [(t, v, e) for t in tasks for e in range(1, epochs + 1) for v in config.variants]
+        click.echo(f"Running {len(work)} runs in full parallel (max_workers={config.runner.max_workers})")
+        with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
+            futures = {pool.submit(run_one, t, v, e, config, run_id, run_dir, github_token): f"{t.name}/{v.name}/e{e}" for t, v, e in work}
+            for future in as_completed(futures):
+                results.append(future.result())
+
+    elif config.runner.parallel == "per_task" and len(tasks) > 1:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         def _run_task_serial(task: Task) -> list[RunResult]:
@@ -86,13 +96,13 @@ def run(task: str | None, epochs: int | None, dry_run: bool, config_dir: str | N
             return task_results
 
         click.echo(f"Running {len(tasks)} tasks in parallel (variants serial within each task)")
-        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        with ThreadPoolExecutor(max_workers=min(len(tasks), config.runner.max_workers)) as pool:
             futures = {pool.submit(_run_task_serial, t): t.name for t in tasks}
             for future in as_completed(futures):
                 results.extend(future.result())
     else:
         for p in tasks:
-            prompt = config.resolve_prompt(p)
+            prompt = config.resolve_prompt(p, config.variants[0])
             click.echo(f"\n>>> Task: {p.name}")
             click.echo(f">>> Prompt:  {prompt}\n")
 

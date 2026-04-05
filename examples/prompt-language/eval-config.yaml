@@ -1,0 +1,64 @@
+vars: {}
+
+runner:
+  epochs: 3
+  timeout_seconds: 120
+  model: claude-sonnet-4
+  max_turns: 10
+  parallel: full
+  max_workers: 6
+  container_image_base: copilot-eval
+  copilot_version: "1.0.18"
+  otel_endpoint: http://host.docker.internal:4318
+
+variants:
+  - name: english
+    description: "Prompt and response in English"
+    vars: { language: "English" }
+
+  - name: japanese
+    description: "Prompt and response in Japanese"
+    vars: { language: "Japanese" }
+
+tasks:
+  - name: code-review
+    prompt: "Review the code in the current directory for bugs, security issues, and potential improvements. Respond in {language}. Write your review to /workspace/review.md when done."
+    fixture: sample-app
+    evaluators:
+      - name: thoroughness
+        type: judge
+        prompt: |
+          Rate how thorough the code review is on a scale of 1-10.
+          10 = Found all bugs, security issues, and improvement opportunities with specific line references.
+          5 = Found some issues but missed major ones.
+          1 = Superficial or generic advice without specific findings.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: actionability
+        type: judge
+        prompt: |
+          Rate how actionable the review feedback is on a scale of 1-10.
+          10 = Each finding has a specific fix suggestion with code examples.
+          5 = Findings identified but fixes are vague.
+          1 = No actionable recommendations.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+
+  - name: explain-architecture
+    prompt: "Explain the architecture and design patterns used in the code in the current directory. Respond in {language}. Write your explanation to /workspace/architecture.md when done."
+    fixture: sample-app
+    evaluators:
+      - name: completeness
+        type: judge
+        prompt: |
+          Rate how completely the architecture is explained on a scale of 1-10.
+          10 = All major components, patterns, and data flow explained clearly.
+          5 = Some components covered but significant gaps.
+          1 = Barely any architectural explanation.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: clarity
+        type: judge
+        prompt: |
+          Rate how clearly the explanation is written on a scale of 1-10.
+          10 = Well-structured, easy to follow, with appropriate level of detail.
+          5 = Understandable but poorly organized or too verbose.
+          1 = Confusing or incoherent.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}

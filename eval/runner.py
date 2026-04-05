@@ -57,11 +57,11 @@ def run_one(
     log_file = run_dir / f"{task.name}_{variant.name}_epoch{epoch}.log"
     print(f"--- [{task.name}] epoch={epoch} variant={variant.name} test_id={test_id[:8]}")
 
-    _run_hook(task.hooks.before_run, config, task, log_file, "before_run")
+    _run_hook(task.hooks.before_run, config, task, variant, log_file, "before_run")
 
     # Health check: verify environment is ready before running Copilot
     if task.health_check:
-        if not _run_health_check(task.health_check, config, task, log_file):
+        if not _run_health_check(task.health_check, config, task, variant, log_file):
             print(f"    ✗ Health check failed — skipping run")
             return RunResult(
                 task=task.name, variant=variant.name, epoch=epoch,
@@ -69,7 +69,7 @@ def run_one(
                 exit_code=-1, status="setup_failed",
             )
 
-    prompt = config.resolve_prompt(task)
+    prompt = config.resolve_prompt(task, variant)
     image = config.image_name(variant)
     otel_attrs = ",".join([
         f"eval.test_id={test_id}", f"eval.scenario={task.name}",
@@ -113,9 +113,9 @@ def run_one(
         proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
     _print_summary(log_file)
 
-    _run_hook(task.hooks.after_run, config, task, log_file, "after_run")
+    _run_hook(task.hooks.after_run, config, task, variant, log_file, "after_run")
 
-    scores = _run_evaluators(task, config, log_file, github_token)
+    scores = _run_evaluators(task, variant, config, log_file, github_token)
     _print_scores(scores)
 
     return RunResult(
@@ -125,7 +125,7 @@ def run_one(
     )
 
 
-def _run_hook(script: str | None, config: Config, task: Task, log_file: Path, label: str) -> None:
+def _run_hook(script: str | None, config: Config, task: Task, variant: Variant, log_file: Path, label: str) -> None:
     if not script:
         return
     resolved = (config.config_dir / script).resolve()
@@ -135,13 +135,13 @@ def _run_hook(script: str | None, config: Config, task: Task, log_file: Path, la
         print(f"    WARNING: {label} script not found: {script}")
         return
     print(f"    Running {label}...")
-    merged_vars = config.resolve_vars(task)
+    merged_vars = config.resolve_vars(task, variant)
     env = {**os.environ, **_load_env_file(config.env_file), **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()}}
     with open(log_file, "a") as lf:
         subprocess.run(["bash", str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)
 
 
-def _run_health_check(script: str, config: Config, task: Task, log_file: Path) -> bool:
+def _run_health_check(script: str, config: Config, task: Task, variant: Variant, log_file: Path) -> bool:
     """Run health check script. Returns True if environment is ready."""
     resolved = (config.config_dir / script).resolve()
     if not resolved.exists():
@@ -150,21 +150,21 @@ def _run_health_check(script: str, config: Config, task: Task, log_file: Path) -
         print(f"    WARNING: health_check script not found: {script}")
         return True  # skip check if script missing
     print(f"    Running health_check...")
-    merged_vars = config.resolve_vars(task)
+    merged_vars = config.resolve_vars(task, variant)
     env = {**os.environ, **_load_env_file(config.env_file), **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()}}
     with open(log_file, "a") as lf:
         proc = subprocess.run(["bash", str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)
     return proc.returncode == 0
 
 
-def _run_evaluators(task: Task, config: Config, log_file: Path, token: str) -> list[EvalScore]:
+def _run_evaluators(task: Task, variant: Variant, config: Config, log_file: Path, token: str) -> list[EvalScore]:
     scores: list[EvalScore] = []
     for ev in task.evaluators:
         s = None
         if ev.type == "judge":
             s = _eval_judge(ev, log_file, token)
         elif ev.type == "script":
-            s = _eval_script(ev, config, task, log_file)
+            s = _eval_script(ev, config, task, variant, log_file)
         elif ev.type == "contains":
             s = _eval_contains(ev, log_file)
         elif ev.type == "regex":
@@ -202,7 +202,7 @@ def _eval_judge(ev: Evaluator, log_file: Path, token: str) -> EvalScore | None:
     return EvalScore(name=ev.name, type="judge", score=None, reason="parse_error")
 
 
-def _eval_script(ev: Evaluator, config: Config, task: Task, log_file: Path) -> EvalScore | None:
+def _eval_script(ev: Evaluator, config: Config, task: Task, variant: Variant, log_file: Path) -> EvalScore | None:
     if not ev.script:
         return None
     resolved = (config.config_dir / ev.script).resolve()
@@ -211,7 +211,7 @@ def _eval_script(ev: Evaluator, config: Config, task: Task, log_file: Path) -> E
     if not resolved.exists():
         return None
     print(f"    Evaluating: {ev.name} (script)...")
-    merged_vars = config.resolve_vars(task)
+    merged_vars = config.resolve_vars(task, variant)
     env = {**os.environ, **_load_env_file(config.env_file), **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()}}
     with open(log_file, "a") as lf:
         proc = subprocess.run([str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)

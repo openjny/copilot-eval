@@ -14,7 +14,8 @@ class RunnerConfig:
     model: str | None = None
     reasoning_effort: str | None = None
     max_turns: int | None = None
-    parallel: bool = False
+    parallel: str = "off"  # off | per_task | full
+    max_workers: int = 8
     output_format: str = "text"
     container_image_base: str = "copilot-eval"
     copilot_version: str = "1.0.18"
@@ -28,6 +29,7 @@ class Variant:
     dockerfile: str | None = None
     run_script: str | None = None
     model: str | None = None
+    vars: dict[str, str] = field(default_factory=dict)
 
     @property
     def image_tag(self) -> str:
@@ -92,13 +94,13 @@ class Config:
     def image_name(self, variant: Variant) -> str:
         return f"{self.runner.container_image_base}:{variant.image_tag}"
 
-    def resolve_vars(self, task: Task) -> dict[str, str]:
-        """Merge global vars with task-level overrides."""
-        return {**self.vars, **task.vars}
+    def resolve_vars(self, task: Task, variant: Variant) -> dict[str, str]:
+        """Merge global vars → task vars → variant vars."""
+        return {**self.vars, **task.vars, **variant.vars}
 
-    def resolve_prompt(self, task: Task) -> str:
+    def resolve_prompt(self, task: Task, variant: Variant) -> str:
         result = task.prompt
-        for key, value in self.resolve_vars(task).items():
+        for key, value in self.resolve_vars(task, variant).items():
             result = result.replace("{" + key + "}", str(value))
         return result
 
@@ -124,7 +126,8 @@ def load_config(config_dir: Path | None = None) -> Config:
         model=runner_raw.get("model"),
         reasoning_effort=runner_raw.get("reasoning_effort"),
         max_turns=runner_raw.get("max_turns"),
-        parallel=runner_raw.get("parallel", False),
+        parallel=runner_raw.get("parallel", "off"),
+        max_workers=runner_raw.get("max_workers", 8),
         output_format=runner_raw.get("output_format", "text"),
         container_image_base=runner_raw.get("container_image_base", "copilot-eval"),
         copilot_version=runner_raw.get("copilot_version", "1.0.18"),
@@ -194,6 +197,7 @@ def _parse_variant(v: dict, fallback_name: str = "") -> Variant:
         dockerfile=build.get("dockerfile"),
         run_script=run.get("script"),
         model=v.get("model"),
+        vars={str(k): str(val) for k, val in (v.get("vars") or {}).items()},
     )
 
 

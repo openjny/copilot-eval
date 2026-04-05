@@ -6,7 +6,8 @@ runner:
   timeout_seconds: 300
   model: claude-sonnet-4
   max_turns: 20
-  parallel: true
+  parallel: per_task
+  max_workers: 3
   container_image_base: copilot-eval
   copilot_version: "1.0.18"
   otel_endpoint: http://host.docker.internal:4318
