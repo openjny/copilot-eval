@@ -26,6 +26,8 @@ variants:
 tasks:
   - name: resource-explorer
     prompt: "List all resources in resource group {resource_group} and explain the architecture"
+    hooks:
+      before_run: scripts/reset-environment.sh
     evaluators:
       - name: verify
         type: script
@@ -57,6 +59,8 @@ tasks:
   - name: app-deploy
     prompt: "I have a simple Node.js Express app in the current directory. Deploy it to the existing Azure App Service in resource group {resource_group}. The app service plan already exists."
     fixture: app-deploy
+    hooks:
+      before_run: scripts/reset-environment.sh
     evaluators:
       - name: deployment_approach
         type: judge
@@ -76,8 +80,7 @@ tasks:
   - name: diagnostics
     prompt: "There is an App Service in resource group {resource_group} that seems to be having issues. Find it, diagnose the application health, and check for any errors or warnings in the logs."
     hooks:
-      before_run: scripts/inject-error.sh
-      after_run: scripts/restore-app.sh
+      before_run: scripts/reset-environment.sh
     evaluators:
       - name: diagnostic_depth
         type: judge
