@@ -18,6 +18,7 @@ class RunnerConfig:
     parallel: str = "off"  # off | per_task | full
     max_workers: int = 8
     output_format: str = "text"
+    capture_content: bool = True
     container_image_base: str = "copilot-eval"
     copilot_version: str = "1.0.18"
     otel_endpoint: str = "http://host.docker.internal:4318"

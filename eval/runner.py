@@ -82,6 +82,7 @@ def run_one(
         "--env-file", str(config.env_file),
         "-e", f"GITHUB_TOKEN={github_token}",
         "-e", "COPILOT_OTEL_ENABLED=true",
+        "-e", f"COPILOT_OTEL_CAPTURE_CONTENT={'true' if config.runner.capture_content else 'false'}",
         "-e", f"OTEL_EXPORTER_OTLP_ENDPOINT={config.runner.otel_endpoint}",
         "-e", f"OTEL_RESOURCE_ATTRIBUTES={otel_attrs}",
         "-e", "OTEL_SERVICE_NAME=github-copilot",
