@@ -125,14 +125,20 @@ def run_one(
             cmd.extend(["-e", "EVAL_SETUP_SCRIPT=/tmp/eval-setup.sh"])
 
     copilot_args = ["copilot", "-p", prompt, "--yolo"]
-    if config.runner.model:
-        copilot_args.extend(["--model", config.runner.model])
+    # Model: variant override > runner default
+    model = variant.model or config.runner.model
+    if model:
+        copilot_args.extend(["--model", model])
     if config.runner.reasoning_effort:
         copilot_args.extend(["--effort", config.runner.reasoning_effort])
     if config.runner.max_turns:
         copilot_args.extend(["--max-autopilot-continues", str(config.runner.max_turns)])
+    if config.runner.output_format == "json":
+        copilot_args.extend(["--output-format", "json"])
 
-    cmd.extend([image, "timeout", f"{config.runner.timeout_seconds}s", *copilot_args])
+    # Timeout: pattern override > runner default
+    timeout = pattern.timeout_seconds or config.runner.timeout_seconds
+    cmd.extend([image, "timeout", f"{timeout}s", *copilot_args])
 
     # Execute
     print("    Running copilot in container...")

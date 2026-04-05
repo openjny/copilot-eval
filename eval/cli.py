@@ -72,15 +72,30 @@ def run(pattern: str | None, epochs: int | None, dry_run: bool, config_dir: str 
     github_token = get_github_token()
     results: list[RunResult] = []
 
-    for p in patterns:
-        prompt = config.resolve_prompt(p)
-        click.echo(f"\n>>> Pattern: {p.name} ({p.type})")
-        click.echo(f">>> Prompt:  {prompt}\n")
+    if config.runner.parallel:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        for epoch in range(1, epochs + 1):
-            for variant in config.variants:
-                result = run_one(p, variant, epoch, config, run_id, run_dir, github_token)
-                results.append(result)
+        futures = []
+        with ThreadPoolExecutor(max_workers=len(config.variants)) as pool:
+            for p in patterns:
+                click.echo(f"\n>>> Pattern: {p.name} ({p.type})")
+                for epoch in range(1, epochs + 1):
+                    for variant in config.variants:
+                        futures.append(pool.submit(
+                            run_one, p, variant, epoch, config, run_id, run_dir, github_token,
+                        ))
+            for future in as_completed(futures):
+                results.append(future.result())
+    else:
+        for p in patterns:
+            prompt = config.resolve_prompt(p)
+            click.echo(f"\n>>> Pattern: {p.name} ({p.type})")
+            click.echo(f">>> Prompt:  {prompt}\n")
+
+            for epoch in range(1, epochs + 1):
+                for variant in config.variants:
+                    result = run_one(p, variant, epoch, config, run_id, run_dir, github_token)
+                    results.append(result)
 
     # Summary
     passed = sum(1 for r in results if r.result == "PASS")

@@ -11,10 +11,12 @@ import yaml
 @dataclass
 class RunnerConfig:
     epochs: int = 1
-    timeout_seconds: int = 120
+    timeout_seconds: int = 300
     model: str | None = None
-    reasoning_effort: str | None = None  # low, medium, high, xhigh
+    reasoning_effort: str | None = None
     max_turns: int | None = None
+    parallel: bool = False
+    output_format: str = "text"  # text or json (copilot --output-format)
     container_image_base: str = "copilot-eval"
     copilot_version: str = "1.0.18"
     otel_endpoint: str = "http://host.docker.internal:4318"
@@ -26,6 +28,7 @@ class Variant:
     description: str = ""
     build_script: str | None = None
     run_script: str | None = None
+    model: str | None = None  # Override runner model per variant
 
     @property
     def image_tag(self) -> str:
@@ -56,6 +59,7 @@ class Pattern:
     verify: str | None = None
     fixture: str | None = None
     reset_script: str | None = None
+    timeout_seconds: int | None = None  # Override runner timeout per pattern
     metrics: Metrics = field(default_factory=Metrics)
 
 
@@ -117,10 +121,12 @@ def load_config(config_dir: Path | None = None) -> Config:
     runner_raw = raw.get("runner", {})
     runner = RunnerConfig(
         epochs=runner_raw.get("epochs", 1),
-        timeout_seconds=runner_raw.get("timeout_seconds", 120),
+        timeout_seconds=runner_raw.get("timeout_seconds", 300),
         model=runner_raw.get("model"),
         reasoning_effort=runner_raw.get("reasoning_effort"),
         max_turns=runner_raw.get("max_turns"),
+        parallel=runner_raw.get("parallel", False),
+        output_format=runner_raw.get("output_format", "text"),
         container_image_base=runner_raw.get("container_image_base", "copilot-eval"),
         copilot_version=runner_raw.get("copilot_version", "1.0.18"),
         otel_endpoint=runner_raw.get("otel_endpoint", "http://host.docker.internal:4318"),
@@ -156,6 +162,7 @@ def _load_patterns(project_dir: Path, raw_config: dict) -> list[Pattern]:
                     verify=p.get("verify"),
                     fixture=p.get("fixture"),
                     reset_script=p.get("reset_script"),
+                    timeout_seconds=p.get("timeout_seconds"),
                     metrics=metrics,
                 ))
 
@@ -189,6 +196,7 @@ def _load_variants(project_dir: Path) -> list[Variant]:
                     description=v.get("description", ""),
                     build_script=build.get("script"),
                     run_script=run.get("script"),
+                    model=v.get("model"),
                 ))
 
     if not variants:

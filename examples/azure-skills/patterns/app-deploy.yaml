@@ -8,13 +8,13 @@ metrics:
   judges:
     - name: deployment_approach
       prompt: |
-        Rate the quality of the deployment approach on a scale of 1-5.
-        5 = Uses structured deployment workflow (prepare, validate, deploy).
+        Rate the quality of the deployment approach on a scale of 1-10.
+        10 = Uses structured deployment workflow (prepare, validate, deploy).
         1 = Just suggests raw CLI commands without structure.
         Output ONLY valid JSON: {"score": N, "reason": "..."}
     - name: completeness
       prompt: |
-        Rate how complete the deployment steps are on a scale of 1-5.
-        5 = Covers app creation, code deployment, config, and verification.
+        Rate how complete the deployment steps are on a scale of 1-10.
+        10 = Covers app creation, code deployment, config, and verification.
         1 = Only partial steps.
         Output ONLY valid JSON: {"score": N, "reason": "..."}

@@ -7,13 +7,13 @@ metrics:
   judges:
     - name: query_correctness
       prompt: |
-        Rate the correctness of the KQL queries used on a scale of 1-5.
-        5 = Valid KQL syntax, appropriate tables referenced, useful filters.
+        Rate the correctness of the KQL queries used on a scale of 1-10.
+        10 = Valid KQL syntax, appropriate tables referenced, useful filters.
         1 = Invalid syntax or wrong table names.
         Output ONLY valid JSON: {"score": N, "reason": "..."}
     - name: result_interpretation
       prompt: |
-        Rate how well the results were interpreted and presented on a scale of 1-5.
-        5 = Clear summary of findings with context and insights.
+        Rate how well the results were interpreted and presented on a scale of 1-10.
+        10 = Clear summary of findings with context and insights.
         1 = Raw data dump without interpretation.
         Output ONLY valid JSON: {"score": N, "reason": "..."}

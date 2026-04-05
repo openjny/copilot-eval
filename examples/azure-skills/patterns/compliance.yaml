@@ -7,13 +7,13 @@ metrics:
   judges:
     - name: finding_accuracy
       prompt: |
-        Rate the accuracy of security findings on a scale of 1-5.
-        5 = Identified real security concerns based on actual resource configuration.
+        Rate the accuracy of security findings on a scale of 1-10.
+        10 = Identified real security concerns based on actual resource configuration.
         1 = Generic checklist without checking actual settings.
         Output ONLY valid JSON: {"score": N, "reason": "..."}
     - name: remediation_quality
       prompt: |
-        Rate the quality of remediation suggestions on a scale of 1-5.
-        5 = Specific, actionable steps that address the identified issues.
+        Rate the quality of remediation suggestions on a scale of 1-10.
+        10 = Specific, actionable steps that address the identified issues.
         1 = Vague or generic suggestions.
         Output ONLY valid JSON: {"score": N, "reason": "..."}

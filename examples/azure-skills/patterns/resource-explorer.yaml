@@ -8,21 +8,21 @@ metrics:
   judges:
     - name: completeness
       prompt: |
-        Rate the completeness of this Azure resource listing on a scale of 1-5.
-        5 = All resources listed with their types and relationships explained.
+        Rate the completeness of this Azure resource listing on a scale of 1-10.
+        10 = All resources listed with their types and relationships explained.
         1 = Major resources missing or only names without context.
         Output ONLY valid JSON: {"score": N, "reason": "..."}
     - name: architecture_accuracy
       prompt: |
         Rate how accurately the architecture explanation captures the design patterns
-        (e.g. VNet integration, private endpoints, monitoring setup) on a scale of 1-5.
-        5 = All patterns correctly identified and explained.
+        (e.g. VNet integration, private endpoints, monitoring setup) on a scale of 1-10.
+        10 = All patterns correctly identified and explained.
         1 = Architecture description is wrong or missing.
         Output ONLY valid JSON: {"score": N, "reason": "..."}
     - name: actionability
       prompt: |
         Rate how actionable and useful this output would be for an engineer unfamiliar
-        with this Azure environment on a scale of 1-5.
-        5 = Engineer could understand and work with this environment immediately.
+        with this Azure environment on a scale of 1-10.
+        10 = Engineer could understand and work with this environment immediately.
         1 = Output is confusing or unhelpful.
         Output ONLY valid JSON: {"score": N, "reason": "..."}
