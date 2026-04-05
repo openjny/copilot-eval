@@ -1,0 +1,4 @@
+FROM copilot-eval:base
+
+# Azure CLI for baseline variant
+RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash

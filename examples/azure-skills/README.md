@@ -47,6 +47,9 @@ Diagnose an intentionally broken App Service.
 examples/azure-skills/
 ├── eval-config.yaml          # Task, variant, and evaluator definitions
 ├── .env.example              # Azure SP credentials template
+├── docker/
+│   ├── Dockerfile.baseline   # Variant: Copilot CLI + Azure CLI
+│   └── Dockerfile.azure-skills # Variant: + Azure Skills Plugin + MCP
 ├── infra/
 │   ├── main.bicep            # Baseline Azure environment (VNet, App Service, SQL, Storage, ...)
 │   └── main.bicepparam.example
@@ -59,8 +62,6 @@ examples/azure-skills/
 │       └── package.json
 └── scripts/
     ├── azure-login.sh        # SP login inside container (run script)
-    ├── build-baseline.sh     # baseline variant build (noop)
-    ├── build-azure-skills.sh # azure-skills variant build (plugin install)
     ├── reset-environment.sh  # Reset environment via Bicep Complete mode (shared hook)
     ├── prepare-diagnostics.sh # diagnostics: reset + deploy broken app
     ├── verify-compliance-audit.sh   # compliance-audit verification

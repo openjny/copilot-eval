@@ -35,6 +35,3 @@ fi
 
 # --- Execute the provided command ---
 exec "$@"
-
-# --- Execute the provided command ---
-exec "$@"

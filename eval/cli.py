@@ -153,36 +153,53 @@ def build(variant: str | None, config_dir: str | None) -> None:
         raise click.ClickException(f"Variant '{variant}' not found.")
 
     github_token = get_github_token()
-    dockerfile = config.project_dir / "docker" / "Dockerfile"
+    base_dockerfile = config.project_dir / "docker" / "Dockerfile"
+    base_image = f"{config.runner.container_image_base}:base"
+    env = {**os.environ, "DOCKER_BUILDKIT": "1", "GITHUB_TOKEN": github_token}
 
+    # Step 1: Build base image
+    click.echo(f"Building {base_image}...")
+    cmd = [
+        "docker", "build",
+        "-f", str(base_dockerfile),
+        "--build-arg", f"COPILOT_VERSION={config.runner.copilot_version}",
+        "-t", base_image,
+        str(config.project_dir),
+    ]
+    result = subprocess.run(cmd, env=env)
+    if result.returncode != 0:
+        raise click.ClickException(f"Base image build failed")
+    click.echo(f"✓ {base_image}")
+
+    # Step 2: Build variant images
     for v in variants:
         image = config.image_name(v)
         click.echo(f"Building {image}...")
 
-        build_args = [
-            "--build-arg", f"COPILOT_VERSION={config.runner.copilot_version}",
-            "--build-arg", f"VARIANT_NAME={v.name}",
-        ]
-
-        if v.build_script:
-            build_args.extend(["--build-arg", f"VARIANT_BUILD_SCRIPT={v.build_script}"])
+        if v.dockerfile:
+            df = (config.project_dir / v.dockerfile).resolve()
+        else:
+            # No Dockerfile — variant is just the base image
+            cmd = ["docker", "tag", base_image, image]
+            result = subprocess.run(cmd)
+            if result.returncode != 0:
+                raise click.ClickException(f"Tag failed for {image}")
+            click.echo(f"✓ {image} (tagged from base)")
+            continue
 
         cmd = [
             "docker", "build",
-            "-f", str(dockerfile),
-            *build_args,
+            "-f", str(df),
             "--secret", f"id=github_token,env=GITHUB_TOKEN",
             "-t", image,
             str(config.project_dir),
         ]
-
-        env = {**os.environ, "DOCKER_BUILDKIT": "1", "GITHUB_TOKEN": github_token}
         result = subprocess.run(cmd, env=env)
         if result.returncode != 0:
             raise click.ClickException(f"Build failed for {image}")
         click.echo(f"✓ {image}")
 
-    click.echo(f"\nBuilt {len(variants)} image(s).")
+    click.echo(f"\nBuilt {len(variants)} variant image(s).")
 
 
 @main.command(name="list")
@@ -202,6 +219,6 @@ def list_patterns(config_dir: str | None) -> None:
     click.echo(f"  {'Name':<25} {'Build':<8} {'Run':<8} Description")
     click.echo("  " + "-" * 75)
     for v in config.variants:
-        has_build = "✓" if v.build_script else "−"
+        has_build = "✓" if v.dockerfile else "−"
         has_run = "✓" if v.run_script else "−"
         click.echo(f"  {v.name:<25} {has_build:<8} {has_run:<8} {v.description[:40]}")

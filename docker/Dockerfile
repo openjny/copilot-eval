@@ -15,23 +15,5 @@ LABEL copilot.version=${COPILOT_VERSION}
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Variant build-time setup (optional)
-# Pass VARIANT_BUILD_SCRIPT=variants/scripts/build-xxx.sh to apply
-ARG VARIANT_BUILD_SCRIPT=
-ARG VARIANT_NAME=baseline
-COPY ${VARIANT_BUILD_SCRIPT:-docker/noop.sh} /tmp/variant-build.sh
-RUN --mount=type=secret,id=github_token \
-    if [ -n "${VARIANT_BUILD_SCRIPT}" ]; then \
-      export GITHUB_TOKEN=$(cat /run/secrets/github_token 2>/dev/null || echo "") && \
-      chmod +x /tmp/variant-build.sh && \
-      /tmp/variant-build.sh; \
-    fi && \
-    rm -f /tmp/variant-build.sh
-
-LABEL variant=${VARIANT_NAME}
-
-# Azure MCP Server requires ICU-invariant mode on slim images
-ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=true
-
 WORKDIR /workspace
 ENTRYPOINT ["/entrypoint.sh"]

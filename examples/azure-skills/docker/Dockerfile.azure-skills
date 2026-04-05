@@ -1,0 +1,10 @@
+FROM copilot-eval:base
+
+# Azure CLI
+RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+
+# Azure Skills Plugin (skills + MCP servers)
+RUN copilot plugin install microsoft/azure-skills --config-dir /root/.copilot
+
+# Azure MCP Server (@azure/mcp) is a .NET app — needs ICU-invariant mode on slim images
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=true

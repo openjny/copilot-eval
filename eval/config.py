@@ -25,7 +25,7 @@ class RunnerConfig:
 class Variant:
     name: str
     description: str = ""
-    build_script: str | None = None
+    dockerfile: str | None = None
     run_script: str | None = None
     model: str | None = None
 
@@ -183,7 +183,7 @@ def _parse_variant(v: dict, fallback_name: str = "") -> Variant:
     return Variant(
         name=v.get("name", fallback_name),
         description=v.get("description", ""),
-        build_script=build.get("script"),
+        dockerfile=build.get("dockerfile"),
         run_script=run.get("script"),
         model=v.get("model"),
     )

@@ -51,12 +51,15 @@ Image-side keys like `installed_plugins` are preserved. If the merge fails, it f
 ## Docker build
 
 ```bash
-# Build context must be project root (for COPY paths)
-docker build -f docker/Dockerfile --build-arg COPILOT_VERSION=1.0.18 \
-  --build-arg VARIANT_BUILD_SCRIPT=<path> --secret id=github_token,env=GITHUB_TOKEN .
+# Base image (shared by all variants)
+docker build -f docker/Dockerfile --build-arg COPILOT_VERSION=1.0.18 -t copilot-eval:base .
+
+# Variant image (FROM copilot-eval:base)
+docker build -f examples/azure-skills/docker/Dockerfile.azure-skills \
+  --secret id=github_token,env=GITHUB_TOKEN -t copilot-eval:azure-skills .
 ```
 
-Variant build scripts install additional tools (e.g., Azure CLI, plugins) on top of the base image.
+Each variant has its own Dockerfile that extends `copilot-eval:base` with variant-specific tools (e.g., Azure CLI, plugins, env vars).
 
 ## Dependencies
 
