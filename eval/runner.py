@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -87,9 +89,14 @@ def run_one(
     copilot_home = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot")).resolve()
     if copilot_home.is_dir():
         cmd.extend(["-v", f"{copilot_home}:/copilot-home-src:ro"])
+
+    # Writable workspace: copy fixture to tmpdir so Copilot can read AND write
+    work_dir = Path(tempfile.mkdtemp(prefix="eval-work-"))
     fixture_dir = (config.config_dir / "fixtures" / (task.fixture or task.name)).resolve()
     if fixture_dir.is_dir():
-        cmd.extend(["-v", f"{fixture_dir}:/workspace:ro"])
+        shutil.copytree(fixture_dir, work_dir, dirs_exist_ok=True)
+    cmd.extend(["-v", f"{work_dir}:/workspace"])
+
     if variant.run_script:
         rsp = (config.project_dir / variant.run_script).resolve()
         if rsp.exists():
@@ -109,14 +116,17 @@ def run_one(
     cmd.extend([image, "timeout", f"{timeout}s", *copilot_args])
 
     print("    Running copilot in container...")
-    with open(log_file, "a") as lf:
-        proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
-    _print_summary(log_file)
+    try:
+        with open(log_file, "a") as lf:
+            proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
+        _print_summary(log_file)
 
-    _run_hook(task.hooks.after_run, config, task, variant, log_file, "after_run")
+        _run_hook(task.hooks.after_run, config, task, variant, log_file, "after_run")
 
-    scores = _run_evaluators(task, variant, config, log_file, github_token)
-    _print_scores(scores)
+        scores = _run_evaluators(task, variant, config, log_file, github_token)
+        _print_scores(scores)
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
     return RunResult(
         task=task.name, variant=variant.name, epoch=epoch,
