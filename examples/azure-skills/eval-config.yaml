@@ -7,6 +7,152 @@ runner:
   timeout_seconds: 300
   model: claude-sonnet-4
   max_turns: 20
+  parallel: false
+  container_image_base: copilot-eval
+  copilot_version: "1.0.18"
+  otel_endpoint: http://host.docker.internal:4318
+
+variants:
+  - name: baseline
+    description: "Copilot CLI with Azure CLI (no plugins)"
+    build: { script: examples/azure-skills/setup/build-baseline.sh }
+    run: { script: examples/azure-skills/setup/azure-login.sh }
+
+  - name: azure-skills
+    description: "Copilot CLI with Azure Skills Plugin (microsoft/azure-skills)"
+    build: { script: examples/azure-skills/setup/build-azure-skills.sh }
+    run: { script: examples/azure-skills/setup/azure-login.sh }
+
+patterns:
+  - name: resource-explorer
+    prompt: "List all resources in resource group {resource_group} and explain the architecture"
+    evaluators:
+      - name: verify
+        type: script
+        script: scripts/verify-resource-explorer.sh
+      - name: completeness
+        type: judge
+        prompt: |
+          Rate the completeness of this Azure resource listing on a scale of 1-10.
+          10 = All resources listed with their types and relationships explained.
+          1 = Major resources missing or only names without context.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: architecture_accuracy
+        type: judge
+        prompt: |
+          Rate how accurately the architecture explanation captures the design patterns
+          (e.g. VNet integration, private endpoints, monitoring setup) on a scale of 1-10.
+          10 = All patterns correctly identified and explained.
+          1 = Architecture description is wrong or missing.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: actionability
+        type: judge
+        prompt: |
+          Rate how actionable and useful this output would be for an engineer unfamiliar
+          with this Azure environment on a scale of 1-10.
+          10 = Engineer could understand and work with this environment immediately.
+          1 = Output is confusing or unhelpful.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+
+  - name: app-deploy
+    prompt: "I have a simple Node.js Express app in the current directory. Deploy it to the existing Azure App Service in resource group {resource_group}. The app service plan already exists."
+    fixture: app-deploy
+    evaluators:
+      - name: deployment_approach
+        type: judge
+        prompt: |
+          Rate the quality of the deployment approach on a scale of 1-10.
+          10 = Uses structured deployment workflow (prepare, validate, deploy).
+          1 = Just suggests raw CLI commands without structure.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: completeness
+        type: judge
+        prompt: |
+          Rate how complete the deployment steps are on a scale of 1-10.
+          10 = Covers app creation, code deployment, config, and verification.
+          1 = Only partial steps.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+
+  - name: diagnostics
+    prompt: "There is an App Service in resource group {resource_group} that seems to be having issues. Find it, diagnose the application health, and check for any errors or warnings in the logs."
+    evaluators:
+      - name: diagnostic_depth
+        type: judge
+        prompt: |
+          Rate how deeply the diagnostics investigated the issue on a scale of 1-10.
+          10 = Checked multiple data sources (App Insights, logs, metrics, configuration).
+          1 = Only superficial checks or generic advice.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: actionability
+        type: judge
+        prompt: |
+          Rate how actionable the diagnostic findings are on a scale of 1-10.
+          10 = Specific findings with clear remediation steps.
+          1 = Vague observations without actionable next steps.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+
+  - name: cost-optimization
+    prompt: "Analyze the resources in resource group {resource_group} and suggest cost optimization opportunities. Be specific about which resources can be optimized and estimated savings."
+    evaluators:
+      - name: specificity
+        type: judge
+        prompt: |
+          Rate how specific the cost recommendations are on a scale of 1-10.
+          10 = References actual resource names, current SKUs, and specific alternatives.
+          1 = Only generic cost-saving tips without referencing actual resources.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: feasibility
+        type: judge
+        prompt: |
+          Rate how feasible and practical the recommendations are on a scale of 1-10.
+          10 = All recommendations are implementable with clear steps.
+          1 = Recommendations are impractical or would break functionality.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+
+  - name: kql-query
+    prompt: "Query the Log Analytics workspace in resource group {resource_group} to find any application traces, requests, or exceptions from the past 24 hours. Show me the results."
+    evaluators:
+      - name: query_correctness
+        type: judge
+        prompt: |
+          Rate the correctness of the KQL queries used on a scale of 1-10.
+          10 = Valid KQL syntax, appropriate tables referenced, useful filters.
+          1 = Invalid syntax or wrong table names.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: result_interpretation
+        type: judge
+        prompt: |
+          Rate how well the results were interpreted and presented on a scale of 1-10.
+          10 = Clear summary of findings with context and insights.
+          1 = Raw data dump without interpretation.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+
+  - name: compliance
+    prompt: "Check if the resources in resource group {resource_group} comply with Azure security best practices. Identify any non-compliant configurations and suggest remediations."
+    evaluators:
+      - name: finding_accuracy
+        type: judge
+        prompt: |
+          Rate the accuracy of security findings on a scale of 1-10.
+          10 = Identified real security concerns based on actual resource configuration.
+          1 = Generic checklist without checking actual settings.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: remediation_quality
+        type: judge
+        prompt: |
+          Rate the quality of remediation suggestions on a scale of 1-10.
+          10 = Specific, actionable steps that address the identified issues.
+          1 = Vague or generic suggestions.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+vars:
+  resource_group: rg-copilot-eval
+  location: southeastasia
+
+runner:
+  epochs: 1
+  timeout_seconds: 300
+  model: claude-sonnet-4
+  max_turns: 20
   container_image_base: copilot-eval
   copilot_version: "1.0.18"
   otel_endpoint: http://host.docker.internal:4318

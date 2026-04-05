@@ -3,20 +3,22 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
-from eval.config import Config, Judge, Pattern, Variant
+from eval.config import Config, Evaluator, Pattern, Variant
 
 
 @dataclass
-class JudgeScore:
+class EvalScore:
     name: str
-    score: int
-    reason: str
+    type: str
+    score: int | None
+    reason: str = ""
+    passed: bool = True
 
 
 @dataclass
@@ -27,9 +29,12 @@ class RunResult:
     test_id: str
     run_id: str
     log_file: Path
-    result: str  # "PASS" | "FAIL" | "SKIP"
     exit_code: int
-    judge_scores: list[JudgeScore] = field(default_factory=list)
+    scores: list[EvalScore] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return all(s.passed for s in self.scores) if self.scores else True
 
 
 def get_github_token() -> str:
@@ -37,67 +42,30 @@ def get_github_token() -> str:
     if token:
         return token
     try:
-        result = subprocess.run(
-            ["gh", "auth", "token"], capture_output=True, text=True, check=True,
-        )
-        return result.stdout.strip()
+        r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=True)
+        return r.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         raise RuntimeError("GITHUB_TOKEN not set and gh CLI not authenticated")
 
 
-def reset_environment(pattern: Pattern, config: Config, log_file: Path) -> None:
-    """Run the pattern's reset script before a write-type eval."""
-    reset_path = pattern.reset_script
-    if not reset_path:
-        return
-    reset_file = config.config_dir / reset_path
-    if not reset_file.exists():
-        print(f"    WARNING: {reset_file} not found, skipping reset")
-        return
-
-    print("    Running reset script...")
-    env = {**os.environ, **{f"EVAL_{k.upper()}": v for k, v in config.vars.items()}}
-    with open(log_file, "a") as lf:
-        subprocess.run(
-            ["bash", str(reset_file)],
-            stdout=lf, stderr=subprocess.STDOUT,
-            env=env,
-        )
-
-
 def run_one(
-    pattern: Pattern,
-    variant: Variant,
-    epoch: int,
-    config: Config,
-    run_id: str,
-    run_dir: Path,
-    github_token: str,
+    pattern: Pattern, variant: Variant, epoch: int,
+    config: Config, run_id: str, run_dir: Path, github_token: str,
 ) -> RunResult:
     test_id = str(uuid.uuid4())
     log_file = run_dir / f"{pattern.name}_{variant.name}_epoch{epoch}.log"
-
     print(f"--- [{pattern.name}] epoch={epoch} variant={variant.name} test_id={test_id[:8]}")
 
-    # Write pattern: reset environment before each run
-    if pattern.type == "write":
-        reset_environment(pattern, config, log_file)
+    _run_hook(pattern.hooks.before_run, config, log_file, "before_run")
 
-    # Build docker command
     prompt = config.resolve_prompt(pattern)
     image = config.image_name(variant)
-
     otel_attrs = ",".join([
-        f"eval.test_id={test_id}",
-        f"eval.scenario={pattern.name}",
-        f"eval.variant={variant.name}",
-        f"eval.epoch={epoch}",
-        f"eval.run_id={run_id}",
+        f"eval.test_id={test_id}", f"eval.scenario={pattern.name}",
+        f"eval.variant={variant.name}", f"eval.epoch={epoch}", f"eval.run_id={run_id}",
     ])
-
     cmd = [
-        "docker", "run", "--rm",
-        "--add-host=host.docker.internal:host-gateway",
+        "docker", "run", "--rm", "--add-host=host.docker.internal:host-gateway",
         "--env-file", str(config.env_file),
         "-e", f"GITHUB_TOKEN={github_token}",
         "-e", "COPILOT_OTEL_ENABLED=true",
@@ -105,27 +73,18 @@ def run_one(
         "-e", f"OTEL_RESOURCE_ATTRIBUTES={otel_attrs}",
         "-e", "OTEL_SERVICE_NAME=github-copilot",
     ]
-
-    # Mount Copilot home for auth
     copilot_home = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot")).resolve()
     if copilot_home.is_dir():
         cmd.extend(["-v", f"{copilot_home}:/copilot-home-src:ro"])
-
-    # Mount fixture if exists
-    fixture_name = pattern.fixture or pattern.name
-    fixture_dir = (config.config_dir / "fixtures" / fixture_name).resolve()
+    fixture_dir = (config.config_dir / "fixtures" / (pattern.fixture or pattern.name)).resolve()
     if fixture_dir.is_dir():
         cmd.extend(["-v", f"{fixture_dir}:/workspace:ro"])
-
-    # Mount run/setup script if variant has one
     if variant.run_script:
-        run_script_path = (config.project_dir / variant.run_script).resolve()
-        if run_script_path.exists():
-            cmd.extend(["-v", f"{run_script_path}:/tmp/eval-setup.sh:ro"])
-            cmd.extend(["-e", "EVAL_SETUP_SCRIPT=/tmp/eval-setup.sh"])
+        rsp = (config.project_dir / variant.run_script).resolve()
+        if rsp.exists():
+            cmd.extend(["-v", f"{rsp}:/tmp/eval-setup.sh:ro", "-e", "EVAL_SETUP_SCRIPT=/tmp/eval-setup.sh"])
 
     copilot_args = ["copilot", "-p", prompt, "--yolo"]
-    # Model: variant override > runner default
     model = variant.model or config.runner.model
     if model:
         copilot_args.extend(["--model", model])
@@ -135,146 +94,151 @@ def run_one(
         copilot_args.extend(["--max-autopilot-continues", str(config.runner.max_turns)])
     if config.runner.output_format == "json":
         copilot_args.extend(["--output-format", "json"])
-
-    # Timeout: pattern override > runner default
     timeout = pattern.timeout_seconds or config.runner.timeout_seconds
     cmd.extend([image, "timeout", f"{timeout}s", *copilot_args])
 
-    # Execute
     print("    Running copilot in container...")
     with open(log_file, "a") as lf:
         proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
+    _print_summary(log_file)
 
-    # Print Copilot output summary
-    _print_copilot_summary(log_file)
+    _run_hook(pattern.hooks.after_run, config, log_file, "after_run")
 
-    # Verification
-    result = _verify(pattern, config, log_file)
-    print(f"    {'✓' if result == 'PASS' else '✗' if result == 'FAIL' else '−'} {result}")
-
-    # LLM-as-Judge
-    judge_scores = _run_judges(pattern, log_file, github_token)
+    scores = _run_evaluators(pattern, config, log_file, github_token)
+    _print_scores(scores)
 
     return RunResult(
-        pattern=pattern.name,
-        variant=variant.name,
-        epoch=epoch,
-        test_id=test_id,
-        run_id=run_id,
-        log_file=log_file,
-        result=result,
-        exit_code=proc.returncode,
-        judge_scores=judge_scores,
+        pattern=pattern.name, variant=variant.name, epoch=epoch,
+        test_id=test_id, run_id=run_id, log_file=log_file,
+        exit_code=proc.returncode, scores=scores,
     )
 
 
-def _print_copilot_summary(log_file: Path) -> None:
+def _run_hook(script: str | None, config: Config, log_file: Path, label: str) -> None:
+    if not script:
+        return
+    resolved = (config.config_dir / script).resolve()
+    if not resolved.exists():
+        resolved = (config.project_dir / script).resolve()
+    if not resolved.exists():
+        print(f"    WARNING: {label} script not found: {script}")
+        return
+    print(f"    Running {label}...")
+    env = {**os.environ, **{f"EVAL_{k.upper()}": v for k, v in config.vars.items()}}
+    with open(log_file, "a") as lf:
+        subprocess.run(["bash", str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)
+
+
+def _run_evaluators(pattern: Pattern, config: Config, log_file: Path, token: str) -> list[EvalScore]:
+    scores: list[EvalScore] = []
+    for ev in pattern.evaluators:
+        s = None
+        if ev.type == "judge":
+            s = _eval_judge(ev, log_file, token)
+        elif ev.type == "script":
+            s = _eval_script(ev, config, log_file)
+        elif ev.type == "contains":
+            s = _eval_contains(ev, log_file)
+        elif ev.type == "regex":
+            s = _eval_regex(ev, log_file)
+        if s:
+            scores.append(s)
+    if scores:
+        sf = log_file.with_suffix(".scores.json")
+        sf.write_text(json.dumps(
+            [{"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed} for s in scores],
+            indent=2, ensure_ascii=False,
+        ))
+    return scores
+
+
+def _eval_judge(ev: Evaluator, log_file: Path, token: str) -> EvalScore | None:
+    if not ev.prompt:
+        return None
+    output = _read_log(log_file, max_chars=8000)
+    if not output:
+        return None
+    prompt = f"You are an eval judge. Score the following Copilot output.\n\n{ev.prompt}\n\n--- COPILOT OUTPUT ---\n{output}\n--- END OUTPUT ---\n\nOutput ONLY valid JSON: {{\"score\": N, \"reason\": \"...\"}}"
+    print(f"    Evaluating: {ev.name} (judge)...")
+    try:
+        proc = subprocess.run(
+            ["copilot", "-p", prompt, "-s"],
+            capture_output=True, text=True, timeout=60,
+            env={**os.environ, "GITHUB_TOKEN": token},
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return EvalScore(name=ev.name, type="judge", score=None, reason="timeout")
+    data = _parse_json(proc.stdout)
+    if data:
+        return EvalScore(name=ev.name, type="judge", score=int(data.get("score", 0)), reason=str(data.get("reason", "")))
+    return EvalScore(name=ev.name, type="judge", score=None, reason="parse_error")
+
+
+def _eval_script(ev: Evaluator, config: Config, log_file: Path) -> EvalScore | None:
+    if not ev.script:
+        return None
+    resolved = (config.config_dir / ev.script).resolve()
+    if not resolved.exists():
+        resolved = (config.project_dir / ev.script).resolve()
+    if not resolved.exists():
+        return None
+    print(f"    Evaluating: {ev.name} (script)...")
+    env = {**os.environ, **{f"EVAL_{k.upper()}": v for k, v in config.vars.items()}}
+    with open(log_file, "a") as lf:
+        proc = subprocess.run([str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)
+    passed = proc.returncode == 0
+    return EvalScore(name=ev.name, type="script", score=1 if passed else 0, reason="PASS" if passed else "FAIL", passed=passed)
+
+
+def _eval_contains(ev: Evaluator, log_file: Path) -> EvalScore | None:
+    if not ev.value:
+        return None
+    output = _read_log(log_file)
+    found = ev.value in (output or "")
+    return EvalScore(name=ev.name, type="contains", score=1 if found else 0, reason=f"{'found' if found else 'not found'}", passed=found)
+
+
+def _eval_regex(ev: Evaluator, log_file: Path) -> EvalScore | None:
+    if not ev.value:
+        return None
+    output = _read_log(log_file)
+    match = bool(re.search(ev.value, output or ""))
+    return EvalScore(name=ev.name, type="regex", score=1 if match else 0, reason=f"{'matched' if match else 'no match'}", passed=match)
+
+
+def _read_log(log_file: Path, max_chars: int = 0) -> str | None:
     try:
         text = log_file.read_text()
-        for line in text.splitlines():
+        return text[:max_chars] + "\n... (truncated)" if max_chars and len(text) > max_chars else text
+    except OSError:
+        return None
+
+
+def _print_summary(log_file: Path) -> None:
+    try:
+        for line in log_file.read_text().splitlines():
             if line.startswith("Total ") or line.startswith("Breakdown"):
                 print(f"    {line}")
     except OSError:
         pass
 
 
-def _verify(pattern: Pattern, config: Config, log_file: Path) -> str:
-    verify_path = pattern.verify
-    if not verify_path:
-        verify_path = f"scripts/verify-{pattern.name}.sh"
-    verify_script = config.config_dir / verify_path
-    if not verify_script.exists():
-        return "SKIP"
-
-    print("    Running verification...")
-    env = {**os.environ, **{f"EVAL_{k.upper()}": v for k, v in config.vars.items()}}
-    with open(log_file, "a") as lf:
-        proc = subprocess.run(
-            [str(verify_script)],
-            stdout=lf, stderr=subprocess.STDOUT,
-            env=env,
-        )
-    return "PASS" if proc.returncode == 0 else "FAIL"
+def _print_scores(scores: list[EvalScore]) -> None:
+    for s in scores:
+        icon = "✓" if s.passed else "✗"
+        score_str = str(s.score) if s.score is not None else "?"
+        print(f"    {icon} {s.name} ({s.type}): {score_str} — {s.reason[:50]}")
 
 
-def _run_judges(pattern: Pattern, log_file: Path, github_token: str) -> list[JudgeScore]:
-    """Run LLM-as-Judge scoring using Copilot CLI on the host."""
-    judges = pattern.metrics.judges
-    if not judges:
-        return []
-
-    try:
-        output = log_file.read_text()
-    except OSError:
-        return []
-
-    scores: list[JudgeScore] = []
-    for judge in judges:
-        print(f"    Judging: {judge.name}...")
-        score = _run_one_judge(judge, output, github_token)
-        if score:
-            scores.append(score)
-            print(f"    → {judge.name}: {score.score}/5 ({score.reason[:50]})")
-
-    # Save judge results alongside log
-    if scores:
-        judge_file = log_file.with_suffix(".judges.json")
-        judge_file.write_text(json.dumps([
-            {"name": s.name, "score": s.score, "reason": s.reason} for s in scores
-        ], indent=2, ensure_ascii=False))
-
-    return scores
-
-
-def _run_one_judge(judge: Judge, eval_output: str, github_token: str) -> JudgeScore | None:
-    """Call Copilot CLI to judge a single aspect."""
-    # Truncate output to avoid token limits
-    max_chars = 8000
-    if len(eval_output) > max_chars:
-        eval_output = eval_output[:max_chars] + "\n... (truncated)"
-
-    prompt = f"""You are an eval judge. Score the following Copilot output.
-
-{judge.prompt}
-
---- COPILOT OUTPUT ---
-{eval_output}
---- END OUTPUT ---
-
-Output ONLY valid JSON: {{"score": N, "reason": "..."}}"""
-
-    env = {**os.environ, "GITHUB_TOKEN": github_token}
-    proc = subprocess.run(
-        ["copilot", "-p", prompt, "-s"],
-        capture_output=True, text=True, timeout=60, env=env,
-    )
-
-    if proc.returncode != 0:
-        return None
-
-    # Parse JSON from output
-    text = proc.stdout.strip()
-    # Find JSON in output (may have markdown wrapping)
-    for line in text.splitlines():
+def _parse_json(text: str) -> dict | None:
+    for line in text.strip().splitlines():
         line = line.strip()
         if line.startswith("{") and line.endswith("}"):
             try:
-                data = json.loads(line)
-                return JudgeScore(
-                    name=judge.name,
-                    score=int(data.get("score", 0)),
-                    reason=str(data.get("reason", "")),
-                )
-            except (json.JSONDecodeError, ValueError):
+                return json.loads(line)
+            except json.JSONDecodeError:
                 continue
-
-    # Try parsing entire output as JSON
     try:
-        data = json.loads(text)
-        return JudgeScore(
-            name=judge.name,
-            score=int(data.get("score", 0)),
-            reason=str(data.get("reason", "")),
-        )
+        return json.loads(text.strip())
     except (json.JSONDecodeError, ValueError):
         return None

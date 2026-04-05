@@ -62,7 +62,7 @@ def run(pattern: str | None, epochs: int | None, dry_run: bool, config_dir: str 
         click.echo(f"   - {v.name}")
     click.echo(f" Patterns:")
     for p in patterns:
-        click.echo(f"   - {p.name} ({p.type})")
+        click.echo(f"   - {p.name}")
     click.echo("=" * 50)
 
     if dry_run:
@@ -78,7 +78,7 @@ def run(pattern: str | None, epochs: int | None, dry_run: bool, config_dir: str 
         futures = []
         with ThreadPoolExecutor(max_workers=len(config.variants)) as pool:
             for p in patterns:
-                click.echo(f"\n>>> Pattern: {p.name} ({p.type})")
+                click.echo(f"\n>>> Pattern: {p.name}")
                 for epoch in range(1, epochs + 1):
                     for variant in config.variants:
                         futures.append(pool.submit(
@@ -89,7 +89,7 @@ def run(pattern: str | None, epochs: int | None, dry_run: bool, config_dir: str 
     else:
         for p in patterns:
             prompt = config.resolve_prompt(p)
-            click.echo(f"\n>>> Pattern: {p.name} ({p.type})")
+            click.echo(f"\n>>> Pattern: {p.name}")
             click.echo(f">>> Prompt:  {prompt}\n")
 
             for epoch in range(1, epochs + 1):
@@ -192,11 +192,11 @@ def list_patterns(config_dir: str | None) -> None:
     config = load_config(Path(config_dir) if config_dir else None)
 
     click.echo("Patterns:")
-    click.echo(f"  {'Name':<25} {'Type':<8} {'Enabled':<8} Prompt")
+    click.echo(f"  {'Name':<25} {'Enabled':<8} {'Evals':>5} Prompt")
     click.echo("  " + "-" * 75)
     for p in config.patterns:
         prompt_preview = p.prompt[:40] + "..." if len(p.prompt) > 40 else p.prompt
-        click.echo(f"  {p.name:<25} {p.type:<8} {'✓' if p.enabled else '−':<8} {prompt_preview}")
+        click.echo(f"  {p.name:<25} {'✓' if p.enabled else '−':<8} {len(p.evaluators):>5} {prompt_preview}")
 
     click.echo(f"\nVariants:")
     click.echo(f"  {'Name':<25} {'Build':<8} {'Run':<8} Description")

@@ -1,6 +1,0 @@
-name: azure-skills
-description: "Copilot CLI with Azure Skills Plugin (microsoft/azure-skills)"
-build:
-  script: examples/azure-skills/variants/scripts/build-azure-skills.sh
-run:
-  script: examples/azure-skills/setup/azure-login.sh

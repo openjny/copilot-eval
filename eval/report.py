@@ -162,34 +162,41 @@ def _calc_delta(means: dict[str, float], variants: list[str]) -> str:
 
 
 def _load_judge_scores(results_dir: Path, variants: list[str]) -> list[SummaryRow]:
-    judge_data: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+    score_data: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
     if not results_dir or not results_dir.exists():
         return []
-    for jf in results_dir.glob("*.judges.json"):
-        stem = jf.stem.replace(".judges", "")
-        parts = stem.rsplit("_epoch", 1)
-        if len(parts) < 2:
-            continue
-        name_variant = parts[0]
-        variant = next((v for v in variants if name_variant.endswith(f"_{v}")), None)
-        if not variant:
-            continue
-        try:
-            for s in json.loads(jf.read_text()):
-                judge_data[variant][s["name"]].append(s["score"])
-        except (json.JSONDecodeError, KeyError):
-            continue
-    if not judge_data:
+    # Support both .scores.json (new) and .judges.json (legacy)
+    for pattern in ["*.scores.json", "*.judges.json"]:
+        for jf in results_dir.glob(pattern):
+            stem = jf.stem.replace(".scores", "").replace(".judges", "")
+            parts = stem.rsplit("_epoch", 1)
+            if len(parts) < 2:
+                continue
+            name_variant = parts[0]
+            variant = next((v for v in variants if name_variant.endswith(f"_{v}")), None)
+            if not variant:
+                continue
+            try:
+                for s in json.loads(jf.read_text()):
+                    if s.get("score") is not None:
+                        score_data[variant][s["name"]].append(s["score"])
+            except (json.JSONDecodeError, KeyError):
+                continue
+    if not score_data:
         return []
-    all_names = set()
-    for v_data in judge_data.values():
+    all_names: set[str] = set()
+    for v_data in score_data.values():
         all_names.update(v_data.keys())
+
+    def _mean(vals: list[int]) -> float:
+        return sum(vals) / len(vals) if vals else 0
+
     return [
         SummaryRow(
             metric=name,
-            values={v: (sum(judge_data.get(v, {}).get(name, [])) / len(judge_data.get(v, {}).get(name, [1]))) for v in variants},
+            values={v: _mean(score_data.get(v, {}).get(name, [])) for v in variants},
             delta=_calc_delta(
-                {v: (sum(judge_data.get(v, {}).get(name, [])) / len(judge_data.get(v, {}).get(name, [1]))) for v in variants},
+                {v: _mean(score_data.get(v, {}).get(name, [])) for v in variants},
                 variants,
             ),
         )
