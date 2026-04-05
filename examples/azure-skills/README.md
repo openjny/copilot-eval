@@ -157,7 +157,7 @@ Each Copilot CLI execution runs in an isolated Docker container. Containers are 
 
 Full eval run: 3 tasks × 2 variants × 3 epochs = 18 runs (model: claude-sonnet-4, run-id: `20260405-212819`).
 
-### compliance-audit
+### Task: compliance-audit
 
 | Metric | azure-skills | baseline | Delta |
 |--------|--------:|--------:|------:|
@@ -179,7 +179,7 @@ Tool patterns: azure-skills uses `azure-extension_azqr` for bulk security review
 
 **Takeaway**: baseline's per-resource `az` CLI inspection is more thorough. azure-skills' MCP bulk tools miss granular settings.
 
-### app-deploy
+### Task: app-deploy
 
 | Metric | azure-skills | baseline | Delta |
 |--------|--------:|--------:|------:|
@@ -200,7 +200,7 @@ Tool patterns: azure-skills uses `azure-appservice` MCP tool for deploy. baselin
 
 **Takeaway**: azure-skills is dramatically faster (130s vs 296s, 10× faster tool execution) with structured deploy workflow. However, baseline actually verifies deployment (7 vs 1). Neither achieves `verify` PASS consistently.
 
-### diagnostics
+### Task: diagnostics
 
 | Metric | azure-skills | baseline | Delta |
 |--------|--------:|--------:|------:|

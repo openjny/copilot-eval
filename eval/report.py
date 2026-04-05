@@ -26,7 +26,8 @@ class Report:
     judge_scores: list[SummaryRow] = field(default_factory=list)
 
 
-def build_report(results: list[RunMetrics], results_dir: Path | None = None) -> list[Report]:
+def build_report(results: list[RunMetrics], results_dir: Path | None = None,
+                 variant_order: list[str] | None = None) -> list[Report]:
     """Build per-task A/B comparison reports."""
     if not results:
         return []
@@ -44,7 +45,12 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None) -> 
         by_variant: dict[str, list[RunMetrics]] = defaultdict(list)
         for r in task_runs:
             by_variant[r.variant].append(r)
-        variants = sorted(by_variant.keys())
+
+        # Use config order if provided, otherwise preserve insertion order
+        if variant_order:
+            variants = [v for v in variant_order if v in by_variant]
+        else:
+            variants = list(by_variant.keys())
 
         summary = []
         for label, key in _METRIC_DEFS:
@@ -155,6 +161,11 @@ def format_markdown(reports: list[Report]) -> str:
         for row in report.summary:
             cols = "".join(f" {row.values.get(v, 0):.1f} |" for v in report.variants)
             lines.append(f"| {row.metric} |{cols} {row.delta} |")
+        lines.append("\n### Tool Usage\n")
+        for v in report.variants:
+            tools = report.tool_patterns.get(v, {})
+            top = sorted(tools.items(), key=lambda x: -x[1])[:10]
+            lines.append(f"**{v}**: " + ", ".join(f"`{t}`({n})" for t, n in top))
         if report.judge_scores:
             lines.append("\n### Judge Scores\n")
             lines.append("| Judge |" + "".join(f" {v} |" for v in report.variants) + " Delta |")

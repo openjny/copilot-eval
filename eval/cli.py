@@ -134,7 +134,8 @@ def analyze(run_id: str, output: str, jaeger_url: str | None, config_dir: str | 
         return
 
     results_dir = config.results_dir / run_id
-    reports = build_report(metrics, results_dir if results_dir.exists() else None)
+    variant_order = [v.name for v in config.variants]
+    reports = build_report(metrics, results_dir if results_dir.exists() else None, variant_order)
     if not reports:
         click.echo("No reports generated.", err=True)
         return
