@@ -28,10 +28,19 @@ tasks:
       - name: thoroughness
         type: judge
         prompt: |
-          Rate how thorough the code review is on a scale of 1-10.
-          10 = Found all bugs, security issues, and improvement opportunities with specific line references.
-          5 = Found some issues but missed major ones.
-          1 = Superficial or generic advice without specific findings.
+          The code has these known issues:
+          1. CRITICAL: eval() with user input in /search endpoint (line 36) — arbitrary code execution
+          2. HIGH: Plaintext password storage (line 15) — no hashing
+          3. HIGH: Password exposed in GET /users/:id response (line 23)
+          4. HIGH: No authentication on DELETE /users/:id (line 27) — anyone can delete users
+          5. MEDIUM: No rate limiting (noted in TODO, line 5)
+          6. MEDIUM: No input validation on POST /users (line 12)
+          7. LOW: In-memory storage (users object) — no persistence
+          Rate how many of these 7 issues the review identified on a scale of 1-10.
+          10 = All 7 issues found with correct descriptions.
+          7 = 5-6 issues found.
+          4 = 3-4 issues found.
+          1 = 0-2 issues found.
           Output ONLY valid JSON: {"score": N, "reason": "..."}
       - name: actionability
         type: judge
@@ -49,10 +58,17 @@ tasks:
       - name: completeness
         type: judge
         prompt: |
-          Rate how completely the architecture is explained on a scale of 1-10.
-          10 = All major components, patterns, and data flow explained clearly.
-          5 = Some components covered but significant gaps.
-          1 = Barely any architectural explanation.
+          The code is a Node.js Express REST API with these components:
+          1. Express app setup with JSON body parser (line 1-6)
+          2. In-memory user store with auto-incrementing ID (line 8-9)
+          3. CRUD endpoints: POST /users, GET /users/:id, DELETE /users/:id
+          4. Search endpoint: GET /search with query parameter
+          5. Server listener on configurable PORT (line 43)
+          Rate how completely these components and their data flow are explained on a scale of 1-10.
+          10 = All 5 components described with how they interact.
+          7 = 3-4 components described.
+          4 = Only 1-2 components mentioned.
+          1 = No meaningful architecture explanation.
           Output ONLY valid JSON: {"score": N, "reason": "..."}
       - name: clarity
         type: judge
