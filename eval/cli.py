@@ -9,7 +9,7 @@ import click
 
 from eval.config import Task, load_config
 from eval.runner import RunResult, get_github_token, run_one
-from eval.trace import extract_metrics, fetch_traces, filter_by_run
+from eval.trace import RunMetrics, extract_metrics, fetch_traces, filter_by_run
 from eval.report import build_report, format_table, format_json, format_markdown
 
 
@@ -137,8 +137,7 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None, co
     traces = fetch_traces(jaeger)
     traces = filter_by_run(traces, run_id)
 
-    metrics = [extract_metrics(t) for t in traces]
-    metrics = [m for m in metrics if m is not None]
+    metrics: list[RunMetrics] = [m for m in (extract_metrics(t) for t in traces) if m is not None]
 
     if not metrics:
         click.echo("No traces found for this run ID.", err=True)
