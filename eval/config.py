@@ -12,7 +12,7 @@ class RunnerConfig:
     epochs: int = 1
     timeout_seconds: int = 300
     model: str | None = None
-    judge_model: str | None = None
+    judge_model: str | None = "gpt-4.1"
     reasoning_effort: str | None = None
     max_turns: int | None = None
     parallel: str = "off"  # off | per_task | full

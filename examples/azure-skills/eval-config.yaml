@@ -4,8 +4,7 @@ vars:
 runner:
   epochs: 3
   timeout_seconds: 300
-  moel: claude-haiku-4.6
-  judge_model: claude-sonnet-4.6
+  model: claude-haiku-4.6
   max_turns: 20
   parallel: per_task
   max_workers: 3

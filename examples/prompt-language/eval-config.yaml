@@ -4,7 +4,6 @@ runner:
   epochs: 3
   timeout_seconds: 120
   model: gpt-5.4-mini
-  judge_model: claude-sonnet-4.6
   max_turns: 10
   parallel: full
   max_workers: 6
