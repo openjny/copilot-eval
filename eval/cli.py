@@ -51,8 +51,9 @@ def main() -> None:
 @click.option("--task", "-p", default=None, help="Run a specific task (overrides enabled flag)")
 @click.option("--epochs", "-n", default=None, type=int, help="Number of epochs (default: from config, typically 1)")
 @click.option("--dry-run", is_flag=True, help="Show plan without executing")
+@click.option("--no-build", is_flag=True, help="Skip auto-build of Docker images")
 @click.option("--config-dir", default=None, type=click.Path(exists=True), help="Project directory")
-def run(task: str | None, epochs: int | None, dry_run: bool, config_dir: str | None) -> None:
+def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, config_dir: str | None) -> None:
     """Run A/B eval for one or more tasks."""
     config = load_config(Path(config_dir) if config_dir else None)
     epochs = epochs or config.runner.epochs
@@ -100,6 +101,8 @@ def run(task: str | None, epochs: int | None, dry_run: bool, config_dir: str | N
 
     _ensure_jaeger(config)
     github_token = get_github_token()
+    if not no_build:
+        _ensure_images(config, github_token)
     results: list[RunResult] = []
 
     if config.runner.parallel == "full":
@@ -148,7 +151,10 @@ def run(task: str | None, epochs: int | None, dry_run: bool, config_dir: str | N
     click.echo(f" Run complete: {run_id}")
     click.echo(f" Results: {passed} passed, {failed} failed")
     click.echo(f" Jaeger:  http://localhost:16686")
-    click.echo(f" Analyze: python -m eval analyze --run-id {run_id}")
+    analyze_cmd = f"uv run copilot-eval analyze --run-id {run_id}"
+    if config_dir:
+        analyze_cmd += f" --config-dir {config_dir}"
+    click.echo(f" Analyze: {analyze_cmd}")
     click.echo("=" * 50)
 
 
@@ -322,8 +328,6 @@ def _read_output_files_from_dir(output_dir: Path, max_chars: int = 8000) -> str 
 @click.option("--config-dir", default=None, type=click.Path(exists=True))
 def build(variant: str | None, config_dir: str | None) -> None:
     """Build Docker images for all (or specific) variants."""
-    import subprocess
-
     config = load_config(Path(config_dir) if config_dir else None)
     variants = [config.get_variant(variant)] if variant else config.variants
     variants = [v for v in variants if v is not None]
@@ -332,9 +336,14 @@ def build(variant: str | None, config_dir: str | None) -> None:
         raise click.ClickException(f"Variant '{variant}' not found.")
 
     github_token = get_github_token()
+    _build_images(config, variants, github_token)
+
+
+def _build_images(config: Config, variants: list, token: str) -> None:
+    """Build base + variant Docker images."""
     base_dockerfile = config.project_dir / "docker" / "Dockerfile"
     base_image = f"{config.runner.container_image_base}:base"
-    env = {**os.environ, "DOCKER_BUILDKIT": "1", "GITHUB_TOKEN": github_token}
+    env = {**os.environ, "DOCKER_BUILDKIT": "1", "GITHUB_TOKEN": token}
 
     # Step 1: Build base image
     click.echo(f"Building {base_image}...")
@@ -379,6 +388,32 @@ def build(variant: str | None, config_dir: str | None) -> None:
         click.echo(f"✓ {image}")
 
     click.echo(f"\nBuilt {len(variants)} variant image(s).")
+
+
+def _ensure_images(config: Config, token: str) -> None:
+    """Check if Docker images exist for all variants, build if missing."""
+    missing = []
+    base_image = f"{config.runner.container_image_base}:base"
+
+    # Check base image
+    result = subprocess.run(["docker", "image", "inspect", base_image],
+                           capture_output=True)
+    if result.returncode != 0:
+        missing.append("base")
+
+    # Check variant images
+    for v in config.variants:
+        image = config.image_name(v)
+        result = subprocess.run(["docker", "image", "inspect", image],
+                               capture_output=True)
+        if result.returncode != 0:
+            missing.append(v.name)
+
+    if not missing:
+        return
+
+    click.echo(f"Missing images: {', '.join(missing)}. Building...", err=True)
+    _build_images(config, config.variants, token)
 
 
 @main.command(name="list")

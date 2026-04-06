@@ -17,9 +17,6 @@ cp .env.example .env    # Configure credentials
 ### Try the prompt-language example
 
 ```bash
-# Build images
-uv run copilot-eval build --config-dir examples/prompt-language
-
 # Run eval (2 tasks × 2 variants × 3 epochs = 12 runs, ~2 min)
 uv run copilot-eval run --config-dir examples/prompt-language
 
