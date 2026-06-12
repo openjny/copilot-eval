@@ -59,9 +59,15 @@ class RunMetrics:
     cost: str
 
 
-def fetch_traces(jaeger_url: str, service: str = "github-copilot", limit: int = 50) -> list[Trace]:
+def fetch_traces(jaeger_url: str, service: str = "github-copilot", limit: int = 2000,
+                 run_id: str | None = None) -> list[Trace]:
     url = f"{jaeger_url}/api/traces"
-    resp = requests.get(url, params={"service": service, "limit": limit}, timeout=10)
+    params: dict[str, str | int] = {"service": service, "limit": limit}
+    # Server-side filter by run_id (stored as a process/resource tag) so large
+    # runs and late-arriving traces aren't silently dropped by a small limit.
+    if run_id:
+        params["tags"] = json.dumps({"eval.run_id": run_id})
+    resp = requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
     data = resp.json()
 
