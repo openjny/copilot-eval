@@ -109,7 +109,7 @@ def run_one(
     cmd = [
         "docker", "run", "--rm", "--add-host=host.docker.internal:host-gateway",
         "--env-file", str(config.env_file),
-        "-e", f"GITHUB_TOKEN={github_token}",
+        "-e", "GITHUB_TOKEN",
         "-e", "COPILOT_OTEL_ENABLED=true",
         "-e", f"COPILOT_OTEL_CAPTURE_CONTENT={'true' if config.runner.capture_content else 'false'}",
         "-e", f"OTEL_EXPORTER_OTLP_ENDPOINT={config.runner.otel_endpoint}",
@@ -148,9 +148,13 @@ def run_one(
     cmd.extend([image, "timeout", f"{timeout}s", *copilot_args])
 
     print("    Running copilot in container...")
+    # Pass GITHUB_TOKEN through the process environment rather than embedding the
+    # value in argv, so it does not leak via `ps` / process-args listings.
+    # (Residual exposure via `docker inspect` requires Docker socket access.)
+    run_env = {**os.environ, "GITHUB_TOKEN": github_token}
     try:
         with open(log_file, "a") as lf:
-            proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
+            proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=run_env)
         _print_summary(log_file)
 
         _run_hook(task.hooks.after_run, config, task, variant, log_file, "after_run")
@@ -244,19 +248,23 @@ def _run_evaluators(task: Task, variant: Variant, config: Config, log_file: Path
     return scores
 
 
-def _eval_judge(ev: Evaluator, config: Config, log_file: Path, token: str, work_dir: Path | None = None) -> EvalScore | None:
-    if not ev.prompt:
-        return None
-    output = _read_log(log_file, max_chars=8000)
-    if not output:
-        return None
-    # Build judge prompt with conversation output + output files
-    sections = [f"--- COPILOT OUTPUT ---\n{output}\n--- END OUTPUT ---"]
-    output_files = _read_output_files(work_dir, max_chars=8000)
-    if output_files:
-        sections.append(f"--- OUTPUT FILES ---\n{output_files}\n--- END FILES ---")
-    prompt = f"You are an eval judge. Score the following Copilot output.\n\n{ev.prompt}\n\n{'\n\n'.join(sections)}\n\nOutput ONLY valid JSON: {{\"score\": N, \"reason\": \"...\"}}"
-    print(f"    Evaluating: {ev.name} (judge)...")
+def run_judge(ev: Evaluator, conversation: str, config: Config, token: str,
+              output_files_text: str | None = None) -> EvalScore:
+    """Run a single judge evaluator against captured conversation + output files.
+
+    Shared by the `analyze` command. Builds the judge prompt, invokes Copilot
+    (with OTel disabled so judge calls don't contaminate eval traces), and parses
+    the JSON verdict.
+    """
+    sections = [f"--- COPILOT OUTPUT ---\n{conversation}\n--- END OUTPUT ---"]
+    if output_files_text:
+        sections.append(f"--- OUTPUT FILES ---\n{output_files_text}\n--- END FILES ---")
+    prompt = (
+        f"You are an eval judge. Score the following Copilot output.\n\n"
+        f"{ev.prompt}\n\n"
+        f"{chr(10).join(sections)}\n\n"
+        f'Output ONLY valid JSON: {{"score": N, "reason": "..."}}'
+    )
     cmd = ["copilot", "-p", prompt, "-s"]
     if config.runner.judge_model:
         cmd.extend(["--model", config.runner.judge_model])
@@ -266,7 +274,7 @@ def _eval_judge(ev: Evaluator, config: Config, log_file: Path, token: str, work_
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=judge_env)
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return EvalScore(name=ev.name, type="judge", score=None, reason="timeout")
-    data = _parse_json(proc.stdout)
+    data = _parse_json(proc.stdout, require_keys=("score",))
     if data:
         return EvalScore(name=ev.name, type="judge", score=int(data.get("score", 0)), reason=str(data.get("reason", "")))
     return EvalScore(name=ev.name, type="judge", score=None, reason="parse_error")
@@ -305,19 +313,16 @@ def _eval_regex(ev: Evaluator, log_file: Path) -> EvalScore | None:
     return EvalScore(name=ev.name, type="regex", score=1 if match else 0, reason=f"{'matched' if match else 'no match'}", passed=match)
 
 
-def _read_output_files(work_dir: Path | None, max_chars: int = 8000) -> str | None:
-    """Read all files from work_dir/output/ and return as a concatenated string."""
-    if not work_dir:
-        return None
-    output_dir = work_dir / "output"
-    if not output_dir.is_dir():
+def read_files_from_dir(directory: Path | None, max_chars: int = 8000) -> str | None:
+    """Read all files under a directory, concatenated with per-file headers."""
+    if not directory or not directory.is_dir():
         return None
     parts: list[str] = []
     total = 0
-    for f in sorted(output_dir.rglob("*")):
+    for f in sorted(directory.rglob("*")):
         if not f.is_file():
             continue
-        rel = f.relative_to(output_dir)
+        rel = f.relative_to(directory)
         try:
             content = f.read_text(errors="replace")
         except OSError:
@@ -330,6 +335,13 @@ def _read_output_files(work_dir: Path | None, max_chars: int = 8000) -> str | No
         parts.append(f"=== {rel} ===\n{content}")
         total += len(content)
     return "\n\n".join(parts) if parts else None
+
+
+def _read_output_files(work_dir: Path | None, max_chars: int = 8000) -> str | None:
+    """Read all files from work_dir/output/ and return as a concatenated string."""
+    if not work_dir:
+        return None
+    return read_files_from_dir(work_dir / "output", max_chars)
 
 
 def _read_log(log_file: Path, max_chars: int = 0) -> str | None:
@@ -356,18 +368,46 @@ def _print_scores(scores: list[EvalScore]) -> None:
         print(f"    {icon} {s.name} ({s.type}): {score_str} — {s.reason[:50]}")
 
 
-def _parse_json(text: str) -> dict | None:
-    for line in text.strip().splitlines():
+def _parse_json(text: str, require_keys: tuple[str, ...] | None = None) -> dict | None:
+    """Extract a JSON object from possibly noisy LLM output.
+
+    Handles single-line JSON, whole-text JSON, markdown code fences, and
+    multiline JSON objects embedded in surrounding prose. When ``require_keys``
+    is given, only a parsed object containing all of those keys is accepted, so
+    stray JSON fragments don't masquerade as a valid result.
+    """
+    if not text:
+        return None
+    stripped = text.strip()
+
+    candidates: list[str] = []
+    # Markdown code fence (```json ... ``` or ``` ... ```)
+    fence = re.search(r"```(?:json)?\s*(.*?)```", stripped, re.DOTALL | re.IGNORECASE)
+    if fence:
+        candidates.append(fence.group(1).strip())
+    # Whole text
+    candidates.append(stripped)
+    # First brace .. last brace (multiline object embedded in prose)
+    start, end = stripped.find("{"), stripped.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(stripped[start:end + 1])
+    # Single-line JSON objects
+    for line in stripped.splitlines():
         line = line.strip()
         if line.startswith("{") and line.endswith("}"):
-            try:
-                return json.loads(line)
-            except json.JSONDecodeError:
-                continue
-    try:
-        return json.loads(text.strip())
-    except (json.JSONDecodeError, ValueError):
-        return None
+            candidates.append(line)
+
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if require_keys and not all(k in data for k in require_keys):
+            continue
+        return data
+    return None
 
 
 def _load_env_file(env_file: Path) -> dict[str, str]:

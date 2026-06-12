@@ -14,6 +14,7 @@ class Span:
     duration_s: float
     span_id: str
     parent_id: str | None
+    start_time: int = 0  # Jaeger startTime in microseconds
     tags: dict[str, str | int] = field(default_factory=dict)
 
 
@@ -90,6 +91,7 @@ def fetch_traces(jaeger_url: str, service: str = "github-copilot", limit: int = 
                 duration_s=s["duration"] / 1_000_000,
                 span_id=s["spanID"],
                 parent_id=parent_id,
+                start_time=s.get("startTime", 0),
                 tags=span_tags,
             ))
         traces.append(Trace(trace_id=t["traceID"], spans=spans, resource_tags=resource_tags))
@@ -144,7 +146,7 @@ def extract_conversation(trace: Trace, max_chars: int = 8000) -> str | None:
 
     parts: list[str] = []
     total = 0
-    for span in sorted(chats, key=lambda s: s.span_id):
+    for span in sorted(chats, key=lambda s: (s.start_time, s.span_id)):
         # Output messages (assistant responses + tool calls)
         output_raw = span.tags.get("gen_ai.output.messages")
         if output_raw:

@@ -33,6 +33,7 @@ class RunnerConfig:
     container_image_base: str = "copilot-eval"
     copilot_version: str = "1.0.18"
     otel_endpoint: str = "http://host.docker.internal:4318"
+    jaeger_url: str = "http://localhost:16686"
     # analyze: how many traces to request from Jaeger, and how long to wait
     # for ingestion to catch up with the expected set of runs.
     trace_fetch_limit: int = 2000
@@ -182,7 +183,7 @@ def _build_runner(runner_raw: dict) -> RunnerConfig:
         epochs=epochs,
         timeout_seconds=timeout_seconds,
         model=runner_raw.get("model"),
-        judge_model=runner_raw.get("judge_model"),
+        judge_model=runner_raw.get("judge_model", "gpt-4.1"),
         reasoning_effort=runner_raw.get("reasoning_effort"),
         max_turns=max_turns,
         parallel=parallel,
@@ -192,6 +193,7 @@ def _build_runner(runner_raw: dict) -> RunnerConfig:
         container_image_base=runner_raw.get("container_image_base", "copilot-eval"),
         copilot_version=runner_raw.get("copilot_version", "1.0.18"),
         otel_endpoint=runner_raw.get("otel_endpoint", "http://host.docker.internal:4318"),
+        jaeger_url=runner_raw.get("jaeger_url", "http://localhost:16686"),
         trace_fetch_limit=trace_fetch_limit,
         trace_fetch_retries=trace_fetch_retries,
         trace_fetch_retry_delay=trace_fetch_retry_delay,

@@ -18,9 +18,11 @@ runner:
   parallel: off                  # off | per_task | full
   max_workers: 8                 # Max concurrent runs (for parallel modes)
   output_format: text            # text | json
+  capture_content: true          # Capture prompt/response content in OTel spans (needed by judge)
   container_image_base: copilot-eval
   copilot_version: "1.0.18"
-  otel_endpoint: http://host.docker.internal:4318
+  otel_endpoint: http://host.docker.internal:4318   # OTLP collector endpoint (inside container)
+  jaeger_url: http://localhost:16686                # Jaeger query UI/API (host side)
   trace_fetch_limit: 2000        # analyze: max traces to request from Jaeger
   trace_fetch_retries: 5         # analyze: attempts to wait for trace ingestion
   trace_fetch_retry_delay: 2.0   # analyze: seconds between ingestion retries
