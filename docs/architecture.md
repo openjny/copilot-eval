@@ -33,7 +33,6 @@ sequenceDiagram
     participant Runner as runner.py
     participant Docker as Container
     participant Jaeger as Jaeger
-    participant Judge as Judge LLM
 
     CLI->>Runner: run_one(task, variant, epoch)
     Runner->>Runner: before_run hook
@@ -45,10 +44,27 @@ sequenceDiagram
     Docker->>Jaeger: OTel spans (OTLP)
     Docker-->>Runner: exit + log file
     Runner->>Runner: after_run hook
-    Runner->>Judge: _eval_judge (log + output files)
-    Judge-->>Runner: {"score": N, "reason": "..."}
+    Runner->>Runner: persist output files + non-judge evaluators (script/contains/regex)
     Runner->>Runner: Cleanup tmpdir
     Runner-->>CLI: RunResult
+```
+
+Judge (LLM-as-Judge) evaluators do **not** run during `run`. They run later in
+`copilot-eval analyze`, which fetches traces, reconstructs the conversation, and
+scores it:
+
+```mermaid
+sequenceDiagram
+    participant CLI as copilot-eval analyze
+    participant Jaeger as Jaeger
+    participant Trace as trace.py
+    participant Judge as Judge LLM
+
+    CLI->>Jaeger: fetch_traces + filter_by_run
+    CLI->>Trace: extract_conversation (chronological by startTime)
+    CLI->>Judge: run_judge (conversation + output files)
+    Judge-->>CLI: {"score": N, "reason": "..."}
+    CLI->>CLI: merge with existing scores → A/B report
 ```
 
 ## Docker Design

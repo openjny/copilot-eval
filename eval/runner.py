@@ -244,7 +244,7 @@ def run_judge(ev: Evaluator, conversation: str, config: Config, token: str,
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=judge_env)
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return EvalScore(name=ev.name, type="judge", score=None, reason="timeout")
-    data = _parse_json(proc.stdout)
+    data = _parse_json(proc.stdout, require_keys=("score",))
     if data:
         return EvalScore(name=ev.name, type="judge", score=int(data.get("score", 0)), reason=str(data.get("reason", "")))
     return EvalScore(name=ev.name, type="judge", score=None, reason="parse_error")
@@ -338,11 +338,13 @@ def _print_scores(scores: list[EvalScore]) -> None:
         print(f"    {icon} {s.name} ({s.type}): {score_str} — {s.reason[:50]}")
 
 
-def _parse_json(text: str) -> dict | None:
+def _parse_json(text: str, require_keys: tuple[str, ...] | None = None) -> dict | None:
     """Extract a JSON object from possibly noisy LLM output.
 
     Handles single-line JSON, whole-text JSON, markdown code fences, and
-    multiline JSON objects embedded in surrounding prose.
+    multiline JSON objects embedded in surrounding prose. When ``require_keys``
+    is given, only a parsed object containing all of those keys is accepted, so
+    stray JSON fragments don't masquerade as a valid result.
     """
     if not text:
         return None
@@ -370,8 +372,11 @@ def _parse_json(text: str) -> dict | None:
             data = json.loads(candidate)
         except (json.JSONDecodeError, ValueError):
             continue
-        if isinstance(data, dict):
-            return data
+        if not isinstance(data, dict):
+            continue
+        if require_keys and not all(k in data for k in require_keys):
+            continue
+        return data
     return None
 
 

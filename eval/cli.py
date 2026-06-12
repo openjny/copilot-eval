@@ -233,8 +233,16 @@ def _run_judges(config: "Config", traces: list[Trace], results_dir: Path) -> Non
             continue
 
         scores_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.scores.json"
+        existing_all: list = []
         if scores_file.exists():
-            continue  # already scored
+            try:
+                existing_all = json.loads(scores_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                existing_all = []
+        scored_judge_names = {s.get("name") for s in existing_all if s.get("type") == "judge"}
+        pending = [ev for ev in judge_evaluators if ev.name not in scored_judge_names]
+        if not pending:
+            continue  # all judge evaluators already scored
 
         # Extract conversation from OTel trace
         conversation = extract_conversation(trace)
@@ -253,9 +261,9 @@ def _run_judges(config: "Config", traces: list[Trace], results_dir: Path) -> Non
         output_dir = results_dir / "outputs" / f"{scenario}_{variant}_epoch{epoch}"
         output_files_text = read_files_from_dir(output_dir, max_chars=8000)
 
-        # Run each judge evaluator
+        # Run each pending judge evaluator
         scores = []
-        for ev in judge_evaluators:
+        for ev in pending:
             click.echo(f"    [{scenario}/{variant}/e{epoch}] Evaluating: {ev.name} (judge)...", err=True)
             s = run_judge(ev, conversation, config, github_token, output_files_text)
             if s.score is not None:
@@ -264,16 +272,8 @@ def _run_judges(config: "Config", traces: list[Trace], results_dir: Path) -> Non
                 click.echo(f"    ! {ev.name}: {s.reason}", err=True)
             scores.append({"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed})
 
-        # Also include any existing non-judge scores from the run
-        existing_scores = []
-        log_scores_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.scores.json"
-        if log_scores_file.exists():
-            try:
-                existing_scores = [s for s in json.loads(log_scores_file.read_text()) if s.get("type") != "judge"]
-            except (json.JSONDecodeError, KeyError):
-                pass
-
-        all_scores = existing_scores + scores
+        # Merge new judge scores with any pre-existing scores (non-judge + already-scored judges)
+        all_scores = existing_all + scores
         if all_scores:
             scores_file.write_text(json.dumps(all_scores, indent=2, ensure_ascii=False))
 
