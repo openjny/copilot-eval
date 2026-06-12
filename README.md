@@ -64,12 +64,21 @@ copilot-eval/
 │   └── entrypoint.sh      # Auth merging
 ├── examples/              # Eval sets
 ├── docs/                  # Detailed documentation
+├── tests/                 # Pytest unit tests (config, report, trace)
 └── docker-compose.yml     # Jaeger
 ```
 
 The framework tags each run with `eval.test_id`, `eval.variant`, `eval.scenario`, and `eval.epoch` via `OTEL_RESOURCE_ATTRIBUTES`, enabling A/B comparison in Jaeger.
 
 > **Note**: `COPILOT_HOME` must be writable for OTel span correlation to work correctly. The entrypoint handles this by copying auth from a read-only mount to a writable directory.
+
+## Development
+
+Run the unit tests (pure logic: config parsing/validation, report aggregation, trace parsing):
+
+```bash
+uv run --group dev pytest
+```
 
 ## License
 
