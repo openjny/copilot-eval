@@ -1,10 +1,21 @@
 """Configuration loading and validation."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+
+class ConfigError(ValueError):
+    """Raised when an eval configuration is invalid."""
+
+
+EVALUATOR_TYPES = ("judge", "script", "contains", "regex")
+PARALLEL_MODES = ("off", "per_task", "full")
+OUTPUT_FORMATS = ("text", "json")
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 @dataclass
@@ -128,43 +139,143 @@ def load_config(config_dir: Path | None = None) -> Config:
     vars_dict = {str(k): str(v) for k, v in (raw.get("vars") or {}).items()}
 
     runner_raw = raw.get("runner") or {}
-    runner = RunnerConfig(
-        epochs=runner_raw.get("epochs", 1),
-        timeout_seconds=runner_raw.get("timeout_seconds", 300),
-        model=runner_raw.get("model"),
-        judge_model=runner_raw.get("judge_model"),
-        reasoning_effort=runner_raw.get("reasoning_effort"),
-        max_turns=runner_raw.get("max_turns"),
-        parallel=runner_raw.get("parallel", "off"),
-        max_workers=runner_raw.get("max_workers", 8),
-        output_format=runner_raw.get("output_format", "text"),
-        container_image_base=runner_raw.get("container_image_base", "copilot-eval"),
-        copilot_version=runner_raw.get("copilot_version", "1.0.18"),
-        otel_endpoint=runner_raw.get("otel_endpoint", "http://host.docker.internal:4318"),
-        trace_fetch_limit=runner_raw.get("trace_fetch_limit", 2000),
-        trace_fetch_retries=runner_raw.get("trace_fetch_retries", 5),
-        trace_fetch_retry_delay=runner_raw.get("trace_fetch_retry_delay", 2.0),
-    )
+    runner = _build_runner(runner_raw)
 
     tasks = _load_patterns(config_dir, raw)
     variants = _load_variants(config_dir, raw)
+
+    _check_duplicate_names(tasks, "task")
+    _check_duplicate_names(variants, "variant")
 
     return Config(vars=vars_dict, runner=runner, tasks=tasks, variants=variants,
                   project_dir=project_dir, config_dir=config_dir)
 
 
+def _build_runner(runner_raw: dict) -> RunnerConfig:
+    if not isinstance(runner_raw, dict):
+        raise ConfigError(f"'runner' must be a mapping, got {type(runner_raw).__name__}.")
+
+    parallel = runner_raw.get("parallel", "off")
+    if parallel not in PARALLEL_MODES:
+        raise ConfigError(
+            f"runner.parallel has invalid value '{parallel}'. Must be one of: {', '.join(PARALLEL_MODES)}."
+        )
+    output_format = runner_raw.get("output_format", "text")
+    if output_format not in OUTPUT_FORMATS:
+        raise ConfigError(
+            f"runner.output_format has invalid value '{output_format}'. "
+            f"Must be one of: {', '.join(OUTPUT_FORMATS)}."
+        )
+
+    epochs = _require_int(runner_raw, "epochs", 1, minimum=1)
+    timeout_seconds = _require_int(runner_raw, "timeout_seconds", 300, minimum=1)
+    max_workers = _require_int(runner_raw, "max_workers", 8, minimum=1)
+    max_turns = runner_raw.get("max_turns")
+    if max_turns is not None:
+        max_turns = _coerce_int("runner.max_turns", max_turns, minimum=1)
+
+    trace_fetch_limit = _require_int(runner_raw, "trace_fetch_limit", 2000, minimum=1)
+    trace_fetch_retries = _require_int(runner_raw, "trace_fetch_retries", 5, minimum=0)
+    trace_fetch_retry_delay = _require_number(runner_raw, "trace_fetch_retry_delay", 2.0, minimum=0)
+
+    return RunnerConfig(
+        epochs=epochs,
+        timeout_seconds=timeout_seconds,
+        model=runner_raw.get("model"),
+        judge_model=runner_raw.get("judge_model"),
+        reasoning_effort=runner_raw.get("reasoning_effort"),
+        max_turns=max_turns,
+        parallel=parallel,
+        max_workers=max_workers,
+        output_format=output_format,
+        capture_content=runner_raw.get("capture_content", True),
+        container_image_base=runner_raw.get("container_image_base", "copilot-eval"),
+        copilot_version=runner_raw.get("copilot_version", "1.0.18"),
+        otel_endpoint=runner_raw.get("otel_endpoint", "http://host.docker.internal:4318"),
+        trace_fetch_limit=trace_fetch_limit,
+        trace_fetch_retries=trace_fetch_retries,
+        trace_fetch_retry_delay=trace_fetch_retry_delay,
+    )
+
+
+def _coerce_int(key: str, value: object, minimum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{key} must be an integer, got {value!r}.")
+    if minimum is not None and value < minimum:
+        raise ConfigError(f"{key} must be >= {minimum}, got {value}.")
+    return value
+
+
+def _require_int(raw: dict, key: str, default: int, minimum: int | None = None) -> int:
+    if key not in raw or raw[key] is None:
+        return default
+    return _coerce_int(f"runner.{key}", raw[key], minimum=minimum)
+
+
+def _require_number(raw: dict, key: str, default: float, minimum: float | None = None) -> float:
+    if key not in raw or raw[key] is None:
+        return default
+    value = raw[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"runner.{key} must be a number, got {value!r}.")
+    if minimum is not None and value < minimum:
+        raise ConfigError(f"runner.{key} must be >= {minimum}, got {value}.")
+    return float(value)
+
+
+def _check_duplicate_names(items: list, label: str) -> None:
+    seen: set[str] = set()
+    for item in items:
+        if item.name in seen:
+            raise ConfigError(f"Duplicate {label} name '{item.name}'.")
+        seen.add(item.name)
+
+
 # --- Internal parsers ---
 
-def _parse_evaluators(raw_list: list | None) -> list[Evaluator]:
+def _parse_evaluators(raw_list: list | None, context: str = "") -> list[Evaluator]:
     if not raw_list:
         return []
-    return [Evaluator(
-        name=e["name"],
-        type=e.get("type", "judge"),
-        prompt=e.get("prompt"),
-        script=e.get("script"),
-        value=e.get("value"),
-    ) for e in raw_list]
+    where = f" in {context}" if context else ""
+    evaluators: list[Evaluator] = []
+    seen: set[str] = set()
+    for i, e in enumerate(raw_list):
+        if not isinstance(e, dict):
+            raise ConfigError(f"Evaluator #{i + 1}{where} must be a mapping, got {type(e).__name__}.")
+        name = e.get("name")
+        if not name or not str(name).strip():
+            raise ConfigError(f"Evaluator #{i + 1}{where} is missing a required 'name'.")
+        name = str(name)
+        if not _NAME_RE.match(name):
+            raise ConfigError(
+                f"Evaluator name '{name}'{where} is invalid. Use letters, digits, '.', '_' or '-' "
+                f"and start with a letter or digit."
+            )
+        if name in seen:
+            raise ConfigError(f"Duplicate evaluator name '{name}'{where}.")
+        seen.add(name)
+
+        etype = e.get("type", "judge")
+        if etype not in EVALUATOR_TYPES:
+            raise ConfigError(
+                f"Evaluator '{name}'{where} has invalid type '{etype}'. "
+                f"Must be one of: {', '.join(EVALUATOR_TYPES)}."
+            )
+        prompt, script, value = e.get("prompt"), e.get("script"), e.get("value")
+        if etype == "judge" and not prompt:
+            raise ConfigError(f"Evaluator '{name}'{where} (type=judge) requires a 'prompt'.")
+        if etype == "script" and not script:
+            raise ConfigError(f"Evaluator '{name}'{where} (type=script) requires a 'script'.")
+        if etype in ("contains", "regex") and not value:
+            raise ConfigError(f"Evaluator '{name}'{where} (type={etype}) requires a 'value'.")
+        if etype == "regex" and value is not None:
+            try:
+                re.compile(str(value))
+            except re.error as exc:
+                raise ConfigError(f"Evaluator '{name}'{where} has an invalid regex 'value': {exc}.")
+
+        evaluators.append(Evaluator(name=name, type=etype, prompt=prompt, script=script, value=value))
+    return evaluators
 
 
 def _parse_hooks(raw: dict | None) -> Hooks:
@@ -174,11 +285,29 @@ def _parse_hooks(raw: dict | None) -> Hooks:
 
 
 def _parse_pattern(p: dict, fallback_name: str = "") -> Task:
+    if not isinstance(p, dict):
+        raise ConfigError(f"Task definition must be a mapping, got {type(p).__name__}.")
+    name = str(p.get("name", fallback_name) or "")
+    if not name.strip():
+        raise ConfigError("Task is missing a required 'name'.")
+    if not _NAME_RE.match(name):
+        raise ConfigError(
+            f"Task name '{name}' is invalid. Use letters, digits, '.', '_' or '-' "
+            f"and start with a letter or digit."
+        )
+
+    prompt = p.get("prompt")
+    if not prompt or not str(prompt).strip():
+        raise ConfigError(f"Task '{name}' is missing a required 'prompt'.")
+
     # Evaluators: try evaluators → judges → metrics.judges + verify (backward compat)
     evaluators_raw = p.get("evaluators")
     if not evaluators_raw:
         judges = p.get("judges") or (p.get("metrics") or {}).get("judges") or []
-        evaluators_raw = [{"name": j["name"], "type": "judge", "prompt": j["prompt"]} for j in judges]
+        try:
+            evaluators_raw = [{"name": j["name"], "type": "judge", "prompt": j["prompt"]} for j in judges]
+        except (KeyError, TypeError) as exc:
+            raise ConfigError(f"Task '{name}' has a malformed 'judges' entry (missing {exc}).")
         if p.get("verify"):
             evaluators_raw.append({"name": "verify", "type": "script", "script": p["verify"]})
 
@@ -188,23 +317,33 @@ def _parse_pattern(p: dict, fallback_name: str = "") -> Task:
         hooks_raw = {"before_run": p["reset_script"]}
 
     return Task(
-        name=p.get("name", fallback_name),
-        prompt=p.get("prompt", ""),
+        name=name,
+        prompt=prompt,
         enabled=p.get("enabled", True),
         fixture=p.get("fixture"),
         timeout_seconds=p.get("timeout_seconds"),
         health_check=p.get("health_check"),
         vars={str(k): str(v) for k, v in (p.get("vars") or {}).items()},
         hooks=_parse_hooks(hooks_raw),
-        evaluators=_parse_evaluators(evaluators_raw),
+        evaluators=_parse_evaluators(evaluators_raw, context=f"task '{name}'"),
     )
 
 
 def _parse_variant(v: dict, fallback_name: str = "") -> Variant:
+    if not isinstance(v, dict):
+        raise ConfigError(f"Variant definition must be a mapping, got {type(v).__name__}.")
+    name = str(v.get("name", fallback_name) or "")
+    if not name.strip():
+        raise ConfigError("Variant is missing a required 'name'.")
+    if not _NAME_RE.match(name):
+        raise ConfigError(
+            f"Variant name '{name}' is invalid. Use letters, digits, '.', '_' or '-' "
+            f"and start with a letter or digit."
+        )
     build = v.get("build") or {}
     run = v.get("run") or {}
     return Variant(
-        name=v.get("name", fallback_name),
+        name=name,
         description=v.get("description", ""),
         dockerfile=build.get("dockerfile"),
         run_script=run.get("script"),

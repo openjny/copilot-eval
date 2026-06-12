@@ -59,26 +59,45 @@ def _mean_agg(vals: list[float]) -> float:
     return float(_mean(vals))
 
 
-def _aggregate_values(vals_by_variant: dict[str, list[float]], variants: list[str],
+def _aggregate_values(vals_by_variant: dict[str, dict[str, float]], variants: list[str],
                       method: str) -> tuple[dict[str, float], str]:
-    """Aggregate per-variant values and compute delta string."""
+    """Aggregate per-variant values and compute delta string.
+
+    Values are keyed by epoch (variant -> epoch -> value) so that paired
+    aggregation can match variants on a shared epoch key rather than relying on
+    list position. This prevents deltas from silently shifting when an epoch is
+    missing or failed for one variant.
+    """
     agg_fn = _median if method != "mean" else _mean_agg
 
     if method == "paired" and len(variants) == 2:
         v0, v1 = variants
-        vals0, vals1 = vals_by_variant.get(v0, []), vals_by_variant.get(v1, [])
-        ref0, ref1 = _median(vals0), _median(vals1)
-        n = min(len(vals0), len(vals1))
-        if n > 0:
-            deltas = [vals1[i] - vals0[i] for i in range(n)]
+        m0, m1 = vals_by_variant.get(v0, {}), vals_by_variant.get(v1, {})
+        ref0, ref1 = _median(list(m0.values())), _median(list(m1.values()))
+        # Pair only on epochs present in both variants. Exclude the "?" sentinel
+        # (used when OTel epoch tags are missing) so unknown epochs never pair.
+        common = sorted((set(m0) & set(m1)) - {"?"}, key=_epoch_sort_key)
+        if common:
+            deltas = [m1[k] - m0[k] for k in common]
             d = _median(deltas)
-            pct = f"{(d / ref0) * 100:+.1f}%" if ref0 > 0 else ""
+            # Use the paired baseline (same epochs as the delta) as the denominator
+            # so the percentage isn't skewed by unpaired epochs.
+            paired_ref0 = _median([m0[k] for k in common])
+            pct = f"{(d / paired_ref0) * 100:+.1f}%" if paired_ref0 > 0 else ""
         else:
             pct = ""
         return {v0: ref0, v1: ref1}, pct
 
-    agg = {v: agg_fn(vals_by_variant.get(v, [])) for v in variants}
+    agg = {v: agg_fn(list(vals_by_variant.get(v, {}).values())) for v in variants}
     return agg, _calc_delta(agg, variants)
+
+
+def _epoch_sort_key(epoch: str) -> tuple[int, object]:
+    """Sort epochs numerically when possible, falling back to string order."""
+    try:
+        return (0, int(epoch))
+    except (TypeError, ValueError):
+        return (1, str(epoch))
 
 
 def _calc_delta(values: dict[str, float], variants: list[str]) -> str:
@@ -104,7 +123,7 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None,
     reports: list[Report] = []
     for task_name in sorted(by_task.keys()):
         task_runs = by_task[task_name]
-        task_runs.sort(key=lambda r: (r.variant, r.epoch))
+        task_runs.sort(key=lambda r: (r.variant, _epoch_sort_key(r.epoch)))
 
         by_variant: dict[str, list[RunMetrics]] = defaultdict(list)
         for r in task_runs:
@@ -118,7 +137,7 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None,
         # OTel metrics summary
         summary = []
         for label, key in _METRIC_DEFS:
-            vals_by_v = {v: [float(getattr(r, key)) for r in by_variant[v]] for v in variants}
+            vals_by_v = {v: {r.epoch: float(getattr(r, key)) for r in by_variant[v]} for v in variants}
             agg, delta = _aggregate_values(vals_by_v, variants, aggregate)
             summary.append(SummaryRow(metric=label, values=agg, delta=delta))
 
@@ -143,10 +162,10 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None,
             for name in names:
                 vals_by_v = {}
                 for v in variants:
-                    vals_by_v[v] = []
-                    for (rv, re), scores in raw.items():
+                    vals_by_v[v] = {}
+                    for (rv, ep), scores in raw.items():
                         if rv == v and name in scores:
-                            vals_by_v[v].append(float(scores[name]))
+                            vals_by_v[v][ep] = float(scores[name])
                 agg, delta = _aggregate_values(vals_by_v, variants, aggregate)
                 judge_rows.append(SummaryRow(metric=name, values=agg, delta=delta))
 
@@ -324,7 +343,10 @@ def _load_judge_raw(results_dir: Path, variants: list[str], task: str
                 continue
             name_variant = parts[0]
             epoch_str = parts[1]
-            variant = next((v for v in variants if name_variant.endswith(f"_{v}")), None)
+            # Match the longest variant name to avoid a shorter name (e.g. "v")
+            # incorrectly claiming a file that belongs to "my_v".
+            matches = [v for v in variants if name_variant.endswith(f"_{v}")]
+            variant = max(matches, key=len) if matches else None
             if not variant:
                 continue
             try:

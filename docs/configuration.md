@@ -79,6 +79,8 @@ Four evaluator types are supported:
 | `contains` | `value` | Checks if string exists in output |
 | `regex` | `value` | Checks if regex matches output |
 
+Each evaluator requires a unique `name` within its task and a valid `type`. The type-specific field above is mandatory (e.g. `judge` requires `prompt`). Invalid types, missing required fields, duplicate names, and invalid regex `value`s are rejected at config load time with a clear `ConfigError`.
+
 ### Judge Evaluator
 
 The judge sees both the **conversation output** (Copilot's terminal log) and any **files written to `/workspace/output/`**. This ensures correct scoring even when Copilot writes results to files without echoing them.
