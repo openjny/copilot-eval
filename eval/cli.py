@@ -1,8 +1,10 @@
 """CLI entry point for the eval framework."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -40,6 +42,35 @@ def _ensure_jaeger(config: Config) -> None:
         except (requests.ConnectionError, requests.Timeout):
             time.sleep(1)
     raise click.ClickException("Failed to start Jaeger. Check docker compose logs.")
+
+
+MANIFEST_NAME = "results.json"
+
+
+def _write_manifest(run_dir: Path, run_id: str, results: list[RunResult]) -> None:
+    """Persist the full set of runs so `analyze` can detect missing/failed ones."""
+    manifest = {
+        "run_id": run_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "runs": [r.to_dict() for r in results],
+    }
+    try:
+        (run_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    except OSError as e:
+        click.echo(f"WARNING: failed to write run manifest: {e}", err=True)
+
+
+def _load_manifest(results_dir: Path) -> list[dict] | None:
+    """Load persisted runs from a run's manifest. Returns None if not present."""
+    manifest_file = results_dir / MANIFEST_NAME
+    if not manifest_file.exists():
+        return None
+    try:
+        data = json.loads(manifest_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    runs = data.get("runs") if isinstance(data, dict) else None
+    return runs if isinstance(runs, list) else None
 
 
 @click.group()
@@ -147,9 +178,18 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
     # Summary
     passed = sum(1 for r in results if r.passed)
     failed = sum(1 for r in results if not r.passed)
+    timed_out = sum(1 for r in results if r.status == "timeout")
+    errored = sum(1 for r in results if r.status in ("failed", "setup_failed"))
+
+    # Persist a run manifest so `analyze` knows the full expected set of runs
+    # (including failed/timeout runs that may have produced no trace).
+    _write_manifest(run_dir, run_id, results)
+
     click.echo("=" * 50)
     click.echo(f" Run complete: {run_id}")
     click.echo(f" Results: {passed} passed, {failed} failed")
+    if timed_out or errored:
+        click.echo(f"   (of which {timed_out} timed out, {errored} errored)")
     click.echo(f" Jaeger:  http://localhost:16686")
     analyze_cmd = f"uv run copilot-eval analyze --run-id {run_id}"
     if config_dir:
@@ -171,35 +211,31 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
     """Analyze traces from a previous eval run."""
     config = load_config(Path(config_dir) if config_dir else None)
     jaeger = jaeger_url or "http://localhost:16686"
+    results_dir = config.results_dir / run_id
+
+    manifest_runs = _load_manifest(results_dir)
 
     click.echo(f"Fetching traces from {jaeger} for run {run_id}...", err=True)
-    traces = fetch_traces(jaeger)
-    traces = filter_by_run(traces, run_id)
+    traces = _fetch_traces_for_run(config, jaeger, run_id, manifest_runs)
 
     metrics: list[RunMetrics] = [m for m in (extract_metrics(t) for t in traces) if m is not None]
+
+    # Reconcile against the persisted manifest so failed/timeout/missing runs
+    # are surfaced instead of silently dropped (survivorship bias).
+    if manifest_runs is not None:
+        _report_run_coverage(manifest_runs, traces)
+    elif not metrics:
+        click.echo("No traces found for this run ID, and no manifest to reconcile against.", err=True)
+        return
 
     if not metrics:
         click.echo("No traces found for this run ID.", err=True)
         return
 
-    results_dir = config.results_dir / run_id
-
     # Run judge evaluators if not skipped
     if not skip_eval and results_dir.exists():
-        if re_eval:
-            # Delete existing judge scores to force re-evaluation
-            for sf in results_dir.glob("*.scores.json"):
-                try:
-                    import json as _json
-                    existing = _json.loads(sf.read_text())
-                    non_judge = [s for s in existing if s.get("type") != "judge"]
-                    if non_judge:
-                        sf.write_text(_json.dumps(non_judge, indent=2, ensure_ascii=False))
-                    else:
-                        sf.unlink()
-                except (ValueError, OSError):
-                    sf.unlink(missing_ok=True)
-        _run_judges(config, traces, results_dir)
+        _run_judges(config, traces, results_dir, force=re_eval)
+        _warn_unscored_judges(config, traces, results_dir)
 
     variant_order = [v.name for v in config.variants]
     reports = build_report(metrics, results_dir if results_dir.exists() else None, variant_order, aggregate)
@@ -211,8 +247,105 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
     click.echo(formatters[output](reports))
 
 
-def _run_judges(config: "Config", traces: list[Trace], results_dir: Path) -> None:
-    """Run judge evaluators using OTel traces + output files."""
+def _fetch_traces_for_run(config: Config, jaeger: str, run_id: str,
+                          manifest_runs: list[dict] | None) -> list[Trace]:
+    """Fetch traces for a run, retrying while ingestion catches up.
+
+    Uses a server-side tag filter on eval.run_id and a high limit so large runs
+    aren't truncated. If a manifest is available, retries until the number of
+    fetched traces reaches the number of runs that should have produced one.
+    """
+    expected = None
+    if manifest_runs is not None:
+        # Only completed runs are guaranteed to emit a trace; timeout/failed
+        # runs may not, so don't let them keep the retry loop waiting forever.
+        expected = sum(1 for r in manifest_runs if r.get("status") == "completed")
+
+    retries = max(1, config.runner.trace_fetch_retries)
+    traces: list[Trace] = []
+    for attempt in range(1, retries + 1):
+        traces = fetch_traces(jaeger, limit=config.runner.trace_fetch_limit, run_id=run_id)
+        traces = filter_by_run(traces, run_id)  # safety net for any over-broad matches
+        if expected is None or len(traces) >= expected:
+            return traces
+        if attempt < retries:
+            click.echo(
+                f"  Waiting for trace ingestion ({len(traces)}/{expected})... "
+                f"retry {attempt}/{retries - 1}",
+                err=True,
+            )
+            time.sleep(config.runner.trace_fetch_retry_delay)
+    if expected is not None and len(traces) < expected:
+        click.echo(
+            f"  WARNING: only {len(traces)}/{expected} expected traces ingested "
+            f"after {retries} attempt(s).",
+            err=True,
+        )
+    return traces
+
+
+def _report_run_coverage(manifest_runs: list[dict], traces: list[Trace]) -> None:
+    """Reconcile persisted runs against ingested traces and warn about gaps."""
+    trace_test_ids = {t.resource_tags.get("eval.test_id") for t in traces}
+
+    missing: list[str] = []
+    failed: list[str] = []
+    for r in manifest_runs:
+        label = f"{r.get('task')}/{r.get('variant')}/e{r.get('epoch')}"
+        status = r.get("status", "completed")
+        has_trace = r.get("test_id") in trace_test_ids
+        if status == "timeout":
+            failed.append(f"{label} (timeout)")
+        elif status == "failed":
+            failed.append(f"{label} (exit {r.get('exit_code')})")
+        elif status == "setup_failed":
+            failed.append(f"{label} (setup_failed)")
+        elif not has_trace:
+            # Run reported as completed but no trace ingested → silently dropped.
+            missing.append(label)
+
+    total = len(manifest_runs)
+    ok = total - len(missing) - len(failed)
+    click.echo(f"Run coverage: {ok}/{total} ok, {len(failed)} failed/timeout, {len(missing)} missing trace.", err=True)
+    if failed:
+        click.echo(f"  Failed/timeout runs (excluded from metrics): {', '.join(failed)}", err=True)
+    if missing:
+        click.echo(f"  WARNING: completed runs with no ingested trace: {', '.join(missing)}", err=True)
+
+
+def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path) -> None:
+    """Surface judge evaluations that produced no usable score (timeout/parse_error)."""
+    tasks_by_name = {t.name: t for t in config.tasks}
+    problems: list[str] = []
+    for trace in traces:
+        scenario = trace.resource_tags.get("eval.scenario", "")
+        variant = trace.resource_tags.get("eval.variant", "")
+        epoch = trace.resource_tags.get("eval.epoch", "")
+        task = tasks_by_name.get(scenario)
+        if not task or not any(ev.type == "judge" for ev in task.evaluators):
+            continue
+        scores_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.scores.json"
+        if not scores_file.exists():
+            continue
+        try:
+            scores = json.loads(scores_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        for s in scores:
+            if s.get("type") == "judge" and s.get("score") is None:
+                reason = s.get("reason", "no score")
+                problems.append(f"{scenario}/{variant}/e{epoch}:{s.get('name')} ({reason})")
+    if problems:
+        click.echo(f"  WARNING: {len(problems)} judge score(s) unavailable: {', '.join(problems)}", err=True)
+
+
+def _run_judges(config: "Config", traces: list[Trace], results_dir: Path, force: bool = False) -> None:
+    """Run judge evaluators using OTel traces + output files.
+
+    Skips judge evaluators that already have a recorded score (judge presence,
+    not file existence — non-judge scores share the same file). Pass force=True
+    to re-run every judge regardless of cached scores.
+    """
     import json
     import subprocess
 
@@ -234,8 +367,20 @@ def _run_judges(config: "Config", traces: list[Trace], results_dir: Path) -> Non
             continue
 
         scores_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.scores.json"
+
+        # Load existing scores and decide which judges still need scoring.
+        existing_scores: list[dict] = []
         if scores_file.exists():
-            continue  # already scored
+            try:
+                existing_scores = json.loads(scores_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                existing_scores = []
+        existing_judge_names = {s.get("name") for s in existing_scores if s.get("type") == "judge"}
+        pending = judge_evaluators if force else [
+            ev for ev in judge_evaluators if ev.name not in existing_judge_names
+        ]
+        if not pending:
+            continue  # all judge scores already present
 
         # Extract conversation from OTel trace
         conversation = extract_conversation(trace)
@@ -256,9 +401,9 @@ def _run_judges(config: "Config", traces: list[Trace], results_dir: Path) -> Non
         if output_dir.is_dir():
             output_files_text = _read_output_files_from_dir(output_dir, max_chars=8000)
 
-        # Run each judge evaluator
+        # Run each pending judge evaluator
         scores = []
-        for ev in judge_evaluators:
+        for ev in pending:
             sections = [f"--- COPILOT OUTPUT ---\n{conversation}\n--- END OUTPUT ---"]
             if output_files_text:
                 sections.append(f"--- OUTPUT FILES ---\n{output_files_text}\n--- END FILES ---")
@@ -287,16 +432,13 @@ def _run_judges(config: "Config", traces: list[Trace], results_dir: Path) -> Non
             else:
                 scores.append({"name": ev.name, "type": "judge", "score": None, "reason": "parse_error", "passed": True})
 
-        # Also include any existing non-judge scores from the run
-        existing_scores = []
-        log_scores_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.scores.json"
-        if log_scores_file.exists():
-            try:
-                existing_scores = [s for s in json.loads(log_scores_file.read_text()) if s.get("type") != "judge"]
-            except (json.JSONDecodeError, KeyError):
-                pass
-
-        all_scores = existing_scores + scores
+        # Merge: keep non-judge scores + judge scores we didn't re-run, add new ones.
+        rerun_names = {ev.name for ev in pending}
+        kept = [
+            s for s in existing_scores
+            if s.get("type") != "judge" or s.get("name") not in rerun_names
+        ]
+        all_scores = kept + scores
         if all_scores:
             scores_file.write_text(json.dumps(all_scores, indent=2, ensure_ascii=False))
 

@@ -33,6 +33,11 @@ class RunnerConfig:
     container_image_base: str = "copilot-eval"
     copilot_version: str = "1.0.18"
     otel_endpoint: str = "http://host.docker.internal:4318"
+    # analyze: how many traces to request from Jaeger, and how long to wait
+    # for ingestion to catch up with the expected set of runs.
+    trace_fetch_limit: int = 2000
+    trace_fetch_retries: int = 5
+    trace_fetch_retry_delay: float = 2.0
 
 
 @dataclass
@@ -169,6 +174,10 @@ def _build_runner(runner_raw: dict) -> RunnerConfig:
     if max_turns is not None:
         max_turns = _coerce_int("runner.max_turns", max_turns, minimum=1)
 
+    trace_fetch_limit = _require_int(runner_raw, "trace_fetch_limit", 2000, minimum=1)
+    trace_fetch_retries = _require_int(runner_raw, "trace_fetch_retries", 5, minimum=0)
+    trace_fetch_retry_delay = _require_number(runner_raw, "trace_fetch_retry_delay", 2.0, minimum=0)
+
     return RunnerConfig(
         epochs=epochs,
         timeout_seconds=timeout_seconds,
@@ -183,6 +192,9 @@ def _build_runner(runner_raw: dict) -> RunnerConfig:
         container_image_base=runner_raw.get("container_image_base", "copilot-eval"),
         copilot_version=runner_raw.get("copilot_version", "1.0.18"),
         otel_endpoint=runner_raw.get("otel_endpoint", "http://host.docker.internal:4318"),
+        trace_fetch_limit=trace_fetch_limit,
+        trace_fetch_retries=trace_fetch_retries,
+        trace_fetch_retry_delay=trace_fetch_retry_delay,
     )
 
 
@@ -198,6 +210,17 @@ def _require_int(raw: dict, key: str, default: int, minimum: int | None = None) 
     if key not in raw or raw[key] is None:
         return default
     return _coerce_int(f"runner.{key}", raw[key], minimum=minimum)
+
+
+def _require_number(raw: dict, key: str, default: float, minimum: float | None = None) -> float:
+    if key not in raw or raw[key] is None:
+        return default
+    value = raw[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"runner.{key} must be a number, got {value!r}.")
+    if minimum is not None and value < minimum:
+        raise ConfigError(f"runner.{key} must be >= {minimum}, got {value}.")
+    return float(value)
 
 
 def _check_duplicate_names(items: list, label: str) -> None:
