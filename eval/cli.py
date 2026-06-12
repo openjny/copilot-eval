@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -17,8 +18,7 @@ from eval.report import build_report, format_table, format_json, format_markdown
 
 def _ensure_jaeger(config: Config) -> None:
     """Check if Jaeger is reachable, start it via docker compose if not."""
-    url = config.runner.otel_endpoint.replace("host.docker.internal", "localhost").replace(":4318", "")
-    jaeger_url = f"http://localhost:16686"
+    jaeger_url = config.runner.jaeger_url
     try:
         requests.get(f"{jaeger_url}/api/services", timeout=3)
         return  # already running
@@ -71,7 +71,7 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
         click.echo("No tasks to run. Use --task NAME or enable tasks in config.")
         return
 
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
     run_dir = config.results_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -150,7 +150,7 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
     click.echo("=" * 50)
     click.echo(f" Run complete: {run_id}")
     click.echo(f" Results: {passed} passed, {failed} failed")
-    click.echo(f" Jaeger:  http://localhost:16686")
+    click.echo(f" Jaeger:  {config.runner.jaeger_url}")
     analyze_cmd = f"uv run copilot-eval analyze --run-id {run_id}"
     if config_dir:
         analyze_cmd += f" --config-dir {config_dir}"
@@ -162,7 +162,7 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
 @click.option("--run-id", required=True, help="Run ID to analyze")
 @click.option("--output", "-o", type=click.Choice(["table", "json", "markdown"]), default="table", help="Output format")
 @click.option("--aggregate", "-a", type=click.Choice(["paired", "median", "mean"]), default="paired", help="Aggregation method")
-@click.option("--jaeger-url", default=None, help="Jaeger URL (default: http://localhost:16686)")
+@click.option("--jaeger-url", default=None, help="Jaeger URL (default: runner.jaeger_url from config)")
 @click.option("--config-dir", default=None, type=click.Path(exists=True))
 @click.option("--skip-eval", is_flag=True, help="Skip judge evaluation, use existing scores")
 @click.option("--re-eval", is_flag=True, help="Force re-run judge evaluation (ignore cached scores)")
@@ -170,7 +170,7 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
             config_dir: str | None, skip_eval: bool, re_eval: bool) -> None:
     """Analyze traces from a previous eval run."""
     config = load_config(Path(config_dir) if config_dir else None)
-    jaeger = jaeger_url or "http://localhost:16686"
+    jaeger = jaeger_url or config.runner.jaeger_url
 
     click.echo(f"Fetching traces from {jaeger} for run {run_id}...", err=True)
     traces = fetch_traces(jaeger)
@@ -214,9 +214,8 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
 def _run_judges(config: "Config", traces: list[Trace], results_dir: Path) -> None:
     """Run judge evaluators using OTel traces + output files."""
     import json
-    import subprocess
 
-    from eval.runner import _read_output_files, _parse_json
+    from eval.runner import read_files_from_dir, run_judge
 
     github_token = get_github_token()
     tasks_by_name = {t.name: t for t in config.tasks}
@@ -252,40 +251,18 @@ def _run_judges(config: "Config", traces: list[Trace], results_dir: Path) -> Non
 
         # Read output files from persisted outputs
         output_dir = results_dir / "outputs" / f"{scenario}_{variant}_epoch{epoch}"
-        output_files_text = None
-        if output_dir.is_dir():
-            output_files_text = _read_output_files_from_dir(output_dir, max_chars=8000)
+        output_files_text = read_files_from_dir(output_dir, max_chars=8000)
 
         # Run each judge evaluator
         scores = []
         for ev in judge_evaluators:
-            sections = [f"--- COPILOT OUTPUT ---\n{conversation}\n--- END OUTPUT ---"]
-            if output_files_text:
-                sections.append(f"--- OUTPUT FILES ---\n{output_files_text}\n--- END FILES ---")
-            prompt = (
-                f"You are an eval judge. Score the following Copilot output.\n\n"
-                f"{ev.prompt}\n\n"
-                f"{chr(10).join(sections)}\n\n"
-                f'Output ONLY valid JSON: {{"score": N, "reason": "..."}}'
-            )
             click.echo(f"    [{scenario}/{variant}/e{epoch}] Evaluating: {ev.name} (judge)...", err=True)
-            cmd = ["copilot", "-p", prompt, "-s"]
-            if config.runner.judge_model:
-                cmd.extend(["--model", config.runner.judge_model])
-            judge_env = {**os.environ, "GITHUB_TOKEN": github_token, "COPILOT_OTEL_ENABLED": "false"}
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=judge_env)
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                scores.append({"name": ev.name, "type": "judge", "score": None, "reason": "timeout", "passed": True})
-                continue
-            data = _parse_json(proc.stdout)
-            if data:
-                score = int(data.get("score", 0))
-                reason = str(data.get("reason", ""))
-                click.echo(f"    ✓ {ev.name}: {score} — {reason[:60]}", err=True)
-                scores.append({"name": ev.name, "type": "judge", "score": score, "reason": reason, "passed": True})
+            s = run_judge(ev, conversation, config, github_token, output_files_text)
+            if s.score is not None:
+                click.echo(f"    ✓ {ev.name}: {s.score} — {s.reason[:60]}", err=True)
             else:
-                scores.append({"name": ev.name, "type": "judge", "score": None, "reason": "parse_error", "passed": True})
+                click.echo(f"    ! {ev.name}: {s.reason}", err=True)
+            scores.append({"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed})
 
         # Also include any existing non-judge scores from the run
         existing_scores = []
@@ -299,28 +276,6 @@ def _run_judges(config: "Config", traces: list[Trace], results_dir: Path) -> Non
         all_scores = existing_scores + scores
         if all_scores:
             scores_file.write_text(json.dumps(all_scores, indent=2, ensure_ascii=False))
-
-
-def _read_output_files_from_dir(output_dir: Path, max_chars: int = 8000) -> str | None:
-    """Read all files from a directory and return as concatenated text."""
-    parts: list[str] = []
-    total = 0
-    for f in sorted(output_dir.rglob("*")):
-        if not f.is_file():
-            continue
-        rel = f.relative_to(output_dir)
-        try:
-            content = f.read_text(errors="replace")
-        except OSError:
-            continue
-        if total + len(content) > max_chars:
-            remaining = max_chars - total
-            if remaining > 0:
-                parts.append(f"=== {rel} ===\n{content[:remaining]}\n... (truncated)")
-            break
-        parts.append(f"=== {rel} ===\n{content}")
-        total += len(content)
-    return "\n\n".join(parts) if parts else None
 
 
 @main.command()

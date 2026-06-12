@@ -22,6 +22,7 @@ class RunnerConfig:
     container_image_base: str = "copilot-eval"
     copilot_version: str = "1.0.18"
     otel_endpoint: str = "http://host.docker.internal:4318"
+    jaeger_url: str = "http://localhost:16686"
 
 
 @dataclass
@@ -127,15 +128,17 @@ def load_config(config_dir: Path | None = None) -> Config:
         epochs=runner_raw.get("epochs", 1),
         timeout_seconds=runner_raw.get("timeout_seconds", 300),
         model=runner_raw.get("model"),
-        judge_model=runner_raw.get("judge_model"),
+        judge_model=runner_raw.get("judge_model", "gpt-4.1"),
         reasoning_effort=runner_raw.get("reasoning_effort"),
         max_turns=runner_raw.get("max_turns"),
         parallel=runner_raw.get("parallel", "off"),
         max_workers=runner_raw.get("max_workers", 8),
         output_format=runner_raw.get("output_format", "text"),
+        capture_content=runner_raw.get("capture_content", True),
         container_image_base=runner_raw.get("container_image_base", "copilot-eval"),
         copilot_version=runner_raw.get("copilot_version", "1.0.18"),
         otel_endpoint=runner_raw.get("otel_endpoint", "http://host.docker.internal:4318"),
+        jaeger_url=runner_raw.get("jaeger_url", "http://localhost:16686"),
     )
 
     tasks = _load_patterns(config_dir, raw)
