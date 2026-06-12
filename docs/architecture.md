@@ -46,8 +46,17 @@ sequenceDiagram
     Runner->>Runner: after_run hook
     Runner->>Runner: persist output files + non-judge evaluators (script/contains/regex)
     Runner->>Runner: Cleanup tmpdir
-    Runner-->>CLI: RunResult
+    Runner-->>CLI: RunResult (status from exit code)
 ```
+
+`run_one` records the container exit code and maps it to a status:
+`0` → `completed`, `124` (GNU `timeout`) → `timeout`, any other non-zero → `failed`
+(health-check failures are `setup_failed`). `RunResult.passed` requires
+`status == "completed"`, so timed-out or errored runs are never counted as passing.
+After all runs finish, `run` writes a **`results.json` manifest** into the run
+directory recording every run (task/variant/epoch, test_id, exit_code, status,
+scores). `analyze` reconciles against this manifest so failed/timeout/missing
+runs are reported rather than silently dropped.
 
 Judge (LLM-as-Judge) evaluators do **not** run during `run`. They run later in
 `copilot-eval analyze`, which fetches traces, reconstructs the conversation, and
@@ -60,12 +69,13 @@ sequenceDiagram
     participant Trace as trace.py
     participant Judge as Judge LLM
 
-    CLI->>Jaeger: fetch_traces + filter_by_run
+    CLI->>Jaeger: fetch_traces (server-side run_id filter) + reconcile manifest
     CLI->>Trace: extract_conversation (chronological by startTime)
     CLI->>Judge: run_judge (conversation + output files)
     Judge-->>CLI: {"score": N, "reason": "..."}
     CLI->>CLI: merge with existing scores → A/B report
 ```
+
 
 ## Docker Design
 
@@ -107,7 +117,24 @@ invoke_agent (root)
 
 Tags include `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `tool.name`, etc.
 
-`trace.py` fetches spans from Jaeger's HTTP API, filtering by `eval.run_id` and `eval.test_id` resource attributes.
+`trace.py` fetches spans from Jaeger's HTTP API using a **server-side tag filter**
+on `eval.run_id` (so large runs aren't truncated by the request limit) and a
+high, configurable `trace_fetch_limit`. `analyze` retries the fetch while trace
+ingestion catches up with the expected run count (from the manifest), then
+filters defensively by `eval.run_id` / `eval.test_id` as a safety net.
+
+### Analyze accuracy
+
+`analyze` guards against three correctness pitfalls:
+
+- **Survivorship bias**: traces are reconciled against `results.json`. Completed
+  runs with no ingested trace are warned as *missing*; failed/timeout runs are
+  reported and excluded from metrics.
+- **Judge scoring**: judge evaluators are (re)run based on whether a *judge score*
+  already exists — not merely whether a `.scores.json` file exists (non-judge
+  evaluators write to the same file). `--re-eval` forces all judges to re-run.
+- **Unavailable judge scores**: judge timeouts / parse failures (`score: null`)
+  are surfaced as warnings instead of disappearing from the report.
 
 ## Report Generation
 

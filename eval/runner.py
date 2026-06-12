@@ -32,12 +32,41 @@ class RunResult:
     run_id: str
     log_file: Path
     exit_code: int
-    status: str = "completed"  # completed | setup_failed | timeout
+    status: str = "completed"  # completed | setup_failed | timeout | failed
     scores: list[EvalScore] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
         return self.status == "completed" and (all(s.passed for s in self.scores) if self.scores else True)
+
+    def to_dict(self) -> dict:
+        return {
+            "task": self.task,
+            "variant": self.variant,
+            "epoch": self.epoch,
+            "test_id": self.test_id,
+            "run_id": self.run_id,
+            "exit_code": self.exit_code,
+            "status": self.status,
+            "passed": self.passed,
+            "scores": [
+                {"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed}
+                for s in self.scores
+            ],
+        }
+
+
+def status_from_exit_code(exit_code: int) -> str:
+    """Map a process exit code to a run status.
+
+    124 is GNU `timeout`'s signal that the command was killed for exceeding
+    its time budget; any other non-zero code indicates a failed run.
+    """
+    if exit_code == 0:
+        return "completed"
+    if exit_code == 124:
+        return "timeout"
+    return "failed"
 
 
 def get_github_token() -> str:
@@ -141,7 +170,8 @@ def run_one(
     return RunResult(
         task=task.name, variant=variant.name, epoch=epoch,
         test_id=test_id, run_id=run_id, log_file=log_file,
-        exit_code=proc.returncode, scores=scores,
+        exit_code=proc.returncode, status=status_from_exit_code(proc.returncode),
+        scores=scores,
     )
 
 

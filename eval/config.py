@@ -23,6 +23,11 @@ class RunnerConfig:
     copilot_version: str = "1.0.18"
     otel_endpoint: str = "http://host.docker.internal:4318"
     jaeger_url: str = "http://localhost:16686"
+    # analyze: how many traces to request from Jaeger, and how long to wait
+    # for ingestion to catch up with the expected set of runs.
+    trace_fetch_limit: int = 2000
+    trace_fetch_retries: int = 5
+    trace_fetch_retry_delay: float = 2.0
 
 
 @dataclass
@@ -139,6 +144,9 @@ def load_config(config_dir: Path | None = None) -> Config:
         copilot_version=runner_raw.get("copilot_version", "1.0.18"),
         otel_endpoint=runner_raw.get("otel_endpoint", "http://host.docker.internal:4318"),
         jaeger_url=runner_raw.get("jaeger_url", "http://localhost:16686"),
+        trace_fetch_limit=runner_raw.get("trace_fetch_limit", 2000),
+        trace_fetch_retries=runner_raw.get("trace_fetch_retries", 5),
+        trace_fetch_retry_delay=runner_raw.get("trace_fetch_retry_delay", 2.0),
     )
 
     tasks = _load_patterns(config_dir, raw)

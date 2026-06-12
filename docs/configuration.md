@@ -23,6 +23,9 @@ runner:
   copilot_version: "1.0.18"
   otel_endpoint: http://host.docker.internal:4318   # OTLP collector endpoint (inside container)
   jaeger_url: http://localhost:16686                # Jaeger query UI/API (host side)
+  trace_fetch_limit: 2000        # analyze: max traces to request from Jaeger
+  trace_fetch_retries: 5         # analyze: attempts to wait for trace ingestion
+  trace_fetch_retry_delay: 2.0   # analyze: seconds between ingestion retries
 
 variants:
   - name: baseline
@@ -83,6 +86,8 @@ Four evaluator types are supported:
 The judge sees both the **conversation output** (Copilot's terminal log) and any **files written to `/workspace/output/`**. This ensures correct scoring even when Copilot writes results to files without echoing them.
 
 Judge scoring is done by `runner.judge_model` (defaults to the eval model if not set). OTel is disabled during judge calls to avoid contaminating traces.
+
+Judges run during `analyze` and are scored idempotently: a judge is (re)run only when no judge score yet exists for that run (non-judge `script`/`contains`/`regex` scores share the same `.scores.json` file, so file presence alone does not skip judging). Use `analyze --re-eval` to force all judges to re-run. Judge timeouts or unparseable output produce `score: null` and are surfaced as warnings rather than dropped.
 
 ### Ground Truth in Judge Prompts
 
