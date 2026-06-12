@@ -160,6 +160,16 @@ def test_invalid_task_name(tmp_path):
         load_inline(tmp_path, {"tasks": [{"name": "bad name!", "prompt": "p"}]})
 
 
+def test_missing_task_prompt(tmp_path):
+    with pytest.raises(ConfigError, match="missing a required 'prompt'"):
+        load_inline(tmp_path, {"tasks": [{"name": "t1"}]})
+
+
+def test_blank_task_prompt(tmp_path):
+    with pytest.raises(ConfigError, match="missing a required 'prompt'"):
+        load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "   "}]})
+
+
 def test_missing_config_file(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path)

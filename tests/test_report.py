@@ -30,6 +30,26 @@ def test_aggregate_paired_no_common_epoch():
     assert delta == ""
 
 
+def test_aggregate_paired_denominator_uses_common_epochs():
+    # baseline epoch "2" is an outlier and unpaired; it must not skew the percent.
+    vals = {
+        "a": {"1": 10.0, "2": 1000.0},
+        "b": {"1": 12.0},
+    }
+    agg, delta = _aggregate_values(vals, ["a", "b"], "paired")
+    # delta over common {1}: 12-10=2; paired baseline median([10])=10 -> +20.0%
+    assert delta == "+20.0%"
+    # displayed value still reflects all epochs
+    assert agg["a"] == 505.0
+
+
+def test_aggregate_paired_ignores_unknown_epoch_sentinel():
+    # Both variants have a "?" epoch from missing OTel tags; it must not pair.
+    vals = {"a": {"?": 5.0}, "b": {"?": 50.0}}
+    _, delta = _aggregate_values(vals, ["a", "b"], "paired")
+    assert delta == ""
+
+
 def test_aggregate_median_and_mean():
     vals = {"a": {"1": 2.0, "2": 4.0}, "b": {"1": 10.0, "2": 20.0}}
     agg_med, _ = _aggregate_values(vals, ["a", "b"], "median")
@@ -109,6 +129,14 @@ def test_load_judge_raw_missing_dir(tmp_path):
     assert _load_judge_raw(tmp_path / "nope", ["a"], "t1") == ({}, {}, [])
 
 
+def test_load_judge_raw_matches_longest_variant(tmp_path):
+    # variants "v" and "my_v": a file for "my_v" must not be claimed by "v".
+    _write_scores(tmp_path, "t1", "my_v", "1", [{"name": "q", "score": 9}])
+    epoch_data, _, _ = _load_judge_raw(tmp_path, ["v", "my_v"], "t1")
+    assert ("my_v", "1") in epoch_data
+    assert ("v", "1") not in epoch_data
+
+
 def test_build_report_judge_paired_by_epoch(tmp_path):
     # variant b missing epoch 2 -> paired judge delta uses common epoch {1}
     _write_scores(tmp_path, "t1", "a", "1", [{"name": "q", "score": 4}])
@@ -121,5 +149,5 @@ def test_build_report_judge_paired_by_epoch(tmp_path):
     ]
     reports = build_report(results, tmp_path, ["a", "b"], "paired")
     judge_row = next(r for r in reports[0].judge_scores if r.metric == "q")
-    # common epoch {1}: 6-4=2; ref0 = median([4,10]) = 7 -> +28.6%
-    assert judge_row.delta == "+28.6%"
+    # common epoch {1}: delta 6-4=2; paired baseline = median([4]) = 4 -> +50.0%
+    assert judge_row.delta == "+50.0%"

@@ -74,11 +74,16 @@ def _aggregate_values(vals_by_variant: dict[str, dict[str, float]], variants: li
         v0, v1 = variants
         m0, m1 = vals_by_variant.get(v0, {}), vals_by_variant.get(v1, {})
         ref0, ref1 = _median(list(m0.values())), _median(list(m1.values()))
-        common = sorted(set(m0) & set(m1), key=_epoch_sort_key)
+        # Pair only on epochs present in both variants. Exclude the "?" sentinel
+        # (used when OTel epoch tags are missing) so unknown epochs never pair.
+        common = sorted((set(m0) & set(m1)) - {"?"}, key=_epoch_sort_key)
         if common:
             deltas = [m1[k] - m0[k] for k in common]
             d = _median(deltas)
-            pct = f"{(d / ref0) * 100:+.1f}%" if ref0 > 0 else ""
+            # Use the paired baseline (same epochs as the delta) as the denominator
+            # so the percentage isn't skewed by unpaired epochs.
+            paired_ref0 = _median([m0[k] for k in common])
+            pct = f"{(d / paired_ref0) * 100:+.1f}%" if paired_ref0 > 0 else ""
         else:
             pct = ""
         return {v0: ref0, v1: ref1}, pct
@@ -338,7 +343,10 @@ def _load_judge_raw(results_dir: Path, variants: list[str], task: str
                 continue
             name_variant = parts[0]
             epoch_str = parts[1]
-            variant = next((v for v in variants if name_variant.endswith(f"_{v}")), None)
+            # Match the longest variant name to avoid a shorter name (e.g. "v")
+            # incorrectly claiming a file that belongs to "my_v".
+            matches = [v for v in variants if name_variant.endswith(f"_{v}")]
+            variant = max(matches, key=len) if matches else None
             if not variant:
                 continue
             try:

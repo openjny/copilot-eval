@@ -273,6 +273,10 @@ def _parse_pattern(p: dict, fallback_name: str = "") -> Task:
             f"and start with a letter or digit."
         )
 
+    prompt = p.get("prompt")
+    if not prompt or not str(prompt).strip():
+        raise ConfigError(f"Task '{name}' is missing a required 'prompt'.")
+
     # Evaluators: try evaluators → judges → metrics.judges + verify (backward compat)
     evaluators_raw = p.get("evaluators")
     if not evaluators_raw:
@@ -291,7 +295,7 @@ def _parse_pattern(p: dict, fallback_name: str = "") -> Task:
 
     return Task(
         name=name,
-        prompt=p.get("prompt", ""),
+        prompt=prompt,
         enabled=p.get("enabled", True),
         fixture=p.get("fixture"),
         timeout_seconds=p.get("timeout_seconds"),
