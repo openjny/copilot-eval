@@ -257,8 +257,9 @@ def _fetch_traces_for_run(config: Config, jaeger: str, run_id: str,
     """
     expected = None
     if manifest_runs is not None:
-        # setup_failed runs never started Copilot, so they emit no trace.
-        expected = sum(1 for r in manifest_runs if r.get("status") != "setup_failed")
+        # Only completed runs are guaranteed to emit a trace; timeout/failed
+        # runs may not, so don't let them keep the retry loop waiting forever.
+        expected = sum(1 for r in manifest_runs if r.get("status") == "completed")
 
     retries = max(1, config.runner.trace_fetch_retries)
     traces: list[Trace] = []
