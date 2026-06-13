@@ -102,14 +102,14 @@ class Config:
     def results_dir(self) -> Path:
         return self.project_dir / "results"
 
-    def get_pattern(self, name: str) -> Task | None:
-        return next((p for p in self.tasks if p.name == name), None)
+    def get_task(self, name: str) -> Task | None:
+        return next((t for t in self.tasks if t.name == name), None)
 
     def get_variant(self, name: str) -> Variant | None:
         return next((v for v in self.variants if v.name == name), None)
 
-    def enabled_patterns(self) -> list[Task]:
-        return [p for p in self.tasks if p.enabled]
+    def enabled_tasks(self) -> list[Task]:
+        return [t for t in self.tasks if t.enabled]
 
     def image_name(self, variant: Variant) -> str:
         return f"{self.runner.container_image_base}:{variant.image_tag}"
@@ -143,7 +143,7 @@ def load_config(config_dir: Path | None = None) -> Config:
     runner_raw = raw.get("runner") or {}
     runner = _build_runner(runner_raw)
 
-    tasks = _load_patterns(config_dir, raw)
+    tasks = _load_tasks(config_dir, raw)
     variants = _load_variants(config_dir, raw)
 
     _check_duplicate_names(tasks, "task")
@@ -287,7 +287,7 @@ def _parse_hooks(raw: dict[str, Any] | None) -> Hooks:
     return Hooks(before_run=raw.get("before_run"), after_run=raw.get("after_run"))
 
 
-def _parse_pattern(p: dict[str, Any], fallback_name: str = "") -> Task:
+def _parse_task(p: dict[str, Any], fallback_name: str = "") -> Task:
     if not isinstance(p, dict):
         raise ConfigError(f"Task definition must be a mapping, got {type(p).__name__}.")
     name = str(p.get("name", fallback_name) or "")
@@ -355,27 +355,27 @@ def _parse_variant(v: dict[str, Any], fallback_name: str = "") -> Variant:
     )
 
 
-def _load_patterns(config_dir: Path, raw_config: dict[str, Any]) -> list[Task]:
+def _load_tasks(config_dir: Path, raw_config: dict[str, Any]) -> list[Task]:
     tasks: list[Task] = []
 
     # Primary: tasks/*.yaml files
-    patterns_dir = config_dir / "tasks"
-    if patterns_dir.is_dir():
-        for yaml_file in sorted(patterns_dir.glob("*.yaml")):
+    tasks_dir = config_dir / "tasks"
+    if tasks_dir.is_dir():
+        for yaml_file in sorted(tasks_dir.glob("*.yaml")):
             with open(yaml_file) as f:
                 p = yaml.safe_load(f)
             if p:
-                tasks.append(_parse_pattern(p, fallback_name=yaml_file.stem))
+                tasks.append(_parse_task(p, fallback_name=yaml_file.stem))
 
     # Fallback: inline in eval-config.yaml
     if not tasks:
         inline = raw_config.get("tasks") or []
         if isinstance(inline, list):
             for p in inline:
-                tasks.append(_parse_pattern(p))
+                tasks.append(_parse_task(p))
         elif isinstance(inline, dict):
             for name, p in inline.items():
-                tasks.append(_parse_pattern({**p, "name": name}, fallback_name=name))
+                tasks.append(_parse_task({**p, "name": name}, fallback_name=name))
 
     return tasks
 
