@@ -10,6 +10,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from eval.config import Config, Evaluator, Task, Variant
 
@@ -39,7 +40,7 @@ class RunResult:
     def passed(self) -> bool:
         return self.status == "completed" and (all(s.passed for s in self.scores) if self.scores else True)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "task": self.task,
             "variant": self.variant,
@@ -76,8 +77,8 @@ def get_github_token() -> str:
     try:
         r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=True)
         return r.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        raise RuntimeError("GITHUB_TOKEN not set and gh CLI not authenticated")
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        raise RuntimeError("GITHUB_TOKEN not set and gh CLI not authenticated") from exc
 
 
 def run_one(
@@ -93,7 +94,7 @@ def run_one(
     # Health check: verify environment is ready before running Copilot
     if task.health_check:
         if not _run_health_check(task.health_check, config, task, variant, log_file):
-            print(f"    ✗ Health check failed — skipping run")
+            print("    ✗ Health check failed — skipping run")
             return RunResult(
                 task=task.name, variant=variant.name, epoch=epoch,
                 test_id=test_id, run_id=run_id, log_file=log_file,
@@ -199,7 +200,7 @@ def _run_health_check(script: str, config: Config, task: Task, variant: Variant,
     if not resolved.exists():
         print(f"    WARNING: health_check script not found: {script}")
         return True  # skip check if script missing
-    print(f"    Running health_check...")
+    print("    Running health_check...")
     merged_vars = config.resolve_vars(task, variant)
     env = {**os.environ, **_load_env_file(config.env_file), **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()}}
     with open(log_file, "a") as lf:
@@ -368,7 +369,7 @@ def _print_scores(scores: list[EvalScore]) -> None:
         print(f"    {icon} {s.name} ({s.type}): {score_str} — {s.reason[:50]}")
 
 
-def _parse_json(text: str, require_keys: tuple[str, ...] | None = None) -> dict | None:
+def _parse_json(text: str, require_keys: tuple[str, ...] | None = None) -> dict[str, Any] | None:
     """Extract a JSON object from possibly noisy LLM output.
 
     Handles single-line JSON, whole-text JSON, markdown code fences, and

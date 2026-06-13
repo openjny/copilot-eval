@@ -80,6 +80,16 @@ Run the unit tests (pure logic: config parsing/validation, report aggregation, t
 uv run --group dev pytest
 ```
 
+Lint and type-check (the same gates run in CI):
+
+```bash
+uv run ruff check eval tests   # lint
+uv run mypy                     # strict type check (eval package)
+```
+
+These three checks (ruff → mypy → pytest) run automatically on every push to `main`
+and on every pull request via GitHub Actions (`.github/workflows/ci.yml`, Python 3.13).
+
 ## License
 
 MIT

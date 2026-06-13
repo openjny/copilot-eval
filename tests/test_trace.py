@@ -4,8 +4,15 @@ from __future__ import annotations
 import json
 
 from eval import trace as trace_mod
-from eval.trace import (Span, Trace, _parse_messages, extract_conversation,
-                        extract_metrics, fetch_traces, filter_by_run)
+from eval.trace import (
+    Span,
+    Trace,
+    _parse_messages,
+    extract_conversation,
+    extract_metrics,
+    fetch_traces,
+    filter_by_run,
+)
 
 
 def _chat(span_id, in_tok=0, out_tok=0, cache=0, output_msgs=None):

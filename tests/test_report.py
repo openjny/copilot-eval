@@ -3,10 +3,8 @@ from __future__ import annotations
 
 import json
 
-from eval.report import (_aggregate_values, _epoch_sort_key, _load_judge_raw,
-                         build_report)
+from eval.report import _aggregate_values, _epoch_sort_key, _load_judge_raw, build_report
 from tests.conftest import make_metrics
-
 
 # --- Paired aggregation pairs by epoch key, not list index ---
 

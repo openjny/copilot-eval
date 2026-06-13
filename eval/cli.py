@@ -8,14 +8,22 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import click
 import requests
 
-from eval.config import Config, Task, load_config
+from eval.config import Config, Task, Variant, load_config
+from eval.report import build_report, format_json, format_markdown, format_table
 from eval.runner import RunResult, get_github_token, run_one
-from eval.trace import RunMetrics, Trace, extract_conversation, extract_metrics, fetch_traces, filter_by_run
-from eval.report import build_report, format_table, format_json, format_markdown
+from eval.trace import (
+    RunMetrics,
+    Trace,
+    extract_conversation,
+    extract_metrics,
+    fetch_traces,
+    filter_by_run,
+)
 
 
 def _ensure_jaeger(config: Config) -> None:
@@ -60,7 +68,7 @@ def _write_manifest(run_dir: Path, run_id: str, results: list[RunResult]) -> Non
         click.echo(f"WARNING: failed to write run manifest: {e}", err=True)
 
 
-def _load_manifest(results_dir: Path) -> list[dict] | None:
+def _load_manifest(results_dir: Path) -> list[dict[str, Any]] | None:
     """Load persisted runs from a run's manifest. Returns None if not present."""
     manifest_file = results_dir / MANIFEST_NAME
     if not manifest_file.exists():
@@ -118,10 +126,10 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
     click.echo(f" Run ID:   {run_id}")
     if config.vars:
         click.echo(f" Vars:     {config.vars}")
-    click.echo(f" Variants:")
+    click.echo(" Variants:")
     for v in config.variants:
         click.echo(f"   - {v.name}")
-    click.echo(f" Tasks:")
+    click.echo(" Tasks:")
     for p in tasks:
         click.echo(f"   - {p.name}")
     click.echo("=" * 50)
@@ -161,9 +169,9 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
 
         click.echo(f"Running {len(tasks)} tasks in parallel (variants serial within each task)")
         with ThreadPoolExecutor(max_workers=min(len(tasks), config.runner.max_workers)) as pool:
-            futures = {pool.submit(_run_task_serial, t): t.name for t in tasks}
-            for future in as_completed(futures):
-                results.extend(future.result())
+            task_futures = {pool.submit(_run_task_serial, t): t.name for t in tasks}
+            for task_future in as_completed(task_futures):
+                results.extend(task_future.result())
     else:
         for p in tasks:
             prompt = config.resolve_prompt(p, config.variants[0])
@@ -248,7 +256,7 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
 
 
 def _fetch_traces_for_run(config: Config, jaeger: str, run_id: str,
-                          manifest_runs: list[dict] | None) -> list[Trace]:
+                          manifest_runs: list[dict[str, Any]] | None) -> list[Trace]:
     """Fetch traces for a run, retrying while ingestion catches up.
 
     Uses a server-side tag filter on eval.run_id and a high limit so large runs
@@ -284,7 +292,7 @@ def _fetch_traces_for_run(config: Config, jaeger: str, run_id: str,
     return traces
 
 
-def _report_run_coverage(manifest_runs: list[dict], traces: list[Trace]) -> None:
+def _report_run_coverage(manifest_runs: list[dict[str, Any]], traces: list[Trace]) -> None:
     """Reconcile persisted runs against ingested traces and warn about gaps."""
     trace_test_ids = {t.resource_tags.get("eval.test_id") for t in traces}
 
@@ -339,7 +347,7 @@ def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path
         click.echo(f"  WARNING: {len(problems)} judge score(s) unavailable: {', '.join(problems)}", err=True)
 
 
-def _run_judges(config: "Config", traces: list[Trace], results_dir: Path, force: bool = False) -> None:
+def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: bool = False) -> None:
     """Run judge evaluators using OTel traces + output files.
 
     Skips judge evaluators that already have a recorded score (judge presence,
@@ -366,7 +374,7 @@ def _run_judges(config: "Config", traces: list[Trace], results_dir: Path, force:
         scores_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.scores.json"
 
         # Load existing scores and decide which judges still need scoring.
-        existing_scores: list[dict] = []
+        existing_scores: list[dict[str, Any]] = []
         if scores_file.exists():
             try:
                 existing_scores = json.loads(scores_file.read_text())
@@ -434,7 +442,7 @@ def build(variant: str | None, config_dir: str | None) -> None:
     _build_images(config, variants, github_token)
 
 
-def _build_images(config: Config, variants: list, token: str) -> None:
+def _build_images(config: Config, variants: list[Variant], token: str) -> None:
     """Build base + variant Docker images."""
     base_dockerfile = config.project_dir / "docker" / "Dockerfile"
     base_image = f"{config.runner.container_image_base}:base"
@@ -451,7 +459,7 @@ def _build_images(config: Config, variants: list, token: str) -> None:
     ]
     result = subprocess.run(cmd, env=env)
     if result.returncode != 0:
-        raise click.ClickException(f"Base image build failed")
+        raise click.ClickException("Base image build failed")
     click.echo(f"✓ {base_image}")
 
     # Step 2: Build variant images
@@ -473,7 +481,7 @@ def _build_images(config: Config, variants: list, token: str) -> None:
         cmd = [
             "docker", "build",
             "-f", str(df),
-            "--secret", f"id=github_token,env=GITHUB_TOKEN",
+            "--secret", "id=github_token,env=GITHUB_TOKEN",
             "-t", image,
             str(config.project_dir),
         ]
@@ -524,7 +532,7 @@ def list_patterns(config_dir: str | None) -> None:
         prompt_preview = p.prompt[:40] + "..." if len(p.prompt) > 40 else p.prompt
         click.echo(f"  {p.name:<25} {'✓' if p.enabled else '−':<8} {len(p.evaluators):>5} {prompt_preview}")
 
-    click.echo(f"\nVariants:")
+    click.echo("\nVariants:")
     click.echo(f"  {'Name':<25} {'Build':<8} {'Run':<8} Description")
     click.echo("  " + "-" * 75)
     for v in config.variants:
