@@ -41,7 +41,6 @@ def _ensure_jaeger(config: Config) -> None:
     subprocess.run(["docker", "compose", "-f", str(compose_file), "up", "-d"],
                    check=True, capture_output=True)
     # Wait for Jaeger to be ready
-    import time
     for _ in range(10):
         try:
             requests.get(f"{jaeger_url}/api/services", timeout=2)
@@ -99,12 +98,12 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
 
     # Select tasks
     if task:
-        p = config.get_pattern(task)
+        p = config.get_task(task)
         if not p:
             raise click.ClickException(f"Task '{task}' not found. Use 'list' to see available tasks.")
         tasks = [p]
     else:
-        tasks = config.enabled_patterns()
+        tasks = config.enabled_tasks()
 
     if not tasks:
         click.echo("No tasks to run. Use --task NAME or enable tasks in config.")
@@ -521,7 +520,7 @@ def _ensure_images(config: Config, token: str) -> None:
 
 @main.command(name="list")
 @click.option("--config-dir", default=None, type=click.Path(exists=True))
-def list_patterns(config_dir: str | None) -> None:
+def list_tasks(config_dir: str | None) -> None:
     """List available tasks and variants."""
     config = load_config(Path(config_dir) if config_dir else None)
 

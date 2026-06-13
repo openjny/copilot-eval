@@ -29,7 +29,7 @@ def test_inline_tasks_and_variants(tmp_path):
     })
     assert [v.name for v in cfg.variants] == ["a", "b"]
     assert cfg.get_variant("b").model == "x"
-    task = cfg.get_pattern("t1")
+    task = cfg.get_task("t1")
     assert len(task.evaluators) == 4
     assert {e.type for e in task.evaluators} == {"judge", "script", "contains", "regex"}
 
@@ -49,7 +49,7 @@ def test_backward_compat_judges_and_verify(tmp_path):
             "verify": "verify.sh",
         }],
     })
-    task = cfg.get_pattern("t1")
+    task = cfg.get_task("t1")
     by_name = {e.name: e for e in task.evaluators}
     assert by_name["quality"].type == "judge"
     assert by_name["verify"].type == "script"
@@ -64,7 +64,7 @@ def test_backward_compat_metrics_judges_and_reset_script(tmp_path):
             "reset_script": "reset.sh",
         }],
     })
-    task = cfg.get_pattern("t1")
+    task = cfg.get_task("t1")
     assert task.evaluators[0].name == "q"
     assert task.hooks.before_run == "reset.sh"
 
