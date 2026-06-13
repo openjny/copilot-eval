@@ -292,7 +292,8 @@ def run_judge(ev: Evaluator, conversation: str, config: Config, token: str,
     # Disable OTel to avoid contaminating eval traces with judge calls
     judge_env = {**os.environ, "GITHUB_TOKEN": token, "COPILOT_OTEL_ENABLED": "false"}
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=judge_env)
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=config.runner.judge_timeout_seconds, env=judge_env)
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return EvalScore(name=ev.name, type="judge", score=None, reason="timeout")
     data = _parse_json(proc.stdout, require_keys=("score",))

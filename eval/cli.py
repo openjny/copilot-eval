@@ -353,10 +353,19 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
     not file existence — non-judge scores share the same file). Pass force=True
     to re-run every judge regardless of cached scores.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from eval.runner import read_files_from_dir, run_judge
 
     github_token = get_github_token()
     tasks_by_name = {t.name: t for t in config.tasks}
+
+    # Phase 1: build per-trace context and collect the judge work items. Each
+    # trace owns a dedicated scores file; contexts are keyed by that file so
+    # duplicate traces for the same scenario/variant/epoch coalesce into one
+    # writer and don't clobber each other.
+    contexts: dict[str, dict[str, Any]] = {}
+    work: list[tuple[str, Any]] = []  # (context key, evaluator)
 
     for trace in traces:
         scenario = trace.resource_tags.get("eval.scenario", "")
@@ -371,6 +380,9 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
             continue
 
         scores_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.scores.json"
+        key = str(scores_file)
+        if key in contexts:
+            continue  # already collected work for this scores file
 
         # Load existing scores and decide which judges still need scoring.
         existing_scores: list[dict[str, Any]] = []
@@ -403,26 +415,69 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
         output_dir = results_dir / "outputs" / f"{scenario}_{variant}_epoch{epoch}"
         output_files_text = read_files_from_dir(output_dir, max_chars=8000)
 
-        # Run each pending judge evaluator
-        scores = []
+        contexts[key] = {
+            "scenario": scenario,
+            "variant": variant,
+            "epoch": epoch,
+            "scores_file": scores_file,
+            "existing_scores": existing_scores,
+            "conversation": conversation,
+            "output_files_text": output_files_text,
+            "pending_names": {ev.name for ev in pending},
+            "order": {ev.name: i for i, ev in enumerate(pending)},
+            "remaining": len(pending),
+            "scores": [],
+        }
         for ev in pending:
-            click.echo(f"    [{scenario}/{variant}/e{epoch}] Evaluating: {ev.name} (judge)...", err=True)
-            s = run_judge(ev, conversation, config, github_token, output_files_text)
-            if s.score is not None:
-                click.echo(f"    ✓ {ev.name}: {s.score} — {s.reason[:60]}", err=True)
-            else:
-                click.echo(f"    ! {ev.name}: {s.reason}", err=True)
-            scores.append({"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed})
+            work.append((key, ev))
 
-        # Merge: keep non-judge scores + judge scores we didn't re-run, add new ones.
-        rerun_names = {ev.name for ev in pending}
+    if not work:
+        return
+
+    def _write_ctx(ctx: dict[str, Any]) -> None:
+        """Merge a trace's collected judge scores with kept scores and persist."""
+        rerun_names = ctx["pending_names"]
         kept = [
-            s for s in existing_scores
+            s for s in ctx["existing_scores"]
             if s.get("type") != "judge" or s.get("name") not in rerun_names
         ]
+        scores = sorted(ctx["scores"], key=lambda s: ctx["order"].get(s.get("name"), 0))
         all_scores = kept + scores
         if all_scores:
-            scores_file.write_text(json.dumps(all_scores, indent=2, ensure_ascii=False))
+            ctx["scores_file"].write_text(json.dumps(all_scores, indent=2, ensure_ascii=False))
+
+    # Phase 2: run judge evaluators in parallel (each invokes Copilot). Results
+    # are collected per trace context on the main thread; a context's scores
+    # file is written as soon as all of its judges complete, so an interrupt or
+    # crash only loses traces still in flight.
+    def _judge(key: str, ev: Any) -> tuple[str, dict[str, Any]]:
+        ctx = contexts[key]
+        click.echo(
+            f"    [{ctx['scenario']}/{ctx['variant']}/e{ctx['epoch']}] Evaluating: {ev.name} (judge)...",
+            err=True,
+        )
+        s = run_judge(ev, ctx["conversation"], config, github_token, ctx["output_files_text"])
+        if s.score is not None:
+            click.echo(f"    ✓ {ev.name}: {s.score} — {s.reason[:60]}", err=True)
+        else:
+            click.echo(f"    ! {ev.name}: {s.reason}", err=True)
+        return key, {"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed}
+
+    with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
+        futures = {pool.submit(_judge, key, ev): (key, ev) for key, ev in work}
+        for future in as_completed(futures):
+            key, ev = futures[future]
+            try:
+                key, score = future.result()
+            except Exception as exc:  # never let one judge abort the whole batch
+                click.echo(f"    ! {ev.name}: error — {exc}", err=True)
+                score = {"name": ev.name, "type": "judge", "score": None,
+                         "reason": f"error: {exc}", "passed": False}
+            ctx = contexts[key]
+            ctx["scores"].append(score)
+            ctx["remaining"] -= 1
+            if ctx["remaining"] == 0:
+                _write_ctx(ctx)
 
 
 @main.command()
