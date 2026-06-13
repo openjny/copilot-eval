@@ -107,9 +107,13 @@ def run_one(
         f"eval.test_id={test_id}", f"eval.scenario={task.name}",
         f"eval.variant={variant.name}", f"eval.epoch={epoch}", f"eval.run_id={run_id}",
     ])
+    # Build a sanitized env file (quotes stripped) so the container sees the
+    # same values as hooks/evaluators. Values are passed via --env-file rather
+    # than -e KEY=value so they never appear in argv (`ps` leakage).
+    env_file_arg = _write_sanitized_env_file(config)
     cmd = [
         "docker", "run", "--rm", "--add-host=host.docker.internal:host-gateway",
-        "--env-file", str(config.env_file),
+        "--env-file", str(env_file_arg),
         "-e", "GITHUB_TOKEN",
         "-e", "COPILOT_OTEL_ENABLED=true",
         "-e", f"COPILOT_OTEL_CAPTURE_CONTENT={'true' if config.runner.capture_content else 'false'}",
@@ -167,6 +171,11 @@ def run_one(
         _print_scores(scores)
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+        if env_file_arg != config.env_file:
+            env_file_arg.unlink(missing_ok=True)
+        # Redact secret values from the persisted log. Done after evaluators
+        # (contains/regex read the raw log) so masking can't skew their results.
+        _mask_log_file(log_file, collect_secrets(config, github_token))
 
     return RunResult(
         task=task.name, variant=variant.name, epoch=epoch,
@@ -257,6 +266,9 @@ def run_judge(ev: Evaluator, conversation: str, config: Config, token: str,
     (with OTel disabled so judge calls don't contaminate eval traces), and parses
     the JSON verdict.
     """
+    secrets = collect_secrets(config, token)
+    conversation = mask_secrets(conversation, secrets) or ""
+    output_files_text = mask_secrets(output_files_text, secrets)
     sections = [f"--- COPILOT OUTPUT ---\n{conversation}\n--- END OUTPUT ---"]
     if output_files_text:
         sections.append(f"--- OUTPUT FILES ---\n{output_files_text}\n--- END FILES ---")
@@ -411,8 +423,25 @@ def _parse_json(text: str, require_keys: tuple[str, ...] | None = None) -> dict[
     return None
 
 
+def _strip_quotes(value: str) -> str:
+    """Remove a single pair of matching surrounding quotes from a value.
+
+    Mirrors standard dotenv semantics: ``KEY="value"`` and ``KEY='value'``
+    yield ``value`` (without the quotes). Values without matching surrounding
+    quotes are returned unchanged.
+    """
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
 def _load_env_file(env_file: Path) -> dict[str, str]:
-    """Parse a .env file into a dict, ignoring comments and empty lines."""
+    """Parse a .env file into a dict, ignoring comments and empty lines.
+
+    Surrounding matching quotes are stripped from values so hooks and
+    evaluator scripts receive the same value the container sees (the sanitized
+    env file passed to ``docker --env-file`` is built from this same parse).
+    """
     env: dict[str, str] = {}
     if not env_file.exists():
         return env
@@ -422,5 +451,78 @@ def _load_env_file(env_file: Path) -> dict[str, str]:
             continue
         if "=" in line:
             key, _, value = line.partition("=")
-            env[key.strip()] = value.strip()
+            env[key.strip()] = _strip_quotes(value.strip())
     return env
+
+
+# Values shorter than this are not treated as secrets to mask, to avoid
+# redacting trivial non-sensitive values like "1", "true", or short flags.
+_MIN_SECRET_LEN = 6
+_SECRET_PLACEHOLDER = "***REDACTED***"
+
+
+def collect_secrets(config: Config, token: str | None = None) -> list[str]:
+    """Collect secret values to redact from logs and judge input.
+
+    Combines the values of the project's ``.env`` file with ``GITHUB_TOKEN``
+    (and any explicitly provided ``token``). Short values are filtered out to
+    avoid masking trivial, non-sensitive values.
+    """
+    candidates = list(_load_env_file(config.env_file).values())
+    candidates.append(os.environ.get("GITHUB_TOKEN", ""))
+    if token:
+        candidates.append(token)
+    secrets: list[str] = []
+    seen: set[str] = set()
+    for value in candidates:
+        value = (value or "").strip()
+        if len(value) >= _MIN_SECRET_LEN and value not in seen:
+            seen.add(value)
+            secrets.append(value)
+    # Mask longer values first so overlapping substrings are handled correctly.
+    secrets.sort(key=len, reverse=True)
+    return secrets
+
+
+def mask_secrets(text: str | None, secrets: list[str]) -> str | None:
+    """Replace any occurrence of a secret value in ``text`` with a placeholder."""
+    if not text or not secrets:
+        return text
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, _SECRET_PLACEHOLDER)
+    return text
+
+
+def _write_sanitized_env_file(config: Config) -> Path:
+    """Write a quote-stripped copy of the project's .env for ``docker --env-file``.
+
+    Returns a temp file path (mode 0600) so the container receives the same
+    normalized values as hooks/evaluators, without exposing them via argv. The
+    caller is responsible for deleting the returned file. If no .env exists, an
+    empty temp file is returned so ``--env-file`` still gets a valid path.
+    """
+    parsed = _load_env_file(config.env_file)
+    fd, name = tempfile.mkstemp(prefix="eval-env-", suffix=".env")
+    path = Path(name)
+    os.chmod(path, 0o600)
+    with os.fdopen(fd, "w") as f:
+        for key, value in parsed.items():
+            f.write(f"{key}={value}\n")
+    return path
+
+
+def _mask_log_file(log_file: Path, secrets: list[str]) -> None:
+    """Rewrite ``log_file`` in place with secret values redacted."""
+    if not secrets:
+        return
+    try:
+        text = log_file.read_text()
+    except OSError:
+        return
+    masked = mask_secrets(text, secrets)
+    if masked is not None and masked != text:
+        try:
+            log_file.write_text(masked)
+        except OSError:
+            pass

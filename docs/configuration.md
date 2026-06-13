@@ -130,3 +130,40 @@ A script that validates the environment is ready before running Copilot. If it e
 | `off` | Sequential execution |
 | `per_task` | Tasks run in parallel, variants within a task are sequential |
 | `full` | All task×variant×epoch combinations run in parallel (up to `max_workers`) |
+
+## Secrets & `.env`
+
+Place a `.env` file next to `eval-config.yaml` (`<project-dir>/.env`). Each `KEY=value`
+line is loaded and made available to:
+
+- the **container** (via `docker --env-file`), and
+- **hooks**, **health checks**, and **script evaluators** (via the process environment).
+
+### Quoting
+
+Surrounding matching quotes are stripped, following standard dotenv semantics:
+
+```dotenv
+PLAIN=value            # -> value
+DQUOTED="some value"   # -> some value
+SQUOTED='some value'   # -> some value
+```
+
+The same normalized (quote-stripped) value is used everywhere. Internally the
+container receives a sanitized temporary env file rather than the raw `.env`, so
+hooks and the container always see **identical** values. Secret values are never
+placed in `argv`, so they don't leak via `ps`.
+
+### Secret masking
+
+To reduce the risk of secrets leaking through evaluation artifacts, values from
+`.env` and `GITHUB_TOKEN` are redacted (replaced with `***REDACTED***`) in:
+
+- the **persisted run log** (`*.log`) — masked after `contains`/`regex` evaluators
+  have read it, so masking can't affect their results, and
+- the **text passed to judge evaluators** (captured conversation + output files),
+  in both the `run` and `analyze` paths.
+
+Values shorter than 6 characters are not masked, to avoid redacting trivial,
+non-sensitive values (e.g. `1`, `true`).
+
