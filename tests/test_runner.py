@@ -1,9 +1,10 @@
 """Tests for .env parsing, secret collection, and masking."""
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
-from eval.config import Config, RunnerConfig
+from eval.config import Config, RunnerConfig, Variant
 from eval.runner import (
     _load_env_file,
     _mask_log_file,
@@ -115,3 +116,35 @@ def test_mask_log_file_redacts_in_place(tmp_path):
     text = log.read_text()
     assert "supersecretvalue" not in text
     assert "***REDACTED***" in text
+
+
+def test_run_one_masks_log_on_setup_failed(tmp_path, monkeypatch):
+    """Early setup_failed return must still redact secrets from the log."""
+    from eval import runner as runner_mod
+    from eval.config import Task
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    (tmp_path / ".env").write_text('SECRET="supersecretvalue"\n')
+    config = _config(tmp_path)
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+
+    def fake_before_run(script, cfg, task, variant, log_file, label):
+        log_file.write_text("before_run printed supersecretvalue\n")
+
+    monkeypatch.setattr(runner_mod, "_run_hook", fake_before_run)
+    monkeypatch.setattr(runner_mod, "_run_health_check", lambda *a, **k: False)
+
+    task = Task(name="t", prompt="p", health_check="hc.sh")
+    variant = Variant(name="v")
+    result = runner_mod.run_one(
+        task, variant, epoch=1, config=config, run_id="r", run_dir=run_dir,
+        github_token="ghp_tokenvalue123",
+    )
+
+    assert result.status == "setup_failed"
+    text = result.log_file.read_text()
+    assert "supersecretvalue" not in text
+    assert "***REDACTED***" in text
+    # No leftover temp env files.
+    assert not list(Path(tempfile.gettempdir()).glob("eval-env-*"))

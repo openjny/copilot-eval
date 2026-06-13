@@ -167,3 +167,16 @@ To reduce the risk of secrets leaking through evaluation artifacts, values from
 Values shorter than 6 characters are not masked, to avoid redacting trivial,
 non-sensitive values (e.g. `1`, `true`).
 
+> **Scope & limitations**
+> - **All** `.env` values (≥6 chars) are treated as secrets, not just
+>   secret-looking keys. Non-secret config (endpoints, regions, org names) in
+>   `.env` is therefore also redacted from judge input. Keep purely informational
+>   values out of `.env` (use `vars`) if you want the judge to see them.
+> - Masking is applied to logs and judge input only. Files persisted under
+>   `results/outputs/` are **not** redacted — avoid having Copilot write secrets
+>   to `/workspace/output/`.
+> - During `analyze`, secrets are collected from the **current** `.env` /
+>   `GITHUB_TOKEN`. If a token was rotated after the `run`, OTel-sourced
+>   conversation text may not be masked for the rotated value. Logs are already
+>   masked at run time, so this only affects late judge runs.
+

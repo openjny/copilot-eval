@@ -89,75 +89,81 @@ def run_one(
     log_file = run_dir / f"{task.name}_{variant.name}_epoch{epoch}.log"
     print(f"--- [{task.name}] epoch={epoch} variant={variant.name} test_id={test_id[:8]}")
 
-    _run_hook(task.hooks.before_run, config, task, variant, log_file, "before_run")
-
-    # Health check: verify environment is ready before running Copilot
-    if task.health_check:
-        if not _run_health_check(task.health_check, config, task, variant, log_file):
-            print("    ✗ Health check failed — skipping run")
-            return RunResult(
-                task=task.name, variant=variant.name, epoch=epoch,
-                test_id=test_id, run_id=run_id, log_file=log_file,
-                exit_code=-1, status="setup_failed",
-            )
-
-    prompt = config.resolve_prompt(task, variant)
-    image = config.image_name(variant)
-    otel_attrs = ",".join([
-        f"eval.test_id={test_id}", f"eval.scenario={task.name}",
-        f"eval.variant={variant.name}", f"eval.epoch={epoch}", f"eval.run_id={run_id}",
-    ])
-    # Build a sanitized env file (quotes stripped) so the container sees the
-    # same values as hooks/evaluators. Values are passed via --env-file rather
-    # than -e KEY=value so they never appear in argv (`ps` leakage).
-    env_file_arg = _write_sanitized_env_file(config)
-    cmd = [
-        "docker", "run", "--rm", "--add-host=host.docker.internal:host-gateway",
-        "--env-file", str(env_file_arg),
-        "-e", "GITHUB_TOKEN",
-        "-e", "COPILOT_OTEL_ENABLED=true",
-        "-e", f"COPILOT_OTEL_CAPTURE_CONTENT={'true' if config.runner.capture_content else 'false'}",
-        "-e", f"OTEL_EXPORTER_OTLP_ENDPOINT={config.runner.otel_endpoint}",
-        "-e", f"OTEL_RESOURCE_ATTRIBUTES={otel_attrs}",
-        "-e", "OTEL_SERVICE_NAME=github-copilot",
-    ]
-    copilot_home = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot")).resolve()
-    if copilot_home.is_dir():
-        cmd.extend(["-v", f"{copilot_home}:/copilot-home-src:ro"])
-
-    # Writable workspace: copy fixture to tmpdir so Copilot can read AND write
-    work_dir = Path(tempfile.mkdtemp(prefix="eval-work-"))
-    fixture_dir = (config.config_dir / "fixtures" / (task.fixture or task.name)).resolve()
-    if fixture_dir.is_dir():
-        shutil.copytree(fixture_dir, work_dir, dirs_exist_ok=True)
-    # Create output dir for Copilot to write artifacts (used by judge evaluator)
-    (work_dir / "output").mkdir(exist_ok=True)
-    cmd.extend(["-v", f"{work_dir}:/workspace"])
-
-    if variant.run_script:
-        rsp = (config.project_dir / variant.run_script).resolve()
-        if rsp.exists():
-            cmd.extend(["-v", f"{rsp}:/tmp/eval-setup.sh:ro", "-e", "EVAL_SETUP_SCRIPT=/tmp/eval-setup.sh"])
-
-    copilot_args = ["copilot", "-p", prompt, "--yolo"]
-    model = variant.model or config.runner.model
-    if model:
-        copilot_args.extend(["--model", model])
-    if config.runner.reasoning_effort:
-        copilot_args.extend(["--effort", config.runner.reasoning_effort])
-    if config.runner.max_turns:
-        copilot_args.extend(["--max-autopilot-continues", str(config.runner.max_turns)])
-    if config.runner.output_format == "json":
-        copilot_args.extend(["--output-format", "json"])
-    timeout = task.timeout_seconds or config.runner.timeout_seconds
-    cmd.extend([image, "timeout", f"{timeout}s", *copilot_args])
-
-    print("    Running copilot in container...")
-    # Pass GITHUB_TOKEN through the process environment rather than embedding the
-    # value in argv, so it does not leak via `ps` / process-args listings.
-    # (Residual exposure via `docker inspect` requires Docker socket access.)
-    run_env = {**os.environ, "GITHUB_TOKEN": github_token}
+    # Tracked across the run so the outer `finally` can always clean up and
+    # redact secrets, even on early returns (e.g. setup_failed) or exceptions.
+    env_file_arg: Path | None = None
+    work_dir: Path | None = None
+    scores: list[EvalScore] = []
+    proc: subprocess.CompletedProcess[bytes] | None = None
     try:
+        _run_hook(task.hooks.before_run, config, task, variant, log_file, "before_run")
+
+        # Health check: verify environment is ready before running Copilot
+        if task.health_check:
+            if not _run_health_check(task.health_check, config, task, variant, log_file):
+                print("    ✗ Health check failed — skipping run")
+                return RunResult(
+                    task=task.name, variant=variant.name, epoch=epoch,
+                    test_id=test_id, run_id=run_id, log_file=log_file,
+                    exit_code=-1, status="setup_failed",
+                )
+
+        prompt = config.resolve_prompt(task, variant)
+        image = config.image_name(variant)
+        otel_attrs = ",".join([
+            f"eval.test_id={test_id}", f"eval.scenario={task.name}",
+            f"eval.variant={variant.name}", f"eval.epoch={epoch}", f"eval.run_id={run_id}",
+        ])
+        # Build a sanitized env file (quotes stripped) so the container sees the
+        # same values as hooks/evaluators. Values are passed via --env-file rather
+        # than -e KEY=value so they never appear in argv (`ps` leakage).
+        env_file_arg = _write_sanitized_env_file(config)
+        cmd = [
+            "docker", "run", "--rm", "--add-host=host.docker.internal:host-gateway",
+            "--env-file", str(env_file_arg),
+            "-e", "GITHUB_TOKEN",
+            "-e", "COPILOT_OTEL_ENABLED=true",
+            "-e", f"COPILOT_OTEL_CAPTURE_CONTENT={'true' if config.runner.capture_content else 'false'}",
+            "-e", f"OTEL_EXPORTER_OTLP_ENDPOINT={config.runner.otel_endpoint}",
+            "-e", f"OTEL_RESOURCE_ATTRIBUTES={otel_attrs}",
+            "-e", "OTEL_SERVICE_NAME=github-copilot",
+        ]
+        copilot_home = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot")).resolve()
+        if copilot_home.is_dir():
+            cmd.extend(["-v", f"{copilot_home}:/copilot-home-src:ro"])
+
+        # Writable workspace: copy fixture to tmpdir so Copilot can read AND write
+        work_dir = Path(tempfile.mkdtemp(prefix="eval-work-"))
+        fixture_dir = (config.config_dir / "fixtures" / (task.fixture or task.name)).resolve()
+        if fixture_dir.is_dir():
+            shutil.copytree(fixture_dir, work_dir, dirs_exist_ok=True)
+        # Create output dir for Copilot to write artifacts (used by judge evaluator)
+        (work_dir / "output").mkdir(exist_ok=True)
+        cmd.extend(["-v", f"{work_dir}:/workspace"])
+
+        if variant.run_script:
+            rsp = (config.project_dir / variant.run_script).resolve()
+            if rsp.exists():
+                cmd.extend(["-v", f"{rsp}:/tmp/eval-setup.sh:ro", "-e", "EVAL_SETUP_SCRIPT=/tmp/eval-setup.sh"])
+
+        copilot_args = ["copilot", "-p", prompt, "--yolo"]
+        model = variant.model or config.runner.model
+        if model:
+            copilot_args.extend(["--model", model])
+        if config.runner.reasoning_effort:
+            copilot_args.extend(["--effort", config.runner.reasoning_effort])
+        if config.runner.max_turns:
+            copilot_args.extend(["--max-autopilot-continues", str(config.runner.max_turns)])
+        if config.runner.output_format == "json":
+            copilot_args.extend(["--output-format", "json"])
+        timeout = task.timeout_seconds or config.runner.timeout_seconds
+        cmd.extend([image, "timeout", f"{timeout}s", *copilot_args])
+
+        print("    Running copilot in container...")
+        # Pass GITHUB_TOKEN through the process environment rather than embedding the
+        # value in argv, so it does not leak via `ps` / process-args listings.
+        # (Residual exposure via `docker inspect` requires Docker socket access.)
+        run_env = {**os.environ, "GITHUB_TOKEN": github_token}
         with open(log_file, "a") as lf:
             proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=run_env)
         _print_summary(log_file)
@@ -170,11 +176,13 @@ def run_one(
         scores = _run_evaluators(task, variant, config, log_file, github_token, work_dir)
         _print_scores(scores)
     finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
-        if env_file_arg != config.env_file:
+        if work_dir is not None:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        if env_file_arg is not None:
             env_file_arg.unlink(missing_ok=True)
-        # Redact secret values from the persisted log. Done after evaluators
-        # (contains/regex read the raw log) so masking can't skew their results.
+        # Redact secret values from the persisted log. Done in `finally` (after
+        # evaluators, which read the raw log for contains/regex) so it also
+        # covers early returns and exceptions, and never skews evaluator results.
         _mask_log_file(log_file, collect_secrets(config, github_token))
 
     return RunResult(
