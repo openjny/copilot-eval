@@ -1,19 +1,38 @@
-"""Tests for side-effect-free helpers in runner.py (status mapping, JSON
-parsing, env-file parsing, directory reading, and RunResult serialization)."""
+"""Tests for side-effect-free helpers in runner.py.
+
+Covers status mapping, JSON parsing, env-file parsing (including quote
+stripping), directory reading, RunResult serialization, secret collection,
+and secret masking.
+"""
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import pytest
 
+from eval.config import Config, RunnerConfig, Variant
 from eval.runner import (
     EvalScore,
     RunResult,
     _load_env_file,
+    _mask_log_file,
     _parse_json,
+    _strip_quotes,
+    _write_sanitized_env_file,
+    collect_secrets,
+    mask_secrets,
     read_files_from_dir,
     status_from_exit_code,
 )
+
+
+def _config(tmp_path: Path) -> Config:
+    return Config(
+        vars={}, runner=RunnerConfig(), tasks=[], variants=[],
+        project_dir=tmp_path, config_dir=tmp_path,
+    )
+
 
 # --- status_from_exit_code ---
 
@@ -141,6 +160,39 @@ def test_load_env_file_missing_returns_empty(tmp_path: Path):
     assert _load_env_file(tmp_path / "nope.env") == {}
 
 
+def test_load_env_file_strips_quotes(tmp_path: Path):
+    env = tmp_path / ".env"
+    env.write_text(
+        '# comment\n'
+        'PLAIN=value\n'
+        'DQ="quoted value"\n'
+        "SQ='single quoted'\n"
+        '\n'
+        'EMPTY=\n'
+    )
+    parsed = _load_env_file(env)
+    assert parsed == {
+        "PLAIN": "value",
+        "DQ": "quoted value",
+        "SQ": "single quoted",
+        "EMPTY": "",
+    }
+
+
+# --- _strip_quotes ---
+
+def test_strip_quotes_removes_matching_pairs():
+    assert _strip_quotes('"value"') == "value"
+    assert _strip_quotes("'value'") == "value"
+
+
+def test_strip_quotes_leaves_unmatched_or_bare():
+    assert _strip_quotes("value") == "value"
+    assert _strip_quotes('"value') == '"value'
+    assert _strip_quotes("'value\"") == "'value\""
+    assert _strip_quotes('"') == '"'
+
+
 # --- read_files_from_dir ---
 
 def test_read_files_from_dir_none_or_not_dir(tmp_path: Path):
@@ -249,3 +301,102 @@ def test_to_dict_structure():
             {"name": "a", "type": "contains", "score": 1, "reason": "found", "passed": True},
         ],
     }
+
+
+# --- collect_secrets / mask_secrets ---
+
+def test_collect_secrets_filters_short_values(tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    env = tmp_path / ".env"
+    env.write_text('FLAG=1\nBOOL=true\nSECRET="supersecretvalue"\n')
+    secrets = collect_secrets(_config(tmp_path))
+    assert "supersecretvalue" in secrets
+    assert "1" not in secrets
+    assert "true" not in secrets
+
+
+def test_collect_secrets_includes_token(tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    (tmp_path / ".env").write_text("")
+    secrets = collect_secrets(_config(tmp_path), token="ghp_tokenvalue123")
+    assert "ghp_tokenvalue123" in secrets
+
+
+def test_mask_secrets_replaces_all_occurrences():
+    secrets = ["supersecretvalue", "ghp_tokenvalue123"]
+    text = "key=supersecretvalue and token ghp_tokenvalue123 here supersecretvalue"
+    masked = mask_secrets(text, secrets)
+    assert "supersecretvalue" not in masked
+    assert "ghp_tokenvalue123" not in masked
+    assert masked.count("***REDACTED***") == 3
+
+
+def test_mask_secrets_noop_for_empty():
+    assert mask_secrets("", ["x"]) == ""
+    assert mask_secrets("text", []) == "text"
+    assert mask_secrets(None, ["x"]) is None
+
+
+def test_write_sanitized_env_file_strips_quotes(tmp_path):
+    config = _config(tmp_path)
+    (tmp_path / ".env").write_text('DQ="quoted value"\nPLAIN=value\n')
+    out = _write_sanitized_env_file(config)
+    try:
+        assert out != config.env_file
+        assert (out.stat().st_mode & 0o777) == 0o600
+        content = out.read_text()
+        assert "DQ=quoted value\n" in content
+        assert "PLAIN=value\n" in content
+        assert '"' not in content
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_write_sanitized_env_file_handles_missing_env(tmp_path):
+    out = _write_sanitized_env_file(_config(tmp_path))
+    try:
+        assert out.exists()
+        assert out.read_text() == ""
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_mask_log_file_redacts_in_place(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_text("output contains supersecretvalue in the logs\n")
+    _mask_log_file(log, ["supersecretvalue"])
+    text = log.read_text()
+    assert "supersecretvalue" not in text
+    assert "***REDACTED***" in text
+
+
+def test_run_one_masks_log_on_setup_failed(tmp_path, monkeypatch):
+    """Early setup_failed return must still redact secrets from the log."""
+    from eval import runner as runner_mod
+    from eval.config import Task
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    (tmp_path / ".env").write_text('SECRET="supersecretvalue"\n')
+    config = _config(tmp_path)
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+
+    def fake_before_run(script, cfg, task, variant, log_file, label):
+        log_file.write_text("before_run printed supersecretvalue\n")
+
+    monkeypatch.setattr(runner_mod, "_run_hook", fake_before_run)
+    monkeypatch.setattr(runner_mod, "_run_health_check", lambda *a, **k: False)
+
+    task = Task(name="t", prompt="p", health_check="hc.sh")
+    variant = Variant(name="v")
+    result = runner_mod.run_one(
+        task, variant, epoch=1, config=config, run_id="r", run_dir=run_dir,
+        github_token="ghp_tokenvalue123",
+    )
+
+    assert result.status == "setup_failed"
+    text = result.log_file.read_text()
+    assert "supersecretvalue" not in text
+    assert "***REDACTED***" in text
+    # No leftover temp env files.
+    assert not list(Path(tempfile.gettempdir()).glob("eval-env-*"))

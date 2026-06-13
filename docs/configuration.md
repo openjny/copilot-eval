@@ -133,3 +133,53 @@ A script that validates the environment is ready before running Copilot. If it e
 | `full` | All task×variant×epoch combinations run in parallel (up to `max_workers`) |
 
 During `analyze`, judge evaluators are always run in parallel across traces (up to `max_workers`), independent of the `parallel` mode above. Each judge's Copilot invocation is bounded by `judge_timeout_seconds`. Scores files are written per trace, so parallel judging does not cause write conflicts.
+
+## Secrets & `.env`
+
+Place a `.env` file next to `eval-config.yaml` (`<project-dir>/.env`). Each `KEY=value`
+line is loaded and made available to:
+
+- the **container** (via `docker --env-file`), and
+- **hooks**, **health checks**, and **script evaluators** (via the process environment).
+
+### Quoting
+
+Surrounding matching quotes are stripped, following standard dotenv semantics:
+
+```dotenv
+PLAIN=value            # -> value
+DQUOTED="some value"   # -> some value
+SQUOTED='some value'   # -> some value
+```
+
+The same normalized (quote-stripped) value is used everywhere. Internally the
+container receives a sanitized temporary env file rather than the raw `.env`, so
+hooks and the container always see **identical** values. Secret values are never
+placed in `argv`, so they don't leak via `ps`.
+
+### Secret masking
+
+To reduce the risk of secrets leaking through evaluation artifacts, values from
+`.env` and `GITHUB_TOKEN` are redacted (replaced with `***REDACTED***`) in:
+
+- the **persisted run log** (`*.log`) — masked after `contains`/`regex` evaluators
+  have read it, so masking can't affect their results, and
+- the **text passed to judge evaluators** (captured conversation + output files),
+  in both the `run` and `analyze` paths.
+
+Values shorter than 6 characters are not masked, to avoid redacting trivial,
+non-sensitive values (e.g. `1`, `true`).
+
+> **Scope & limitations**
+> - **All** `.env` values (≥6 chars) are treated as secrets, not just
+>   secret-looking keys. Non-secret config (endpoints, regions, org names) in
+>   `.env` is therefore also redacted from judge input. Keep purely informational
+>   values out of `.env` (use `vars`) if you want the judge to see them.
+> - Masking is applied to logs and judge input only. Files persisted under
+>   `results/outputs/` are **not** redacted — avoid having Copilot write secrets
+>   to `/workspace/output/`.
+> - During `analyze`, secrets are collected from the **current** `.env` /
+>   `GITHUB_TOKEN`. If a token was rotated after the `run`, OTel-sourced
+>   conversation text may not be masked for the rotated value. Logs are already
+>   masked at run time, so this only affects late judge runs.
+
