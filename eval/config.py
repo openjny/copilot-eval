@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -152,7 +153,7 @@ def load_config(config_dir: Path | None = None) -> Config:
                   project_dir=project_dir, config_dir=config_dir)
 
 
-def _build_runner(runner_raw: dict) -> RunnerConfig:
+def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
     if not isinstance(runner_raw, dict):
         raise ConfigError(f"'runner' must be a mapping, got {type(runner_raw).__name__}.")
 
@@ -208,13 +209,13 @@ def _coerce_int(key: str, value: object, minimum: int | None = None) -> int:
     return value
 
 
-def _require_int(raw: dict, key: str, default: int, minimum: int | None = None) -> int:
+def _require_int(raw: dict[str, Any], key: str, default: int, minimum: int | None = None) -> int:
     if key not in raw or raw[key] is None:
         return default
     return _coerce_int(f"runner.{key}", raw[key], minimum=minimum)
 
 
-def _require_number(raw: dict, key: str, default: float, minimum: float | None = None) -> float:
+def _require_number(raw: dict[str, Any], key: str, default: float, minimum: float | None = None) -> float:
     if key not in raw or raw[key] is None:
         return default
     value = raw[key]
@@ -225,7 +226,7 @@ def _require_number(raw: dict, key: str, default: float, minimum: float | None =
     return float(value)
 
 
-def _check_duplicate_names(items: list, label: str) -> None:
+def _check_duplicate_names(items: list[Any], label: str) -> None:
     seen: set[str] = set()
     for item in items:
         if item.name in seen:
@@ -235,7 +236,7 @@ def _check_duplicate_names(items: list, label: str) -> None:
 
 # --- Internal parsers ---
 
-def _parse_evaluators(raw_list: list | None, context: str = "") -> list[Evaluator]:
+def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Evaluator]:
     if not raw_list:
         return []
     where = f" in {context}" if context else ""
@@ -274,19 +275,19 @@ def _parse_evaluators(raw_list: list | None, context: str = "") -> list[Evaluato
             try:
                 re.compile(str(value))
             except re.error as exc:
-                raise ConfigError(f"Evaluator '{name}'{where} has an invalid regex 'value': {exc}.")
+                raise ConfigError(f"Evaluator '{name}'{where} has an invalid regex 'value': {exc}.") from exc
 
         evaluators.append(Evaluator(name=name, type=etype, prompt=prompt, script=script, value=value))
     return evaluators
 
 
-def _parse_hooks(raw: dict | None) -> Hooks:
+def _parse_hooks(raw: dict[str, Any] | None) -> Hooks:
     if not raw:
         return Hooks()
     return Hooks(before_run=raw.get("before_run"), after_run=raw.get("after_run"))
 
 
-def _parse_pattern(p: dict, fallback_name: str = "") -> Task:
+def _parse_pattern(p: dict[str, Any], fallback_name: str = "") -> Task:
     if not isinstance(p, dict):
         raise ConfigError(f"Task definition must be a mapping, got {type(p).__name__}.")
     name = str(p.get("name", fallback_name) or "")
@@ -309,7 +310,7 @@ def _parse_pattern(p: dict, fallback_name: str = "") -> Task:
         try:
             evaluators_raw = [{"name": j["name"], "type": "judge", "prompt": j["prompt"]} for j in judges]
         except (KeyError, TypeError) as exc:
-            raise ConfigError(f"Task '{name}' has a malformed 'judges' entry (missing {exc}).")
+            raise ConfigError(f"Task '{name}' has a malformed 'judges' entry (missing {exc}).") from exc
         if p.get("verify"):
             evaluators_raw.append({"name": "verify", "type": "script", "script": p["verify"]})
 
@@ -331,7 +332,7 @@ def _parse_pattern(p: dict, fallback_name: str = "") -> Task:
     )
 
 
-def _parse_variant(v: dict, fallback_name: str = "") -> Variant:
+def _parse_variant(v: dict[str, Any], fallback_name: str = "") -> Variant:
     if not isinstance(v, dict):
         raise ConfigError(f"Variant definition must be a mapping, got {type(v).__name__}.")
     name = str(v.get("name", fallback_name) or "")
@@ -354,7 +355,7 @@ def _parse_variant(v: dict, fallback_name: str = "") -> Variant:
     )
 
 
-def _load_patterns(config_dir: Path, raw_config: dict) -> list[Task]:
+def _load_patterns(config_dir: Path, raw_config: dict[str, Any]) -> list[Task]:
     tasks: list[Task] = []
 
     # Primary: tasks/*.yaml files
@@ -379,7 +380,7 @@ def _load_patterns(config_dir: Path, raw_config: dict) -> list[Task]:
     return tasks
 
 
-def _load_variants(config_dir: Path, raw_config: dict) -> list[Variant]:
+def _load_variants(config_dir: Path, raw_config: dict[str, Any]) -> list[Variant]:
     variants: list[Variant] = []
 
     # Primary: variants/*.yaml files

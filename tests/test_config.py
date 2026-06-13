@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from eval.config import ConfigError, load_config
-from tests.conftest import load_inline, write_config
+from tests.conftest import load_inline
 
 
 def _base(**runner):

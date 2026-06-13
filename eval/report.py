@@ -5,7 +5,8 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from statistics import median, mean as _mean
+from statistics import mean as _mean
+from statistics import median
 
 from eval.trace import RunMetrics
 

@@ -1,9 +1,8 @@
 """Fetch and parse OTel traces from Jaeger."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 import json
+from dataclasses import dataclass, field
 
 import requests
 
@@ -176,7 +175,6 @@ def _parse_messages(raw: str) -> str | None:
     for msg in messages:
         if not isinstance(msg, dict):
             continue
-        role = msg.get("role", "")
         # Text content
         content = msg.get("content")
         if content and isinstance(content, str):
