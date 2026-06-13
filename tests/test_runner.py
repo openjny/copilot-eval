@@ -59,6 +59,26 @@ def test_parse_json_embedded_in_prose_multiline():
     assert _parse_json(text) == {"score": 4, "reason": "acceptable"}
 
 
+def test_parse_json_fence_is_only_valid_candidate():
+    # Surrounding prose contains brace-noise that is not valid JSON, so the
+    # match must come from the code-fence branch specifically.
+    text = 'noise {not json}\n```json\n{\n  "score": 7\n}\n```\nmore {bad}'
+    assert _parse_json(text) == {"score": 7}
+
+
+def test_parse_json_only_first_fence_is_considered():
+    # The fence regex is non-greedy and only the first fenced block is captured.
+    # The first block lacks `score`; since require_keys filters it out and the
+    # later (valid) fenced block is never extracted (the brace/single-line
+    # fallbacks can't isolate a multiline object after noise), the result is
+    # None. This documents the current first-fence-only behavior.
+    text = (
+        '```json\n{"note": "thinking"}\n```\n'
+        '```json\n{\n  "score": 5\n}\n```'
+    )
+    assert _parse_json(text, require_keys=("score",)) is None
+
+
 def test_parse_json_require_keys_accepts_matching():
     text = '{"score": 9, "reason": "great"}'
     assert _parse_json(text, require_keys=("score",)) == {"score": 9, "reason": "great"}
@@ -141,6 +161,17 @@ def test_read_files_from_dir_concatenates_sorted_with_headers(tmp_path: Path):
     (d / "a.txt").write_text("first")
     result = read_files_from_dir(d)
     assert result == "=== a.txt ===\nfirst\n\n=== b.txt ===\nsecond"
+
+
+def test_read_files_from_dir_includes_nested_files(tmp_path: Path):
+    d = tmp_path / "out"
+    d.mkdir()
+    (d / "top.txt").write_text("top")
+    (d / "sub").mkdir()
+    (d / "sub" / "x.txt").write_text("nested")
+    result = read_files_from_dir(d)
+    assert "=== sub/x.txt ===\nnested" in result
+    assert "=== top.txt ===\ntop" in result
 
 
 def test_read_files_from_dir_truncates_at_max_chars(tmp_path: Path):
