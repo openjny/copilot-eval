@@ -29,6 +29,7 @@ class RunnerConfig:
     max_turns: int | None = None
     parallel: str = "off"  # off | per_task | full
     max_workers: int = 8
+    judge_timeout_seconds: int = 60
     output_format: str = "text"
     capture_content: bool = True
     container_image_base: str = "copilot-eval"
@@ -172,6 +173,7 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
     epochs = _require_int(runner_raw, "epochs", 1, minimum=1)
     timeout_seconds = _require_int(runner_raw, "timeout_seconds", 300, minimum=1)
     max_workers = _require_int(runner_raw, "max_workers", 8, minimum=1)
+    judge_timeout_seconds = _require_int(runner_raw, "judge_timeout_seconds", 60, minimum=1)
     max_turns = runner_raw.get("max_turns")
     if max_turns is not None:
         max_turns = _coerce_int("runner.max_turns", max_turns, minimum=1)
@@ -189,6 +191,7 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         max_turns=max_turns,
         parallel=parallel,
         max_workers=max_workers,
+        judge_timeout_seconds=judge_timeout_seconds,
         output_format=output_format,
         capture_content=runner_raw.get("capture_content", True),
         container_image_base=runner_raw.get("container_image_base", "copilot-eval"),
