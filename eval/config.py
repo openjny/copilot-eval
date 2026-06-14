@@ -15,8 +15,10 @@ class ConfigError(ValueError):
 
 EVALUATOR_TYPES = ("judge", "script", "contains", "regex")
 PARALLEL_MODES = ("off", "per_task", "full")
+VARIANT_ORDER_MODES = ("fixed", "counterbalance", "random")
 OUTPUT_FORMATS = ("text", "json")
 JUDGE_AGGREGATE_MODES = ("median", "mean", "majority")
+DEFAULT_OUTPUT_INSTRUCTION = "Save all output files under /workspace/output/."
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -34,9 +36,22 @@ class RunnerConfig:
     max_turns: int | None = None
     parallel: str = "off"  # off | per_task | full
     max_workers: int = 8
+    variant_order: str = "fixed"  # fixed | counterbalance | random
+    seed: int | None = None  # RNG seed for variant_order=random (reproducibility)
     judge_timeout_seconds: int = 60
+    # Expected host `copilot --version` for judge runs. When set, analyze warns
+    # if the host Copilot CLI used for judging differs from this value.
+    judge_copilot_version: str | None = None
+    # Context budgets (in characters) for the judge prompt. Conversation and
+    # output-file text are truncated to these limits; truncation is recorded in
+    # judge score metadata and surfaced in the report.
+    judge_max_conversation_chars: int = 8000
+    judge_max_output_chars: int = 8000
     output_format: str = "text"
     capture_content: bool = True
+    # Instruction appended to every prompt so generated files reach the judges.
+    # Empty string disables it; supports {var} interpolation like prompts.
+    output_instruction: str = DEFAULT_OUTPUT_INSTRUCTION
     container_image_base: str = "copilot-eval"
     copilot_version: str = "1.0.18"
     otel_endpoint: str = "http://host.docker.internal:4318"
@@ -76,6 +91,10 @@ class Evaluator:
 class Hooks:
     before_run: str | None = None
     after_run: str | None = None
+    # Failure policy for before_run: "fail" aborts the run (setup_failed),
+    # "warn" logs and continues. after_run failures are always warned and
+    # surfaced in the run's scores regardless of this setting.
+    on_failure: str = "fail"
 
 
 @dataclass
@@ -125,10 +144,17 @@ class Config:
         return {**self.vars, **task.vars, **variant.vars}
 
     def resolve_prompt(self, task: Task, variant: Variant) -> str:
-        result = task.prompt
-        for key, value in self.resolve_vars(task, variant).items():
-            result = result.replace("{" + key + "}", str(value))
-        result += "\n\nSave all output files under /workspace/output/."
+        vars_ = self.resolve_vars(task, variant)
+
+        def interpolate(text: str) -> str:
+            for key, value in vars_.items():
+                text = text.replace("{" + key + "}", str(value))
+            return text
+
+        result = interpolate(task.prompt)
+        instruction = interpolate(self.runner.output_instruction)
+        if instruction:
+            result += "\n\n" + instruction
         return result
 
 
@@ -168,6 +194,12 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         raise ConfigError(
             f"runner.parallel has invalid value '{parallel}'. Must be one of: {', '.join(PARALLEL_MODES)}."
         )
+    variant_order = runner_raw.get("variant_order", "fixed")
+    if variant_order not in VARIANT_ORDER_MODES:
+        raise ConfigError(
+            f"runner.variant_order has invalid value '{variant_order}'. "
+            f"Must be one of: {', '.join(VARIANT_ORDER_MODES)}."
+        )
     output_format = runner_raw.get("output_format", "text")
     if output_format not in OUTPUT_FORMATS:
         raise ConfigError(
@@ -181,14 +213,28 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
             f"Must be one of: {', '.join(JUDGE_AGGREGATE_MODES)}."
         )
 
+    output_instruction = runner_raw.get("output_instruction")
+    if output_instruction is None:
+        output_instruction = DEFAULT_OUTPUT_INSTRUCTION
+    elif not isinstance(output_instruction, str):
+        raise ConfigError(
+            f"runner.output_instruction must be a string, got {output_instruction!r}."
+        )
+
     epochs = _require_int(runner_raw, "epochs", 1, minimum=1)
     timeout_seconds = _require_int(runner_raw, "timeout_seconds", 300, minimum=1)
     max_workers = _require_int(runner_raw, "max_workers", 8, minimum=1)
     judge_timeout_seconds = _require_int(runner_raw, "judge_timeout_seconds", 60, minimum=1)
     judge_samples = _require_int(runner_raw, "judge_samples", 1, minimum=1)
+    judge_max_conversation_chars = _require_int(runner_raw, "judge_max_conversation_chars", 8000, minimum=1)
+    judge_max_output_chars = _require_int(runner_raw, "judge_max_output_chars", 8000, minimum=1)
     max_turns = runner_raw.get("max_turns")
     if max_turns is not None:
         max_turns = _coerce_int("runner.max_turns", max_turns, minimum=1)
+
+    seed = runner_raw.get("seed")
+    if seed is not None:
+        seed = _coerce_int("runner.seed", seed)
 
     trace_fetch_limit = _require_int(runner_raw, "trace_fetch_limit", 2000, minimum=1)
     trace_fetch_retries = _require_int(runner_raw, "trace_fetch_retries", 5, minimum=0)
@@ -205,9 +251,15 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         max_turns=max_turns,
         parallel=parallel,
         max_workers=max_workers,
+        variant_order=variant_order,
+        seed=seed,
         judge_timeout_seconds=judge_timeout_seconds,
+        judge_copilot_version=runner_raw.get("judge_copilot_version"),
+        judge_max_conversation_chars=judge_max_conversation_chars,
+        judge_max_output_chars=judge_max_output_chars,
         output_format=output_format,
         capture_content=runner_raw.get("capture_content", True),
+        output_instruction=output_instruction,
         container_image_base=runner_raw.get("container_image_base", "copilot-eval"),
         copilot_version=runner_raw.get("copilot_version", "1.0.18"),
         otel_endpoint=runner_raw.get("otel_endpoint", "http://host.docker.internal:4318"),
@@ -301,7 +353,16 @@ def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Eva
 def _parse_hooks(raw: dict[str, Any] | None) -> Hooks:
     if not raw:
         return Hooks()
-    return Hooks(before_run=raw.get("before_run"), after_run=raw.get("after_run"))
+    on_failure = str(raw.get("on_failure", "fail")).lower()
+    if on_failure not in ("fail", "warn"):
+        raise ConfigError(
+            f"Invalid hooks.on_failure '{on_failure}'. Use 'fail' or 'warn'."
+        )
+    return Hooks(
+        before_run=raw.get("before_run"),
+        after_run=raw.get("after_run"),
+        on_failure=on_failure,
+    )
 
 
 def _parse_task(p: dict[str, Any], fallback_name: str = "") -> Task:

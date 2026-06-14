@@ -19,9 +19,15 @@ runner:
   max_turns: 20                  # Max autopilot turns
   parallel: off                  # off | per_task | full
   max_workers: 8                 # Max concurrent runs (for parallel modes + analyze judges)
+  variant_order: fixed           # fixed | counterbalance | random (order of variants per epoch)
+  seed: null                     # Optional RNG seed for variant_order=random (reproducibility)
   judge_timeout_seconds: 60      # Per-judge Copilot timeout in analyze (seconds)
+  judge_copilot_version: null    # Optional: expected host `copilot --version`; analyze warns on mismatch
+  judge_max_conversation_chars: 8000  # Max chars of conversation passed to the judge
+  judge_max_output_chars: 8000   # Max chars of output-file text passed to the judge
   output_format: text            # text | json
   capture_content: true          # Capture prompt/response content in OTel spans (needed by judge)
+  output_instruction: Save all output files under /workspace/output/.  # Appended to every prompt; "" disables; supports {var} interpolation
   container_image_base: copilot-eval
   copilot_version: "1.0.18"
   otel_endpoint: http://host.docker.internal:4318   # OTLP collector endpoint (inside container)
@@ -49,6 +55,7 @@ tasks:
     hooks:
       before_run: scripts/setup.sh       # Run before Copilot
       after_run: scripts/cleanup.sh      # Run after Copilot
+      on_failure: fail                   # before_run failure policy: fail | warn (default: fail)
     evaluators:
       - name: quality
         type: judge                      # judge | script | contains | regex
@@ -59,7 +66,14 @@ tasks:
 
 Variables are merged in order: `global vars` → `task vars` → `variant vars`. Later values override earlier ones.
 
-The prompt also gets `"\nSave all output files under /workspace/output/."` appended automatically so that generated files are available to judges.
+The prompt also gets an output-path instruction appended automatically so that generated files are available to judges. By default this is `"\n\nSave all output files under /workspace/output/."`. Configure it via `runner.output_instruction`:
+
+- **unset** → the default sentence above (backward compatible),
+- **`""`** → nothing is appended (disable it, e.g. when the task prompt already specifies the output path, or to avoid injecting English into a non-English prompt),
+- **`null`** → same as unset (the default sentence),
+- **custom string** → appended verbatim, with the same `{var}` interpolation as the prompt (so it can adapt per variant, e.g. `Respond in {language}.`).
+
+When non-empty, the instruction is appended after a `\n\n` separator.
 
 ## Variants
 
@@ -90,7 +104,11 @@ Each evaluator requires a unique `name` within its task and a valid `type`. The 
 
 The judge sees both the **conversation output** (Copilot's terminal log) and any **files written to `/workspace/output/`**. This ensures correct scoring even when Copilot writes results to files without echoing them.
 
-Judge scoring is done by `runner.judge_model` (defaults to the eval model if not set). OTel is disabled during judge calls to avoid contaminating traces.
+Judge scoring is done by `runner.judge_model` (defaults to `gpt-4.1`). OTel is disabled during judge calls to avoid contaminating traces.
+
+The judge runs with the **host** Copilot CLI, which is not version-pinned like the eval container. To keep scoring reproducible and observable, `analyze` records the host `copilot --version` into each judge score's `meta.judge_version` and surfaces it in the report. Set `runner.judge_copilot_version` to the version you expect; `analyze` warns when the host differs.
+
+The judge context is bounded by `runner.judge_max_conversation_chars` (conversation/log text) and `runner.judge_max_output_chars` (output-file text). When either budget is exceeded the context is truncated, `meta.truncation` is recorded, and the report flags how many judge runs saw truncated context — raise these limits if the judge is missing decisive evidence. Each judge score's `meta.outcome` (`ok`/`parse_error`/`error`/`timeout`/`not_found`) plus the captured `returncode`/`stderr` are aggregated into the report's "Judge runtime" section so host failures are no longer silently collapsed.
 
 Judges run during `analyze` and are scored idempotently: a judge is (re)run only when no judge score yet exists for that run (non-judge `script`/`contains`/`regex` scores share the same `.scores.json` file, so file presence alone does not skip judging). Use `analyze --re-eval` to force all judges to re-run. Judge timeouts or unparseable output produce `score: null` and are surfaced as warnings rather than dropped.
 
@@ -169,6 +187,15 @@ Place files under `<config-dir>/fixtures/<fixture-name>/`. They are copied to a 
 - Environment setup/teardown (e.g., Azure resource reset)
 - Pre-deployment of test scenarios
 
+### Failure handling
+
+Hook exit codes are checked (a missing script is treated as success):
+
+- **`before_run`** — controlled by `hooks.on_failure`. With the default `fail`, a non-zero exit aborts the run with `status: setup_failed` (the run is not executed). With `warn`, the failure is logged and the run continues.
+- **`after_run`** — a non-zero exit is always logged and surfaced as a failing `hook` score, so the run is marked as not passed without aborting the batch.
+
+Per-run errors are isolated: an exception during setup (e.g. missing `docker` binary, fixture copy failure, a hook raising) is caught and recorded as `status: setup_failed` for that run only — it never aborts the whole batch, and the run manifest is always written.
+
 ## Health Check
 
 A script that validates the environment is ready before running Copilot. If it exits non-zero, the run is skipped with `status: setup_failed`.
@@ -182,6 +209,39 @@ A script that validates the environment is ready before running Copilot. If it e
 | `full` | All task×variant×epoch combinations run in parallel (up to `max_workers`) |
 
 During `analyze`, judge evaluators are always run in parallel across traces (up to `max_workers`), independent of the `parallel` mode above. Each judge's Copilot invocation is bounded by `judge_timeout_seconds`. Scores files are written per trace, so parallel judging does not cause write conflicts.
+
+## Variant Order (reducing measurement bias)
+
+In serial (`off`) and `per_task` modes, variants run one after another within each epoch. Always running them in the same order lets order effects (cache warmup, rate limits, time-of-day drift) accumulate on whichever variant runs first. `runner.variant_order` controls how variants are ordered per epoch:
+
+| Mode | Behavior |
+|------|----------|
+| `fixed` | Config order, every epoch (default; backward compatible). |
+| `counterbalance` | Cyclic rotation by epoch. Each variant occupies every position once per complete cycle of `N = len(variants)` epochs. This is position-balanced, not a full permutation/carryover counterbalance — to fully balance positions, set `epochs` to a multiple of `N` (otherwise the trailing partial cycle is imbalanced). |
+| `random` | Shuffle each epoch. Set `runner.seed` for a reproducible schedule. |
+
+Ordering applies to `off` and `per_task` modes. Under `full` parallel, true concurrency is decided by the thread pool, so ordering only affects submission order; the recorded per-run start times are what matter for analysis. With a `seed`, `random` ordering is reproducible in every mode (each task/epoch derives its own RNG, so parallel scheduling does not affect the result).
+
+**Measurement-friendly preset.** For the least-biased comparison, run serially with counterbalanced order:
+
+```yaml
+runner:
+  parallel: off
+  variant_order: counterbalance
+  epochs: 4            # a multiple of the number of variants for full balance
+```
+
+If you prefer randomization, use `variant_order: random` with a fixed `seed` so the run is reproducible.
+
+## Execution Schedule Recording
+
+Each run writes a `results.json` manifest under `results/<run-id>/`. It records the schedule so order/concurrency confounders can be analyzed after the fact:
+
+- A top-level `schedule` block: `parallel`, `max_workers`, `variant_order`, `seed`.
+- Per run:
+  - `order_index` — scheduled position. In `off` it is the global execution sequence; in `per_task` it is the position within that task; in `full` it is the submission index. It reflects *intended* order, not actual start order under concurrency — use `started_at` for that.
+  - `started_at` / `finished_at` — microsecond wall-clock timestamps (`started_at` is captured before hooks/health-check).
+  - `duration_seconds` — total run wall time, including hooks, the Copilot container run, and non-judge evaluators (not Copilot execution time alone).
 
 ## Secrets & `.env`
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 import time
 import uuid
@@ -54,11 +55,51 @@ def _ensure_jaeger(config: Config) -> None:
 MANIFEST_NAME = "results.json"
 
 
-def _write_manifest(run_dir: Path, run_id: str, results: list[RunResult]) -> None:
+def order_variants(
+    variants: list[Variant], epoch: int, strategy: str, rng: random.Random,
+) -> list[Variant]:
+    """Order variants for a given epoch to reduce order-effect bias.
+
+    - ``fixed``: original config order (backward compatible).
+    - ``counterbalance``: cyclic rotation by ``epoch``. Each variant occupies
+      every position once per complete cycle of ``len(variants)`` epochs
+      (position-balanced; not a full permutation/carryover counterbalance).
+    - ``random``: shuffle using the supplied RNG. Pass a seeded RNG (see
+      ``_ordering_rng``) for a reproducible schedule.
+    """
+    if len(variants) <= 1 or strategy == "fixed":
+        return list(variants)
+    if strategy == "counterbalance":
+        k = (epoch - 1) % len(variants)
+        return variants[k:] + variants[:k]
+    if strategy == "random":
+        ordered = list(variants)
+        rng.shuffle(ordered)
+        return ordered
+    return list(variants)
+
+
+def _ordering_rng(seed: int | None, *parts: object) -> random.Random:
+    """Build a per-context RNG for variant ordering.
+
+    A fresh ``random.Random`` is returned per call (so concurrent schedulers in
+    ``per_task`` mode never share mutable RNG state — ``random.Random`` is not
+    thread-safe). When ``seed`` is set, the RNG is derived deterministically
+    from ``(seed, *parts)`` so the schedule is reproducible regardless of thread
+    timing; when ``seed`` is ``None`` the RNG is non-deterministic.
+    """
+    if seed is None:
+        return random.Random()
+    return random.Random("|".join(str(p) for p in (seed, *parts)))
+
+
+def _write_manifest(run_dir: Path, run_id: str, results: list[RunResult],
+                    schedule: dict[str, Any] | None = None) -> None:
     """Persist the full set of runs so `analyze` can detect missing/failed ones."""
     manifest = {
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        "schedule": schedule or {},
         "runs": [r.to_dict() for r in results],
     }
     try:
@@ -83,6 +124,30 @@ def _load_manifest(results_dir: Path) -> list[dict[str, Any]] | None:
 @click.group()
 def main() -> None:
     """Copilot CLI A/B evaluation framework."""
+
+
+def _safe_run_one(
+    task: Task, variant: Variant, epoch: int,
+    config: Config, run_id: str, run_dir: Path, github_token: str,
+    order_index: int | None = None,
+) -> RunResult:
+    """Run a single eval, guaranteeing the batch is never aborted by one run.
+
+    `run_one` already converts internal errors into a setup_failed RunResult, but
+    this boundary catches any truly unexpected exception (so one bad run cannot
+    take down the whole batch or prevent the manifest from being written) and
+    turns it into a synthetic setup_failed result instead of re-raising.
+    """
+    try:
+        return run_one(task, variant, epoch, config, run_id, run_dir, github_token, order_index)
+    except Exception as exc:  # noqa: BLE001 - isolate per-run failures from the batch
+        click.echo(f"    ✗ [{task.name}] epoch={epoch} variant={variant.name} errored: {exc}")
+        return RunResult(
+            task=task.name, variant=variant.name, epoch=epoch,
+            test_id=uuid.uuid4().hex, run_id=run_id,
+            log_file=run_dir / f"{task.name}_{variant.name}_epoch{epoch}.log",
+            exit_code=-1, status="setup_failed", order_index=order_index,
+        )
 
 
 @main.command()
@@ -122,6 +187,11 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
     click.echo(f" Max turns:{config.runner.max_turns or 'unlimited'}")
     click.echo(f" Epochs:   {epochs}")
     click.echo(f" Timeout:  {config.runner.timeout_seconds}s")
+    click.echo(f" Parallel: {config.runner.parallel}")
+    order_desc = config.runner.variant_order
+    if config.runner.variant_order == "random" and config.runner.seed is not None:
+        order_desc += f" (seed={config.runner.seed})"
+    click.echo(f" Order:    {order_desc}")
     click.echo(f" Run ID:   {run_id}")
     if config.vars:
         click.echo(f" Vars:     {config.vars}")
@@ -143,13 +213,28 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
         _ensure_images(config, github_token)
     results: list[RunResult] = []
 
+    order = config.runner.variant_order
+    seed = config.runner.seed
+
     if config.runner.parallel == "full":
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        work = [(t, v, e) for t in tasks for e in range(1, epochs + 1) for v in config.variants]
+        # variant_order is applied per epoch so the submission schedule is
+        # balanced; actual start times are still recorded per run since the
+        # thread pool decides true concurrency. A per-(task, epoch) RNG keeps the
+        # schedule reproducible under a seed without sharing RNG state.
+        work = [
+            (t, v, e)
+            for t in tasks
+            for e in range(1, epochs + 1)
+            for v in order_variants(config.variants, e, order, _ordering_rng(seed, t.name, e))
+        ]
         click.echo(f"Running {len(work)} runs in full parallel (max_workers={config.runner.max_workers})")
         with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
-            futures = {pool.submit(run_one, t, v, e, config, run_id, run_dir, github_token): f"{t.name}/{v.name}/e{e}" for t, v, e in work}
+            futures = {
+                pool.submit(_safe_run_one, t, v, e, config, run_id, run_dir, github_token, i): f"{t.name}/{v.name}/e{e}"
+                for i, (t, v, e) in enumerate(work)
+            }
             for future in as_completed(futures):
                 results.append(future.result())
 
@@ -159,11 +244,16 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
         def _run_task_serial(task: Task) -> list[RunResult]:
             """Run all epochs × variants for a single task sequentially."""
             task_results: list[RunResult] = []
+            order_index = 0
             for epoch in range(1, epochs + 1):
-                for variant in config.variants:
+                # Each worker thread uses its own RNG (random.Random is not
+                # thread-safe); derived from the seed for reproducibility.
+                ordered = order_variants(config.variants, epoch, order, _ordering_rng(seed, task.name, epoch))
+                for variant in ordered:
                     task_results.append(
-                        run_one(task, variant, epoch, config, run_id, run_dir, github_token)
+                        _safe_run_one(task, variant, epoch, config, run_id, run_dir, github_token, order_index)
                     )
+                    order_index += 1
             return task_results
 
         click.echo(f"Running {len(tasks)} tasks in parallel (variants serial within each task)")
@@ -172,15 +262,17 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
             for task_future in as_completed(task_futures):
                 results.extend(task_future.result())
     else:
+        order_index = 0
         for p in tasks:
             prompt = config.resolve_prompt(p, config.variants[0])
             click.echo(f"\n>>> Task: {p.name}")
             click.echo(f">>> Prompt:  {prompt}\n")
 
             for epoch in range(1, epochs + 1):
-                for variant in config.variants:
-                    result = run_one(p, variant, epoch, config, run_id, run_dir, github_token)
+                for variant in order_variants(config.variants, epoch, order, _ordering_rng(seed, p.name, epoch)):
+                    result = _safe_run_one(p, variant, epoch, config, run_id, run_dir, github_token, order_index)
                     results.append(result)
+                    order_index += 1
 
     # Summary
     passed = sum(1 for r in results if r.passed)
@@ -190,7 +282,13 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
 
     # Persist a run manifest so `analyze` knows the full expected set of runs
     # (including failed/timeout runs that may have produced no trace).
-    _write_manifest(run_dir, run_id, results)
+    schedule = {
+        "parallel": config.runner.parallel,
+        "max_workers": config.runner.max_workers,
+        "variant_order": config.runner.variant_order,
+        "seed": config.runner.seed,
+    }
+    _write_manifest(run_dir, run_id, results, schedule)
 
     click.echo("=" * 50)
     click.echo(f" Run complete: {run_id}")
@@ -235,9 +333,15 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
         click.echo("No traces found for this run ID, and no manifest to reconcile against.", err=True)
         return
 
-    if not metrics:
+    # With no surviving traces we can't show metrics, but a manifest still lets us
+    # report reliability (success/failure rates) — which is exactly when a run
+    # with all-failed/timed-out variants needs it most. Only bail when there is
+    # neither trace data nor a manifest to fall back on.
+    if not metrics and manifest_runs is None:
         click.echo("No traces found for this run ID.", err=True)
         return
+    if not metrics:
+        click.echo("No surviving traces; reporting reliability from the manifest only.", err=True)
 
     # Run judge evaluators if not skipped
     if not skip_eval and results_dir.exists():
@@ -247,7 +351,12 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
         _report_judge_reliability(results_dir)
 
     variant_order = [v.name for v in config.variants]
-    reports = build_report(metrics, results_dir if results_dir.exists() else None, variant_order, aggregate)
+    raw_tids = {t.resource_tags.get("eval.test_id") for t in traces}
+    trace_test_ids = {t for t in raw_tids if t is not None}
+    reports = build_report(
+        metrics, results_dir if results_dir.exists() else None, variant_order, aggregate,
+        manifest_runs=manifest_runs, trace_test_ids=trace_test_ids,
+    )
     if not reports:
         click.echo("No reports generated.", err=True)
         return
@@ -323,9 +432,16 @@ def _report_run_coverage(manifest_runs: list[dict[str, Any]], traces: list[Trace
 
 
 def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path) -> None:
-    """Surface judge evaluations that produced no usable score (timeout/parse_error)."""
+    """Surface judge reproducibility issues: unusable scores, outcome-rate
+    breakdown, host Copilot version mismatches, and truncated context."""
     tasks_by_name = {t.name: t for t in config.tasks}
     problems: list[str] = []
+    outcomes: dict[str, int] = {}
+    judge_total = 0
+    mismatches: set[str] = set()
+    versions: set[str] = set()
+    truncated: list[str] = []
+    seen_files: set[Path] = set()
     for trace in traces:
         scenario = trace.resource_tags.get("eval.scenario", "")
         variant = trace.resource_tags.get("eval.variant", "")
@@ -334,16 +450,44 @@ def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path
         if not task or not any(ev.type == "judge" for ev in task.evaluators):
             continue
         scores_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.scores.json"
-        if not scores_file.exists():
+        if not scores_file.exists() or scores_file in seen_files:
             continue
+        seen_files.add(scores_file)
         try:
             scores = json.loads(scores_file.read_text())
         except (json.JSONDecodeError, OSError):
             continue
         for s in scores:
-            if s.get("type") == "judge" and s.get("score") is None:
+            if s.get("type") != "judge":
+                continue
+            judge_total += 1
+            meta = s.get("meta") or {}
+            outcome = meta.get("outcome") or ("ok" if s.get("score") is not None else "unknown")
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+            if v := meta.get("judge_version"):
+                versions.add(str(v))
+            if mm := meta.get("judge_version_mismatch"):
+                mismatches.add(f"expected {mm.get('expected')} got {mm.get('actual')}")
+            if meta.get("truncation"):
+                truncated.append(f"{scenario}/{variant}/e{epoch}:{s.get('name')}")
+            if s.get("score") is None:
                 reason = s.get("reason", "no score")
                 problems.append(f"{scenario}/{variant}/e{epoch}:{s.get('name')} ({reason})")
+
+    if judge_total:
+        breakdown = ", ".join(f"{k}={v}" for k, v in sorted(outcomes.items()))
+        click.echo(f"  Judge outcomes ({judge_total} total): {breakdown}", err=True)
+    if versions:
+        click.echo(f"  Judge host Copilot version(s): {', '.join(sorted(versions))}", err=True)
+    if mismatches:
+        click.echo(f"  WARNING: judge Copilot version mismatch — {'; '.join(sorted(mismatches))}", err=True)
+    if truncated:
+        click.echo(
+            f"  WARNING: {len(truncated)} judge(s) saw truncated context "
+            f"(raise runner.judge_max_conversation_chars / judge_max_output_chars): "
+            f"{', '.join(truncated)}",
+            err=True,
+        )
     if problems:
         click.echo(f"  WARNING: {len(problems)} judge score(s) unavailable: {', '.join(problems)}", err=True)
 
@@ -409,6 +553,11 @@ def _report_judge_reliability(results_dir: Path) -> None:
         click.echo(f"  WARNING: {no_score} judge evaluation(s) produced no usable score.", err=True)
 
 
+def _is_truncated(text: str | None) -> bool:
+    """Whether judge context text was cut to its char budget by the readers."""
+    return bool(text and text.rstrip().endswith("(truncated)"))
+
+
 def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: bool = False) -> None:
     """Run judge evaluators using OTel traces + output files.
 
@@ -462,20 +611,28 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
             continue  # all judge scores already present
 
         # Extract conversation from OTel trace
-        conversation = extract_conversation(trace)
+        conv_limit = config.runner.judge_max_conversation_chars
+        out_limit = config.runner.judge_max_output_chars
+        conversation = extract_conversation(trace, max_chars=conv_limit)
 
         # Fall back to log file if OTel content not available
         if not conversation:
             log_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.log"
             if log_file.exists():
                 text = log_file.read_text()
-                conversation = text[:8000] + "\n... (truncated)" if len(text) > 8000 else text
+                conversation = text[:conv_limit] + "\n... (truncated)" if len(text) > conv_limit else text
 
         # Read output files from persisted outputs. The judge can score on output
         # files alone (e.g. file-writing tasks), so only skip when neither the
         # conversation nor any output file is available.
         output_dir = results_dir / "outputs" / f"{scenario}_{variant}_epoch{epoch}"
-        output_files_text = read_files_from_dir(output_dir, max_chars=8000)
+        output_files_text = read_files_from_dir(output_dir, max_chars=out_limit)
+
+        truncation: dict[str, Any] = {}
+        if _is_truncated(conversation):
+            truncation["conversation"] = conv_limit
+        if _is_truncated(output_files_text):
+            truncation["output_files"] = out_limit
 
         if not conversation and not output_files_text:
             continue
@@ -488,6 +645,7 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
             "existing_scores": existing_scores,
             "conversation": conversation,
             "output_files_text": output_files_text,
+            "truncation": truncation,
             "pending_names": {ev.name for ev in pending},
             "order": {ev.name: i for i, ev in enumerate(pending)},
             "remaining": len(pending),
@@ -521,7 +679,9 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
             f"    [{ctx['scenario']}/{ctx['variant']}/e{ctx['epoch']}] Evaluating: {ev.name} (judge)...",
             err=True,
         )
-        s = run_judge(ev, ctx["conversation"], config, github_token, ctx["output_files_text"])
+        extra_meta = {"truncation": ctx["truncation"]} if ctx["truncation"] else None
+        s = run_judge(ev, ctx["conversation"], config, github_token, ctx["output_files_text"],
+                      extra_meta=extra_meta)
         if s.score is not None:
             click.echo(f"    ✓ {ev.name}: {s.score} — {s.reason[:60]}", err=True)
         else:
