@@ -47,6 +47,7 @@ tasks:
     hooks:
       before_run: scripts/setup.sh       # Run before Copilot
       after_run: scripts/cleanup.sh      # Run after Copilot
+      on_failure: fail                   # before_run failure policy: fail | warn (default: fail)
     evaluators:
       - name: quality
         type: judge                      # judge | script | contains | regex
@@ -119,6 +120,15 @@ Place files under `<config-dir>/fixtures/<fixture-name>/`. They are copied to a 
 
 - Environment setup/teardown (e.g., Azure resource reset)
 - Pre-deployment of test scenarios
+
+### Failure handling
+
+Hook exit codes are checked (a missing script is treated as success):
+
+- **`before_run`** — controlled by `hooks.on_failure`. With the default `fail`, a non-zero exit aborts the run with `status: setup_failed` (the run is not executed). With `warn`, the failure is logged and the run continues.
+- **`after_run`** — a non-zero exit is always logged and surfaced as a failing `hook` score, so the run is marked as not passed without aborting the batch.
+
+Per-run errors are isolated: an exception during setup (e.g. missing `docker` binary, fixture copy failure, a hook raising) is caught and recorded as `status: setup_failed` for that run only — it never aborts the whole batch, and the run manifest is always written.
 
 ## Health Check
 

@@ -74,6 +74,29 @@ def test_malformed_judges_raises(tmp_path):
         load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "p", "judges": [{"name": "x"}]}]})
 
 
+# --- Hooks failure policy ---
+
+def test_hooks_on_failure_default_is_fail(tmp_path):
+    cfg = load_inline(tmp_path, {
+        "tasks": [{"name": "t1", "prompt": "p", "hooks": {"before_run": "b.sh"}}],
+    })
+    assert cfg.get_task("t1").hooks.on_failure == "fail"
+
+
+def test_hooks_on_failure_warn(tmp_path):
+    cfg = load_inline(tmp_path, {
+        "tasks": [{"name": "t1", "prompt": "p", "hooks": {"before_run": "b.sh", "on_failure": "warn"}}],
+    })
+    assert cfg.get_task("t1").hooks.on_failure == "warn"
+
+
+def test_hooks_on_failure_invalid_raises(tmp_path):
+    with pytest.raises(ConfigError, match="hooks.on_failure"):
+        load_inline(tmp_path, {
+            "tasks": [{"name": "t1", "prompt": "p", "hooks": {"before_run": "b.sh", "on_failure": "boom"}}],
+        })
+
+
 # --- Evaluator validation ---
 
 def test_evaluator_missing_name(tmp_path):
