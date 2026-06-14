@@ -122,6 +122,8 @@ def test_evaluator_invalid_regex(tmp_path):
     ({"timeout_seconds": 0}, "runner.timeout_seconds"),
     ({"max_workers": 0}, "runner.max_workers"),
     ({"judge_timeout_seconds": 0}, "runner.judge_timeout_seconds"),
+    ({"judge_samples": 0}, "runner.judge_samples"),
+    ({"judge_aggregate": "mode"}, "runner.judge_aggregate"),
     ({"epochs": "two"}, "runner.epochs"),
     ({"max_turns": 0}, "runner.max_turns"),
 ])
@@ -144,6 +146,18 @@ def test_runner_valid_values(tmp_path):
 def test_runner_judge_timeout_default(tmp_path):
     cfg = load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "p"}]})
     assert cfg.runner.judge_timeout_seconds == 60
+
+
+def test_runner_judge_sampling_defaults_and_values(tmp_path):
+    cfg = load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "p"}]})
+    assert cfg.runner.judge_samples == 1
+    assert cfg.runner.judge_aggregate == "median"
+    cfg = load_inline(tmp_path, {
+        "runner": {"judge_samples": 5, "judge_aggregate": "majority"},
+        "tasks": [{"name": "t1", "prompt": "p"}],
+    })
+    assert cfg.runner.judge_samples == 5
+    assert cfg.runner.judge_aggregate == "majority"
 
 
 # --- Name validation + duplicates ---

@@ -243,6 +243,8 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
     if not skip_eval and results_dir.exists():
         _run_judges(config, traces, results_dir, force=re_eval)
         _warn_unscored_judges(config, traces, results_dir)
+    if results_dir.exists():
+        _report_judge_reliability(results_dir)
 
     variant_order = [v.name for v in config.variants]
     reports = build_report(metrics, results_dir if results_dir.exists() else None, variant_order, aggregate)
@@ -346,6 +348,67 @@ def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path
         click.echo(f"  WARNING: {len(problems)} judge score(s) unavailable: {', '.join(problems)}", err=True)
 
 
+def _report_judge_reliability(results_dir: Path) -> None:
+    """Summarize judge self-consistency + parse/error/timeout rates for a run.
+
+    Reads every persisted ``*.scores.json`` in the run directory, aggregates
+    judge sample outcomes (ok/parse_error/timeout/error) and per-evaluator score
+    spread (stddev), and prints a compact reliability summary so noisy or
+    failure-prone judges are visible alongside the metrics.
+    """
+    outcomes: dict[str, int] = {"ok": 0, "parse_error": 0, "timeout": 0, "error": 0}
+    judge_evals = 0          # number of judge score records
+    sampled_evals = 0        # records that ran >1 sample
+    stddevs: list[float] = []
+    no_score = 0
+
+    for jf in sorted(results_dir.glob("*.scores.json")):
+        try:
+            scores = json.loads(jf.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        for s in scores:
+            if s.get("type") != "judge":
+                continue
+            judge_evals += 1
+            for k, v in (s.get("outcomes") or {}).items():
+                outcomes[k] = outcomes.get(k, 0) + int(v)
+            n = s.get("n_samples") or 0
+            if n and n > 1:
+                sampled_evals += 1
+            sd = s.get("score_stddev")
+            if sd is not None and s.get("score") is not None:
+                stddevs.append(float(sd))
+            if s.get("score") is None:
+                no_score += 1
+
+    if judge_evals == 0:
+        return
+
+    total_samples = sum(outcomes.values())
+    click.echo("Judge reliability:", err=True)
+    click.echo(
+        f"  {judge_evals} judge evaluation(s), {total_samples} sample(s)"
+        f"{f', {sampled_evals} multi-sampled' if sampled_evals else ''}.",
+        err=True,
+    )
+    if total_samples:
+        def rate(k: str) -> str:
+            c = outcomes.get(k, 0)
+            return f"{c} ({c / total_samples * 100:.0f}%)"
+        click.echo(
+            f"  Sample outcomes: ok {rate('ok')}, parse_error {rate('parse_error')}, "
+            f"timeout {rate('timeout')}, error {rate('error')}.",
+            err=True,
+        )
+    if stddevs:
+        mean_sd = sum(stddevs) / len(stddevs)
+        max_sd = max(stddevs)
+        click.echo(f"  Score spread (σ): mean {mean_sd:.2f}, max {max_sd:.2f}.", err=True)
+    if no_score:
+        click.echo(f"  WARNING: {no_score} judge evaluation(s) produced no usable score.", err=True)
+
+
 def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: bool = False) -> None:
     """Run judge evaluators using OTel traces + output files.
 
@@ -355,7 +418,7 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from eval.runner import read_files_from_dir, run_judge
+    from eval.runner import read_files_from_dir, run_judge, score_to_dict
 
     github_token = get_github_token()
     tasks_by_name = {t.name: t for t in config.tasks}
@@ -461,7 +524,7 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
             click.echo(f"    ✓ {ev.name}: {s.score} — {s.reason[:60]}", err=True)
         else:
             click.echo(f"    ! {ev.name}: {s.reason}", err=True)
-        return key, {"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed}
+        return key, score_to_dict(s)
 
     with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
         futures = {pool.submit(_judge, key, ev): (key, ev) for key, ev in work}

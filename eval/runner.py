@@ -8,8 +8,10 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from statistics import mean, median, pstdev
 from typing import Any
 
 from eval.config import Config, Evaluator, Task, Variant
@@ -22,6 +24,13 @@ class EvalScore:
     score: int | None
     reason: str = ""
     passed: bool = True
+    # Self-consistency metadata (judge evaluators only).
+    samples: list[int] = field(default_factory=list)
+    score_stddev: float | None = None
+    n_samples: int = 0
+    outcomes: dict[str, int] = field(default_factory=dict)
+    judge_model: str | None = None
+    judge_version: str | None = None
 
 
 @dataclass
@@ -50,11 +59,31 @@ class RunResult:
             "exit_code": self.exit_code,
             "status": self.status,
             "passed": self.passed,
-            "scores": [
-                {"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed}
-                for s in self.scores
-            ],
+            "scores": [score_to_dict(s) for s in self.scores],
         }
+
+
+def score_to_dict(s: EvalScore) -> dict[str, Any]:
+    """Serialize an EvalScore to the *.scores.json schema.
+
+    Base keys mirror the legacy shape; judge self-consistency metadata
+    (samples, stddev, outcomes, model/version) is added only for judge scores
+    so non-judge serialization stays byte-identical.
+    """
+    d: dict[str, Any] = {
+        "name": s.name, "type": s.type, "score": s.score,
+        "reason": s.reason, "passed": s.passed,
+    }
+    if s.type == "judge":
+        d.update({
+            "samples": s.samples,
+            "score_stddev": s.score_stddev,
+            "n_samples": s.n_samples,
+            "outcomes": s.outcomes,
+            "judge_model": s.judge_model,
+            "judge_version": s.judge_version,
+        })
+    return d
 
 
 def status_from_exit_code(exit_code: int) -> str:
@@ -260,19 +289,84 @@ def _run_evaluators(task: Task, variant: Variant, config: Config, log_file: Path
     if scores:
         sf = log_file.with_suffix(".scores.json")
         sf.write_text(json.dumps(
-            [{"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed} for s in scores],
+            [score_to_dict(s) for s in scores],
             indent=2, ensure_ascii=False,
         ))
     return scores
 
 
+_JUDGE_CLI_VERSION: str | None = None
+
+
+def judge_cli_version() -> str:
+    """Return the Copilot CLI version string, cached for the process.
+
+    Recorded as judge metadata so scores can be tied to a specific CLI build.
+    Returns "unknown" if the version can't be determined.
+    """
+    global _JUDGE_CLI_VERSION
+    if _JUDGE_CLI_VERSION is not None:
+        return _JUDGE_CLI_VERSION
+    version = "unknown"
+    try:
+        proc = subprocess.run(["copilot", "--version"], capture_output=True, text=True, timeout=15)
+        out = (proc.stdout or proc.stderr or "").strip()
+        if out:
+            version = out.splitlines()[0].strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        version = "unknown"
+    _JUDGE_CLI_VERSION = version
+    return version
+
+
+def _aggregate_scores(samples: list[int], method: str) -> int:
+    """Aggregate successful judge sample scores into a single integer score."""
+    if method == "mean":
+        return int(round(mean(samples)))
+    if method == "majority":
+        # Most common value; ties broken by the lower score for determinism.
+        counts = Counter(samples)
+        top = max(counts.values())
+        return min(v for v, c in counts.items() if c == top)
+    return int(round(median(samples)))  # default: median
+
+
+def _run_judge_once(prompt: str, config: Config, token: str) -> tuple[int | None, str, str]:
+    """Invoke the judge Copilot once. Returns (score, reason, outcome).
+
+    outcome is one of: ok | parse_error | timeout | error.
+    """
+    cmd = ["copilot", "-p", prompt, "-s"]
+    if config.runner.judge_model:
+        cmd.extend(["--model", config.runner.judge_model])
+    # Disable OTel to avoid contaminating eval traces with judge calls
+    judge_env = {**os.environ, "GITHUB_TOKEN": token, "COPILOT_OTEL_ENABLED": "false"}
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=config.runner.judge_timeout_seconds, env=judge_env)
+    except subprocess.TimeoutExpired:
+        return None, "timeout", "timeout"
+    except (FileNotFoundError, OSError) as exc:
+        return None, f"error: {exc}", "error"
+    data = _parse_json(proc.stdout, require_keys=("score",))
+    if data:
+        try:
+            return int(data.get("score", 0)), str(data.get("reason", "")), "ok"
+        except (TypeError, ValueError):
+            return None, "parse_error", "parse_error"
+    return None, "parse_error", "parse_error"
+
+
 def run_judge(ev: Evaluator, conversation: str, config: Config, token: str,
               output_files_text: str | None = None) -> EvalScore:
-    """Run a single judge evaluator against captured conversation + output files.
+    """Run a judge evaluator against captured conversation + output files.
 
-    Shared by the `analyze` command. Builds the judge prompt, invokes Copilot
-    (with OTel disabled so judge calls don't contaminate eval traces), and parses
-    the JSON verdict.
+    Shared by the `analyze` command. Builds the judge prompt and samples the
+    judge ``runner.judge_samples`` times (self-consistency), disabling OTel so
+    judge calls don't contaminate eval traces. Successful samples are aggregated
+    via ``runner.judge_aggregate`` (median/mean/majority) and the per-sample
+    spread (stddev) plus outcome counts (ok/parse_error/timeout/error) are
+    recorded for reliability reporting.
     """
     secrets = collect_secrets(config, token)
     conversation = mask_secrets(conversation, secrets) or ""
@@ -286,20 +380,40 @@ def run_judge(ev: Evaluator, conversation: str, config: Config, token: str,
         f"{chr(10).join(sections)}\n\n"
         f'Output ONLY valid JSON: {{"score": N, "reason": "..."}}'
     )
-    cmd = ["copilot", "-p", prompt, "-s"]
-    if config.runner.judge_model:
-        cmd.extend(["--model", config.runner.judge_model])
-    # Disable OTel to avoid contaminating eval traces with judge calls
-    judge_env = {**os.environ, "GITHUB_TOKEN": token, "COPILOT_OTEL_ENABLED": "false"}
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=config.runner.judge_timeout_seconds, env=judge_env)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return EvalScore(name=ev.name, type="judge", score=None, reason="timeout")
-    data = _parse_json(proc.stdout, require_keys=("score",))
-    if data:
-        return EvalScore(name=ev.name, type="judge", score=int(data.get("score", 0)), reason=str(data.get("reason", "")))
-    return EvalScore(name=ev.name, type="judge", score=None, reason="parse_error")
+
+    n = max(1, config.runner.judge_samples)
+    samples: list[int] = []
+    reasons: list[str] = []
+    outcomes: dict[str, int] = {"ok": 0, "parse_error": 0, "timeout": 0, "error": 0}
+    for _ in range(n):
+        score, reason, outcome = _run_judge_once(prompt, config, token)
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        if outcome == "ok" and score is not None:
+            samples.append(score)
+            reasons.append(reason)
+
+    judge_version = judge_cli_version()
+
+    if not samples:
+        # No usable score across all samples; surface the dominant failure mode.
+        failure = max(("parse_error", "timeout", "error"), key=lambda o: outcomes.get(o, 0))
+        return EvalScore(
+            name=ev.name, type="judge", score=None, reason=failure, passed=False,
+            samples=samples, score_stddev=None, n_samples=n, outcomes=outcomes,
+            judge_model=config.runner.judge_model, judge_version=judge_version,
+        )
+
+    agg = _aggregate_scores(samples, config.runner.judge_aggregate)
+    stddev = float(pstdev(samples)) if len(samples) > 1 else 0.0
+    # Pick the reason from the sample whose score is closest to the aggregate.
+    reason = min(zip(samples, reasons, strict=True), key=lambda sr: abs(sr[0] - agg))[1]
+    if n > 1:
+        reason = f"[{config.runner.judge_aggregate} of {len(samples)}/{n}, σ={stddev:.2f}] {reason}"
+    return EvalScore(
+        name=ev.name, type="judge", score=agg, reason=reason,
+        samples=samples, score_stddev=round(stddev, 4), n_samples=n, outcomes=outcomes,
+        judge_model=config.runner.judge_model, judge_version=judge_version,
+    )
 
 
 def _eval_script(ev: Evaluator, config: Config, task: Task, variant: Variant, log_file: Path) -> EvalScore | None:

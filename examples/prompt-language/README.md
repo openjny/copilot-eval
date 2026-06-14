@@ -12,6 +12,14 @@ Compares English vs Japanese prompts on identical code tasks.
 - **code-review** — Review a Node.js Express app with 7 intentional security issues
 - **explain-architecture** — Explain architecture and design patterns of the same app
 
+Each task pairs noisy LLM judges with **deterministic ground-truth evaluators**
+(`gt-*`, `type: regex`) that match language-neutral code tokens (`eval(`, `password`,
+`/search`). These score 0/1 with no LLM call, so they don't drift between runs and
+anchor the judge scores. The runner also uses `judge_samples: 3` with
+`judge_aggregate: median` so each judge is sampled three times and the median is
+taken (self-consistency); `analyze` prints a **Judge reliability** summary with the
+score spread (σ) and parse/timeout/error rates.
+
 ## Run
 
 ```bash

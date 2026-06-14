@@ -106,7 +106,7 @@ def test_load_judge_raw(tmp_path):
     _write_scores(tmp_path, "t1", "b", "1", [
         {"name": "quality", "type": "judge", "score": 6, "reason": "meh"},
     ])
-    epoch_data, reasons, names = _load_judge_raw(tmp_path, ["a", "b"], "t1")
+    epoch_data, reasons, names, stddevs = _load_judge_raw(tmp_path, ["a", "b"], "t1")
     assert names == ["quality", "speed"]
     assert epoch_data[("a", "1")] == {"quality": 8, "speed": 5}
     assert epoch_data[("b", "1")] == {"quality": 6}
@@ -118,19 +118,19 @@ def test_load_judge_raw_skips_null_scores(tmp_path):
         {"name": "quality", "type": "judge", "score": None, "reason": "timeout"},
         {"name": "speed", "type": "judge", "score": 7},
     ])
-    epoch_data, _, names = _load_judge_raw(tmp_path, ["a"], "t1")
+    epoch_data, _, names, _ = _load_judge_raw(tmp_path, ["a"], "t1")
     assert names == ["speed"]
     assert epoch_data[("a", "1")] == {"speed": 7}
 
 
 def test_load_judge_raw_missing_dir(tmp_path):
-    assert _load_judge_raw(tmp_path / "nope", ["a"], "t1") == ({}, {}, [])
+    assert _load_judge_raw(tmp_path / "nope", ["a"], "t1") == ({}, {}, [], {})
 
 
 def test_load_judge_raw_matches_longest_variant(tmp_path):
     # variants "v" and "my_v": a file for "my_v" must not be claimed by "v".
     _write_scores(tmp_path, "t1", "my_v", "1", [{"name": "q", "score": 9}])
-    epoch_data, _, _ = _load_judge_raw(tmp_path, ["v", "my_v"], "t1")
+    epoch_data, _, _, _ = _load_judge_raw(tmp_path, ["v", "my_v"], "t1")
     assert ("my_v", "1") in epoch_data
     assert ("v", "1") not in epoch_data
 

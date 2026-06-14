@@ -43,6 +43,7 @@ uv run copilot-eval <command> [options]
 |---------|-------------------|
 | [prompt-language](examples/prompt-language/) | English vs Japanese prompts on code tasks |
 | [azure-skills](examples/azure-skills/) | Azure Skills Plugin impact on Azure operations |
+| [judge-calibration](examples/judge-calibration/) | Judge reliability/calibration via fixed-answer tasks |
 
 ## Documentation
 

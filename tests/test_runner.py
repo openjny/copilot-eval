@@ -11,10 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from eval.config import Config, RunnerConfig, Variant
+from eval.config import Config, Evaluator, RunnerConfig, Variant
 from eval.runner import (
     EvalScore,
     RunResult,
+    _aggregate_scores,
     _load_env_file,
     _mask_log_file,
     _parse_json,
@@ -23,6 +24,8 @@ from eval.runner import (
     collect_secrets,
     mask_secrets,
     read_files_from_dir,
+    run_judge,
+    score_to_dict,
     status_from_exit_code,
 )
 
@@ -400,3 +403,110 @@ def test_run_one_masks_log_on_setup_failed(tmp_path, monkeypatch):
     assert "***REDACTED***" in text
     # No leftover temp env files.
     assert not list(Path(tempfile.gettempdir()).glob("eval-env-*"))
+
+# --- judge self-consistency / metadata ---
+
+@pytest.mark.parametrize("samples,method,expected", [
+    ([8], "median", 8),
+    ([4, 8, 9], "median", 8),
+    ([4, 8, 9], "mean", 7),         # round(7.0)
+    ([5, 5, 9], "majority", 5),
+    ([5, 9], "majority", 5),        # tie -> lower for determinism
+])
+def test_aggregate_scores(samples, method, expected):
+    assert _aggregate_scores(samples, method) == expected
+
+
+def _judge_config(tmp_path: Path, samples: int = 1, aggregate: str = "median") -> Config:
+    runner = RunnerConfig(judge_model="test-model", judge_samples=samples, judge_aggregate=aggregate)
+    return Config(vars={}, runner=runner, tasks=[], variants=[],
+                  project_dir=tmp_path, config_dir=tmp_path)
+
+
+def test_run_judge_single_sample_legacy(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "judge_cli_version", lambda: "1.2.3")
+    monkeypatch.setattr(runner_mod, "_run_judge_once", lambda *a, **k: (7, "solid", "ok"))
+
+    ev = Evaluator(name="quality", type="judge", prompt="rate it")
+    s = run_judge(ev, "conversation", _judge_config(tmp_path), "tok")
+
+    assert s.score == 7
+    assert s.reason == "solid"           # no aggregate prefix when n == 1
+    assert s.samples == [7]
+    assert s.n_samples == 1
+    assert s.score_stddev == 0.0
+    assert s.outcomes == {"ok": 1, "parse_error": 0, "timeout": 0, "error": 0}
+    assert s.judge_model == "test-model"
+    assert s.judge_version == "1.2.3"
+    assert s.passed is True
+
+
+def test_run_judge_repeated_sampling_median(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "judge_cli_version", lambda: "v")
+    results = iter([(4, "weak", "ok"), (8, "good", "ok"), (9, "great", "ok")])
+    monkeypatch.setattr(runner_mod, "_run_judge_once", lambda *a, **k: next(results))
+
+    ev = Evaluator(name="quality", type="judge", prompt="rate it")
+    s = run_judge(ev, "conv", _judge_config(tmp_path, samples=3), "tok")
+
+    assert s.score == 8                  # median of 4, 8, 9
+    assert sorted(s.samples) == [4, 8, 9]
+    assert s.n_samples == 3
+    assert s.score_stddev and s.score_stddev > 0
+    assert "median of 3/3" in s.reason
+    assert s.outcomes["ok"] == 3
+
+
+def test_run_judge_partial_failures(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "judge_cli_version", lambda: "v")
+    results = iter([(6, "ok-ish", "ok"), (None, "timeout", "timeout"), (8, "good", "ok")])
+    monkeypatch.setattr(runner_mod, "_run_judge_once", lambda *a, **k: next(results))
+
+    ev = Evaluator(name="quality", type="judge", prompt="rate it")
+    s = run_judge(ev, "conv", _judge_config(tmp_path, samples=3), "tok")
+
+    assert s.score == 7                  # median of 6, 8
+    assert s.outcomes == {"ok": 2, "parse_error": 0, "timeout": 1, "error": 0}
+    assert "median of 2/3" in s.reason
+
+
+def test_run_judge_all_failures_returns_dominant_outcome(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "judge_cli_version", lambda: "v")
+    results = iter([(None, "parse_error", "parse_error"),
+                    (None, "timeout", "timeout"),
+                    (None, "parse_error", "parse_error")])
+    monkeypatch.setattr(runner_mod, "_run_judge_once", lambda *a, **k: next(results))
+
+    ev = Evaluator(name="quality", type="judge", prompt="rate it")
+    s = run_judge(ev, "conv", _judge_config(tmp_path, samples=3), "tok")
+
+    assert s.score is None
+    assert s.passed is False
+    assert s.reason == "parse_error"     # dominant failure mode
+    assert s.score_stddev is None
+
+
+def test_score_to_dict_judge_includes_metadata():
+    s = EvalScore(name="q", type="judge", score=8, reason="r", passed=True,
+                  samples=[8, 8], score_stddev=0.0, n_samples=2,
+                  outcomes={"ok": 2}, judge_model="m", judge_version="v")
+    d = score_to_dict(s)
+    assert d["samples"] == [8, 8]
+    assert d["n_samples"] == 2
+    assert d["judge_model"] == "m"
+    assert d["judge_version"] == "v"
+    assert d["outcomes"] == {"ok": 2}
+
+
+def test_score_to_dict_non_judge_omits_metadata():
+    s = EvalScore(name="c", type="contains", score=1, reason="found", passed=True)
+    d = score_to_dict(s)
+    assert d == {"name": "c", "type": "contains", "score": 1, "reason": "found", "passed": True}

@@ -30,6 +30,8 @@ class Report:
     epoch_judges: dict[tuple[str, str], dict[str, int]] = field(default_factory=dict)
     # Per-epoch judge reasons: key = (variant, epoch_str) -> {evaluator: reason}
     epoch_reasons: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict)
+    # Per-epoch judge score spread: key = (variant, epoch_str) -> {evaluator: stddev}
+    epoch_stddevs: dict[tuple[str, str], dict[str, float]] = field(default_factory=dict)
     judge_names: list[str] = field(default_factory=list)
     aggregate: str = "paired"
 
@@ -153,11 +155,13 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None,
 
         # Judge scores (both aggregated + per-epoch)
         epoch_judges, epoch_reasons, judge_names = {}, {}, []
+        epoch_stddevs: dict[tuple[str, str], dict[str, float]] = {}
         judge_rows: list[SummaryRow] = []
         if results_dir:
-            raw, reasons, names = _load_judge_raw(results_dir, variants, task_name)
+            raw, reasons, names, stddevs = _load_judge_raw(results_dir, variants, task_name)
             epoch_judges = raw
             epoch_reasons = reasons
+            epoch_stddevs = stddevs
             judge_names = names
             # Aggregate judge scores
             for name in names:
@@ -174,7 +178,7 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None,
             task=task_name, runs=task_runs, variants=variants,
             summary=summary, tool_patterns=tool_patterns,
             judge_scores=judge_rows, epoch_judges=epoch_judges,
-            epoch_reasons=epoch_reasons,
+            epoch_reasons=epoch_reasons, epoch_stddevs=epoch_stddevs,
             judge_names=judge_names, aggregate=aggregate,
         ))
 
@@ -245,6 +249,7 @@ def format_json(reports: list[Report]) -> str:
                         "output_tokens": r.total_output_tokens, "cache_tokens": r.total_cache_tokens,
                         "tool_duration": r.tool_duration, "tool_names": r.tool_names, "model": r.model,
                         "judges": report.epoch_judges.get((r.variant, r.epoch), {}),
+                        "judge_stddevs": report.epoch_stddevs.get((r.variant, r.epoch), {}),
                     }
                     for r in report.runs
                 ],
@@ -299,7 +304,13 @@ def format_markdown(reports: list[Report]) -> str:
             jvals = ""
             for n in jnames:
                 s = report.epoch_judges.get((r.variant, r.epoch), {}).get(n)
-                jvals += f" {s} |" if s is not None else " — |"
+                sd = report.epoch_stddevs.get((r.variant, r.epoch), {}).get(n)
+                if s is None:
+                    jvals += " — |"
+                elif sd:
+                    jvals += f" {s} (±{sd:.2f}) |"
+                else:
+                    jvals += f" {s} |"
             lines.append(f"| {r.variant} | {r.epoch} | {r.duration:.1f} | {r.turn_count} | "
                          f"{r.total_spans} | {r.tool_count} | {r.total_input_tokens} | "
                          f"{r.total_output_tokens} | {r.total_cache_tokens} | {r.tool_duration:.1f} |{jvals}")
@@ -325,14 +336,19 @@ def format_markdown(reports: list[Report]) -> str:
 # --- Judge score loading ---
 
 def _load_judge_raw(results_dir: Path, variants: list[str], task: str
-                    ) -> tuple[dict[tuple[str, str], dict[str, int]], dict[tuple[str, str], dict[str, str]], list[str]]:
-    """Load per-epoch judge scores and reasons. Returns (epoch_data, epoch_reasons, evaluator_names)."""
+                    ) -> tuple[dict[tuple[str, str], dict[str, int]], dict[tuple[str, str], dict[str, str]],
+                               list[str], dict[tuple[str, str], dict[str, float]]]:
+    """Load per-epoch judge scores, reasons, and spread.
+
+    Returns (epoch_data, epoch_reasons, evaluator_names, epoch_stddevs).
+    """
     epoch_data: dict[tuple[str, str], dict[str, int]] = {}
     epoch_reasons: dict[tuple[str, str], dict[str, str]] = {}
+    epoch_stddevs: dict[tuple[str, str], dict[str, float]] = {}
     all_names: set[str] = set()
 
     if not results_dir or not results_dir.exists():
-        return {}, {}, []
+        return {}, {}, [], {}
 
     for pattern in ["*.scores.json", "*.judges.json"]:
         for jf in results_dir.glob(pattern):
@@ -353,14 +369,18 @@ def _load_judge_raw(results_dir: Path, variants: list[str], task: str
             try:
                 scores = {}
                 reasons = {}
+                stddevs = {}
                 for s in json.loads(jf.read_text()):
                     if s.get("score") is not None:
                         scores[s["name"]] = int(s["score"])
                         reasons[s["name"]] = str(s.get("reason", ""))
+                        if s.get("score_stddev") is not None:
+                            stddevs[s["name"]] = float(s["score_stddev"])
                         all_names.add(s["name"])
                 epoch_data[(variant, epoch_str)] = scores
                 epoch_reasons[(variant, epoch_str)] = reasons
+                epoch_stddevs[(variant, epoch_str)] = stddevs
             except (json.JSONDecodeError, KeyError):
                 continue
 
-    return epoch_data, epoch_reasons, sorted(all_names)
+    return epoch_data, epoch_reasons, sorted(all_names), epoch_stddevs
