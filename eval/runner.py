@@ -22,6 +22,16 @@ class EvalScore:
     score: int | None
     reason: str = ""
     passed: bool = True
+    meta: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "name": self.name, "type": self.type, "score": self.score,
+            "reason": self.reason, "passed": self.passed,
+        }
+        if self.meta:
+            d["meta"] = self.meta
+        return d
 
 
 @dataclass
@@ -50,10 +60,7 @@ class RunResult:
             "exit_code": self.exit_code,
             "status": self.status,
             "passed": self.passed,
-            "scores": [
-                {"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed}
-                for s in self.scores
-            ],
+            "scores": [s.to_dict() for s in self.scores],
         }
 
 
@@ -259,20 +266,45 @@ def _run_evaluators(task: Task, variant: Variant, config: Config, log_file: Path
             scores.append(s)
     if scores:
         sf = log_file.with_suffix(".scores.json")
-        sf.write_text(json.dumps(
-            [{"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed} for s in scores],
-            indent=2, ensure_ascii=False,
-        ))
+        sf.write_text(json.dumps([s.to_dict() for s in scores], indent=2, ensure_ascii=False))
     return scores
 
 
+_STDERR_SNIPPET_CHARS = 500
+_host_copilot_version_cache: str | None = None
+
+
+def host_copilot_version() -> str | None:
+    """Return the host `copilot --version` string, cached for the process.
+
+    Returns None if the Copilot CLI is missing or the call fails. Used to record
+    and verify which (unpinned) host Copilot performed the judge scoring.
+    """
+    global _host_copilot_version_cache
+    if _host_copilot_version_cache is not None:
+        return _host_copilot_version_cache or None
+    try:
+        proc = subprocess.run(["copilot", "--version"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        _host_copilot_version_cache = ""
+        return None
+    out = (proc.stdout or proc.stderr or "").strip()
+    # Reduce noisy multi-line banners to the first non-empty line.
+    version = next((ln.strip() for ln in out.splitlines() if ln.strip()), "")
+    _host_copilot_version_cache = version
+    return version or None
+
+
 def run_judge(ev: Evaluator, conversation: str, config: Config, token: str,
-              output_files_text: str | None = None) -> EvalScore:
+              output_files_text: str | None = None,
+              extra_meta: dict[str, Any] | None = None) -> EvalScore:
     """Run a single judge evaluator against captured conversation + output files.
 
     Shared by the `analyze` command. Builds the judge prompt, invokes Copilot
     (with OTel disabled so judge calls don't contaminate eval traces), and parses
-    the JSON verdict.
+    the JSON verdict. Records judge-runtime metadata (host Copilot version,
+    process returncode/stderr, and any caller-supplied truncation flags) on the
+    returned score so the analyze report can surface reproducibility issues.
     """
     secrets = collect_secrets(config, token)
     conversation = mask_secrets(conversation, secrets) or ""
@@ -291,15 +323,39 @@ def run_judge(ev: Evaluator, conversation: str, config: Config, token: str,
         cmd.extend(["--model", config.runner.judge_model])
     # Disable OTel to avoid contaminating eval traces with judge calls
     judge_env = {**os.environ, "GITHUB_TOKEN": token, "COPILOT_OTEL_ENABLED": "false"}
+
+    version = host_copilot_version()
+    meta: dict[str, Any] = {**(extra_meta or {})}
+    if version:
+        meta["judge_version"] = version
+    expected = config.runner.judge_copilot_version
+    if expected and version and version != expected:
+        meta["judge_version_mismatch"] = {"expected": expected, "actual": version}
+
+    def _score(score: int | None, reason: str, outcome: str) -> EvalScore:
+        meta["outcome"] = outcome
+        return EvalScore(name=ev.name, type="judge", score=score, reason=reason, meta=meta)
+
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=config.runner.judge_timeout_seconds, env=judge_env)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return EvalScore(name=ev.name, type="judge", score=None, reason="timeout")
+    except subprocess.TimeoutExpired:
+        return _score(None, f"timeout after {config.runner.judge_timeout_seconds}s", "timeout")
+    except FileNotFoundError:
+        return _score(None, "copilot CLI not found on host", "not_found")
+
+    meta["returncode"] = proc.returncode
+    stderr = (proc.stderr or "").strip()
+    if stderr:
+        meta["stderr"] = stderr[:_STDERR_SNIPPET_CHARS]
+
     data = _parse_json(proc.stdout, require_keys=("score",))
     if data:
-        return EvalScore(name=ev.name, type="judge", score=int(data.get("score", 0)), reason=str(data.get("reason", "")))
-    return EvalScore(name=ev.name, type="judge", score=None, reason="parse_error")
+        return _score(int(data.get("score", 0)), str(data.get("reason", "")), "ok")
+    if proc.returncode != 0:
+        detail = f" — {stderr[:200]}" if stderr else ""
+        return _score(None, f"error: rc={proc.returncode}{detail}", "error")
+    return _score(None, "parse_error", "parse_error")
 
 
 def _eval_script(ev: Evaluator, config: Config, task: Task, variant: Variant, log_file: Path) -> EvalScore | None:

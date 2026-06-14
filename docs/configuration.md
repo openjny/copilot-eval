@@ -18,6 +18,9 @@ runner:
   parallel: off                  # off | per_task | full
   max_workers: 8                 # Max concurrent runs (for parallel modes + analyze judges)
   judge_timeout_seconds: 60      # Per-judge Copilot timeout in analyze (seconds)
+  judge_copilot_version: null    # Optional: expected host `copilot --version`; analyze warns on mismatch
+  judge_max_conversation_chars: 8000  # Max chars of conversation passed to the judge
+  judge_max_output_chars: 8000   # Max chars of output-file text passed to the judge
   output_format: text            # text | json
   capture_content: true          # Capture prompt/response content in OTel spans (needed by judge)
   container_image_base: copilot-eval
@@ -88,7 +91,11 @@ Each evaluator requires a unique `name` within its task and a valid `type`. The 
 
 The judge sees both the **conversation output** (Copilot's terminal log) and any **files written to `/workspace/output/`**. This ensures correct scoring even when Copilot writes results to files without echoing them.
 
-Judge scoring is done by `runner.judge_model` (defaults to the eval model if not set). OTel is disabled during judge calls to avoid contaminating traces.
+Judge scoring is done by `runner.judge_model` (defaults to `gpt-4.1`). OTel is disabled during judge calls to avoid contaminating traces.
+
+The judge runs with the **host** Copilot CLI, which is not version-pinned like the eval container. To keep scoring reproducible and observable, `analyze` records the host `copilot --version` into each judge score's `meta.judge_version` and surfaces it in the report. Set `runner.judge_copilot_version` to the version you expect; `analyze` warns when the host differs.
+
+The judge context is bounded by `runner.judge_max_conversation_chars` (conversation/log text) and `runner.judge_max_output_chars` (output-file text). When either budget is exceeded the context is truncated, `meta.truncation` is recorded, and the report flags how many judge runs saw truncated context — raise these limits if the judge is missing decisive evidence. Each judge score's `meta.outcome` (`ok`/`parse_error`/`error`/`timeout`/`not_found`) plus the captured `returncode`/`stderr` are aggregated into the report's "Judge runtime" section so host failures are no longer silently collapsed.
 
 Judges run during `analyze` and are scored idempotently: a judge is (re)run only when no judge score yet exists for that run (non-judge `script`/`contains`/`regex` scores share the same `.scores.json` file, so file presence alone does not skip judging). Use `analyze --re-eval` to force all judges to re-run. Judge timeouts or unparseable output produce `score: null` and are surfaced as warnings rather than dropped.
 

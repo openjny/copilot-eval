@@ -400,3 +400,154 @@ def test_run_one_masks_log_on_setup_failed(tmp_path, monkeypatch):
     assert "***REDACTED***" in text
     # No leftover temp env files.
     assert not list(Path(tempfile.gettempdir()).glob("eval-env-*"))
+
+
+# --- host_copilot_version / run_judge ---
+
+class _FakeProc:
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def _judge_config(tmp_path: Path, **runner_kw) -> Config:
+    return Config(
+        vars={}, runner=RunnerConfig(**runner_kw), tasks=[], variants=[],
+        project_dir=tmp_path, config_dir=tmp_path,
+    )
+
+
+def _reset_version_cache(monkeypatch):
+    from eval import runner as runner_mod
+    monkeypatch.setattr(runner_mod, "_host_copilot_version_cache", None, raising=False)
+
+
+def test_host_copilot_version_parses_first_line(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    _reset_version_cache(monkeypatch)
+    monkeypatch.setattr(runner_mod.subprocess, "run",
+                        lambda *a, **k: _FakeProc(stdout="copilot/1.0.18\nextra banner\n"))
+    assert runner_mod.host_copilot_version() == "copilot/1.0.18"
+
+
+def test_host_copilot_version_caches(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    _reset_version_cache(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_run(*a, **k):
+        calls["n"] += 1
+        return _FakeProc(stdout="copilot/2.0.0")
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+    assert runner_mod.host_copilot_version() == "copilot/2.0.0"
+    assert runner_mod.host_copilot_version() == "copilot/2.0.0"
+    assert calls["n"] == 1
+
+
+def test_host_copilot_version_none_on_failure(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    _reset_version_cache(monkeypatch)
+
+    def boom(*a, **k):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", boom)
+    assert runner_mod.host_copilot_version() is None
+
+
+def _patch_judge(monkeypatch, proc=None, exc=None, version="copilot/1.0.18"):
+    from eval import runner as runner_mod
+    monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: version)
+
+    def fake_run(*a, **k):
+        if exc is not None:
+            raise exc
+        return proc
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+
+
+def _ev():
+    from eval.config import Evaluator
+    return Evaluator(name="quality", type="judge", prompt="Rate it.")
+
+
+def test_run_judge_ok_records_meta(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    _patch_judge(monkeypatch, proc=_FakeProc(stdout='{"score": 8, "reason": "good"}'))
+    s = runner_mod.run_judge(_ev(), "conversation", _judge_config(tmp_path), token=None)
+    assert s.score == 8
+    assert s.reason == "good"
+    assert s.meta["outcome"] == "ok"
+    assert s.meta["judge_version"] == "copilot/1.0.18"
+    assert s.meta["returncode"] == 0
+
+
+def test_run_judge_parse_error(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    _patch_judge(monkeypatch, proc=_FakeProc(stdout="not json at all", returncode=0))
+    s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
+    assert s.score is None
+    assert s.reason == "parse_error"
+    assert s.meta["outcome"] == "parse_error"
+
+
+def test_run_judge_error_returncode_surfaces_stderr(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    _patch_judge(monkeypatch, proc=_FakeProc(stdout="", stderr="boom failed", returncode=3))
+    s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
+    assert s.score is None
+    assert s.meta["outcome"] == "error"
+    assert s.meta["returncode"] == 3
+    assert s.meta["stderr"] == "boom failed"
+    assert "rc=3" in s.reason
+    assert "boom failed" in s.reason
+
+
+def test_run_judge_timeout(tmp_path, monkeypatch):
+    import subprocess as sp
+
+    from eval import runner as runner_mod
+    _patch_judge(monkeypatch, exc=sp.TimeoutExpired(cmd="copilot", timeout=60))
+    s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
+    assert s.score is None
+    assert s.meta["outcome"] == "timeout"
+
+
+def test_run_judge_not_found(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    _patch_judge(monkeypatch, exc=FileNotFoundError())
+    s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
+    assert s.score is None
+    assert s.meta["outcome"] == "not_found"
+
+
+def test_run_judge_version_mismatch(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    _patch_judge(monkeypatch, proc=_FakeProc(stdout='{"score": 5}'), version="copilot/1.0.18")
+    config = _judge_config(tmp_path, judge_copilot_version="copilot/9.9.9")
+    s = runner_mod.run_judge(_ev(), "c", config, token=None)
+    assert s.meta["judge_version_mismatch"] == {"expected": "copilot/9.9.9", "actual": "copilot/1.0.18"}
+
+
+def test_run_judge_passes_through_extra_meta(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    _patch_judge(monkeypatch, proc=_FakeProc(stdout='{"score": 7}'))
+    s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None,
+                             extra_meta={"truncation": {"conversation": 8000}})
+    assert s.meta["truncation"] == {"conversation": 8000}
+
+
+def test_evalscore_to_dict_includes_meta():
+    s = EvalScore(name="j", type="judge", score=5, reason="ok", meta={"outcome": "ok"})
+    assert s.to_dict() == {
+        "name": "j", "type": "judge", "score": 5, "reason": "ok",
+        "passed": True, "meta": {"outcome": "ok"},
+    }
+
+
+def test_evalscore_to_dict_omits_empty_meta():
+    s = EvalScore(name="c", type="contains", score=1, reason="found")
+    assert "meta" not in s.to_dict()
