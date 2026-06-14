@@ -63,6 +63,9 @@ class Report:
     # Per-epoch judge reasons: key = (variant, epoch_str) -> {evaluator: reason}
     epoch_reasons: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict)
     judge_names: list[str] = field(default_factory=list)
+    # Per-task judge-runtime aggregate (outcome counts, host Copilot versions,
+    # truncated-context count, version-mismatch flag). Empty when no judges ran.
+    judge_runtime: dict[str, Any] = field(default_factory=dict)
     aggregate: str = "paired"
     # Per-variant run count (traces with extracted metrics) and shared paired n.
     variant_n: dict[str, int] = field(default_factory=dict)
@@ -293,11 +296,13 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None,
         # Judge scores (both aggregated + per-epoch)
         epoch_judges, epoch_reasons, judge_names = {}, {}, []
         judge_rows: list[SummaryRow] = []
+        judge_runtime: dict[str, Any] = {}
         if results_dir:
             raw, reasons, names = _load_judge_raw(results_dir, variants, task_name)
             epoch_judges = raw
             epoch_reasons = reasons
             judge_names = names
+            judge_runtime = _load_judge_runtime(results_dir, variants, task_name)
             # Aggregate judge scores
             for name in names:
                 vals_by_v = {}
@@ -327,7 +332,7 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None,
             summary=summary, tool_patterns=tool_patterns,
             judge_scores=judge_rows, epoch_judges=epoch_judges,
             epoch_reasons=epoch_reasons,
-            judge_names=judge_names, aggregate=aggregate,
+            judge_names=judge_names, judge_runtime=judge_runtime, aggregate=aggregate,
             variant_n=variant_n, paired_n=paired_n,
             reliability=reliability, warnings=warnings,
         ))
@@ -536,6 +541,18 @@ def format_table(reports: list[Report]) -> str:
                 cols = "".join(f"{_fmt_value(row, v):>22}" for v in report.variants)
                 lines.append(f"{row.metric:<24} {cols} {_fmt_delta(row):>26}")
 
+        rt = report.judge_runtime
+        if rt:
+            lines.append("\nJudge runtime")
+            outcomes = ", ".join(f"{k}={v}" for k, v in rt.get("outcomes", {}).items())
+            lines.append(f"  Outcomes ({rt.get('total', 0)}): {outcomes}")
+            if rt.get("versions"):
+                lines.append(f"  Host Copilot: {', '.join(rt['versions'])}")
+            if rt.get("truncated"):
+                lines.append(f"  Truncated context: {rt['truncated']} judge run(s)")
+            if rt.get("version_mismatch"):
+                lines.append("  WARNING: host Copilot version mismatch detected")
+
         sections.append("\n".join(lines))
     body = "\n".join(sections)
     if _significance_legend(reports):
@@ -588,6 +605,7 @@ def format_json(reports: list[Report]) -> str:
                 "summary": [_summary_row_json(r, "metric") for r in report.summary],
                 "tool_patterns": report.tool_patterns,
                 "judge_scores": [_summary_row_json(r, "judge") for r in report.judge_scores],
+                "judge_runtime": report.judge_runtime,
             }
             for report in reports
         ],
@@ -642,6 +660,19 @@ def format_markdown(reports: list[Report]) -> str:
             for row in report.judge_scores:
                 cols = "".join(f" {_fmt_value(row, v)} |" for v in report.variants)
                 lines.append(f"| {row.metric} |{cols} {_fmt_delta(row)} |")
+
+        # Judge runtime (reproducibility / observability)
+        rt = report.judge_runtime
+        if rt:
+            lines.append("\n### Judge Runtime\n")
+            outcomes = ", ".join(f"`{k}`={v}" for k, v in rt.get("outcomes", {}).items())
+            lines.append(f"- Outcomes ({rt.get('total', 0)}): {outcomes}")
+            if rt.get("versions"):
+                lines.append(f"- Host Copilot: {', '.join(f'`{v}`' for v in rt['versions'])}")
+            if rt.get("truncated"):
+                lines.append(f"- ⚠️ Truncated context: {rt['truncated']} judge run(s)")
+            if rt.get("version_mismatch"):
+                lines.append("- ⚠️ Host Copilot version mismatch detected")
 
         # Per-run details — column order matches _METRIC_DEFS
         jnames = report.judge_names
@@ -726,3 +757,62 @@ def _load_judge_raw(results_dir: Path, variants: list[str], task: str
                 continue
 
     return epoch_data, epoch_reasons, sorted(all_names)
+
+
+def _load_judge_runtime(results_dir: Path, variants: list[str], task: str) -> dict[str, Any]:
+    """Aggregate judge-runtime metadata across a task's scores files.
+
+    Returns outcome counts (ok/parse_error/error/timeout/...), the set of host
+    Copilot versions used, how many judges saw truncated context, and whether any
+    host version mismatched the configured expectation.
+    """
+    outcomes: dict[str, int] = {}
+    versions: set[str] = set()
+    truncated = 0
+    mismatch = False
+    total = 0
+    seen: set[Path] = set()
+
+    if not results_dir or not results_dir.exists():
+        return {}
+
+    for jf in results_dir.glob("*.scores.json"):
+        stem = jf.stem.replace(".scores", "")
+        if not stem.startswith(f"{task}_"):
+            continue
+        name_variant = stem.rsplit("_epoch", 1)[0]
+        # Match the longest variant name (mirrors _load_judge_raw) so a shorter
+        # variant doesn't claim a file belonging to a longer-named one.
+        matches = [v for v in variants if name_variant.endswith(f"_{v}")]
+        if not matches:
+            continue
+        if jf in seen:
+            continue
+        seen.add(jf)
+        try:
+            scores = json.loads(jf.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        for s in scores:
+            if s.get("type") != "judge":
+                continue
+            total += 1
+            meta = s.get("meta") or {}
+            outcome = meta.get("outcome") or ("ok" if s.get("score") is not None else "unknown")
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+            if v := meta.get("judge_version"):
+                versions.add(str(v))
+            if meta.get("judge_version_mismatch"):
+                mismatch = True
+            if meta.get("truncation"):
+                truncated += 1
+
+    if not total:
+        return {}
+    return {
+        "total": total,
+        "outcomes": dict(sorted(outcomes.items())),
+        "versions": sorted(versions),
+        "truncated": truncated,
+        "version_mismatch": mismatch,
+    }

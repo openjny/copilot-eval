@@ -430,9 +430,16 @@ def _report_run_coverage(manifest_runs: list[dict[str, Any]], traces: list[Trace
 
 
 def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path) -> None:
-    """Surface judge evaluations that produced no usable score (timeout/parse_error)."""
+    """Surface judge reproducibility issues: unusable scores, outcome-rate
+    breakdown, host Copilot version mismatches, and truncated context."""
     tasks_by_name = {t.name: t for t in config.tasks}
     problems: list[str] = []
+    outcomes: dict[str, int] = {}
+    judge_total = 0
+    mismatches: set[str] = set()
+    versions: set[str] = set()
+    truncated: list[str] = []
+    seen_files: set[Path] = set()
     for trace in traces:
         scenario = trace.resource_tags.get("eval.scenario", "")
         variant = trace.resource_tags.get("eval.variant", "")
@@ -441,18 +448,51 @@ def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path
         if not task or not any(ev.type == "judge" for ev in task.evaluators):
             continue
         scores_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.scores.json"
-        if not scores_file.exists():
+        if not scores_file.exists() or scores_file in seen_files:
             continue
+        seen_files.add(scores_file)
         try:
             scores = json.loads(scores_file.read_text())
         except (json.JSONDecodeError, OSError):
             continue
         for s in scores:
-            if s.get("type") == "judge" and s.get("score") is None:
+            if s.get("type") != "judge":
+                continue
+            judge_total += 1
+            meta = s.get("meta") or {}
+            outcome = meta.get("outcome") or ("ok" if s.get("score") is not None else "unknown")
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+            if v := meta.get("judge_version"):
+                versions.add(str(v))
+            if mm := meta.get("judge_version_mismatch"):
+                mismatches.add(f"expected {mm.get('expected')} got {mm.get('actual')}")
+            if meta.get("truncation"):
+                truncated.append(f"{scenario}/{variant}/e{epoch}:{s.get('name')}")
+            if s.get("score") is None:
                 reason = s.get("reason", "no score")
                 problems.append(f"{scenario}/{variant}/e{epoch}:{s.get('name')} ({reason})")
+
+    if judge_total:
+        breakdown = ", ".join(f"{k}={v}" for k, v in sorted(outcomes.items()))
+        click.echo(f"  Judge outcomes ({judge_total} total): {breakdown}", err=True)
+    if versions:
+        click.echo(f"  Judge host Copilot version(s): {', '.join(sorted(versions))}", err=True)
+    if mismatches:
+        click.echo(f"  WARNING: judge Copilot version mismatch — {'; '.join(sorted(mismatches))}", err=True)
+    if truncated:
+        click.echo(
+            f"  WARNING: {len(truncated)} judge(s) saw truncated context "
+            f"(raise runner.judge_max_conversation_chars / judge_max_output_chars): "
+            f"{', '.join(truncated)}",
+            err=True,
+        )
     if problems:
         click.echo(f"  WARNING: {len(problems)} judge score(s) unavailable: {', '.join(problems)}", err=True)
+
+
+def _is_truncated(text: str | None) -> bool:
+    """Whether judge context text was cut to its char budget by the readers."""
+    return bool(text and text.rstrip().endswith("(truncated)"))
 
 
 def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: bool = False) -> None:
@@ -508,21 +548,29 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
             continue  # all judge scores already present
 
         # Extract conversation from OTel trace
-        conversation = extract_conversation(trace)
+        conv_limit = config.runner.judge_max_conversation_chars
+        out_limit = config.runner.judge_max_output_chars
+        conversation = extract_conversation(trace, max_chars=conv_limit)
 
         # Fall back to log file if OTel content not available
         if not conversation:
             log_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.log"
             if log_file.exists():
                 text = log_file.read_text()
-                conversation = text[:8000] + "\n... (truncated)" if len(text) > 8000 else text
+                conversation = text[:conv_limit] + "\n... (truncated)" if len(text) > conv_limit else text
 
         if not conversation:
             continue
 
         # Read output files from persisted outputs
         output_dir = results_dir / "outputs" / f"{scenario}_{variant}_epoch{epoch}"
-        output_files_text = read_files_from_dir(output_dir, max_chars=8000)
+        output_files_text = read_files_from_dir(output_dir, max_chars=out_limit)
+
+        truncation: dict[str, Any] = {}
+        if _is_truncated(conversation):
+            truncation["conversation"] = conv_limit
+        if _is_truncated(output_files_text):
+            truncation["output_files"] = out_limit
 
         contexts[key] = {
             "scenario": scenario,
@@ -532,6 +580,7 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
             "existing_scores": existing_scores,
             "conversation": conversation,
             "output_files_text": output_files_text,
+            "truncation": truncation,
             "pending_names": {ev.name for ev in pending},
             "order": {ev.name: i for i, ev in enumerate(pending)},
             "remaining": len(pending),
@@ -565,12 +614,14 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
             f"    [{ctx['scenario']}/{ctx['variant']}/e{ctx['epoch']}] Evaluating: {ev.name} (judge)...",
             err=True,
         )
-        s = run_judge(ev, ctx["conversation"], config, github_token, ctx["output_files_text"])
+        extra_meta = {"truncation": ctx["truncation"]} if ctx["truncation"] else None
+        s = run_judge(ev, ctx["conversation"], config, github_token, ctx["output_files_text"],
+                      extra_meta=extra_meta)
         if s.score is not None:
             click.echo(f"    ✓ {ev.name}: {s.score} — {s.reason[:60]}", err=True)
         else:
             click.echo(f"    ! {ev.name}: {s.reason}", err=True)
-        return key, {"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed}
+        return key, s.to_dict()
 
     with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
         futures = {pool.submit(_judge, key, ev): (key, ev) for key, ev in work}

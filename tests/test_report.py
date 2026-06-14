@@ -151,6 +151,55 @@ def test_build_report_judge_paired_by_epoch(tmp_path):
     assert judge_row.delta == "+50.0%"
 
 
+# --- Judge runtime aggregation ---
+
+def test_load_judge_runtime_aggregates(tmp_path):
+    from eval.report import _load_judge_runtime
+    _write_scores(tmp_path, "t1", "a", "1", [
+        {"name": "q", "type": "judge", "score": 8,
+         "meta": {"outcome": "ok", "judge_version": "copilot/1.0.18"}},
+        {"name": "s", "type": "judge", "score": None,
+         "meta": {"outcome": "parse_error", "judge_version": "copilot/1.0.18",
+                  "truncation": {"conversation": 8000}}},
+    ])
+    _write_scores(tmp_path, "t1", "b", "1", [
+        {"name": "q", "type": "judge", "score": None,
+         "meta": {"outcome": "timeout", "judge_version": "copilot/2.0.0",
+                  "judge_version_mismatch": {"expected": "copilot/1.0.18", "actual": "copilot/2.0.0"}}},
+    ])
+    rt = _load_judge_runtime(tmp_path, ["a", "b"], "t1")
+    assert rt["total"] == 3
+    assert rt["outcomes"] == {"ok": 1, "parse_error": 1, "timeout": 1}
+    assert rt["versions"] == ["copilot/1.0.18", "copilot/2.0.0"]
+    assert rt["truncated"] == 1
+    assert rt["version_mismatch"] is True
+
+
+def test_load_judge_runtime_empty_when_no_judges(tmp_path):
+    from eval.report import _load_judge_runtime
+    _write_scores(tmp_path, "t1", "a", "1", [{"name": "c", "type": "contains", "score": 1}])
+    assert _load_judge_runtime(tmp_path, ["a"], "t1") == {}
+
+
+def test_load_judge_runtime_infers_outcome_without_meta(tmp_path):
+    from eval.report import _load_judge_runtime
+    _write_scores(tmp_path, "t1", "a", "1", [
+        {"name": "q", "type": "judge", "score": 7},
+        {"name": "s", "type": "judge", "score": None, "reason": "timeout"},
+    ])
+    rt = _load_judge_runtime(tmp_path, ["a"], "t1")
+    assert rt["outcomes"] == {"ok": 1, "unknown": 1}
+
+
+def test_build_report_attaches_judge_runtime(tmp_path):
+    _write_scores(tmp_path, "t1", "a", "1", [
+        {"name": "q", "type": "judge", "score": 8, "meta": {"outcome": "ok"}},
+    ])
+    results = [make_metrics("t1", "a", "1")]
+    reports = build_report(results, tmp_path, ["a"], "median")
+    assert reports[0].judge_runtime["outcomes"] == {"ok": 1}
+
+
 # --- Dispersion + significance helpers ---
 
 def test_stddev_and_min_max():

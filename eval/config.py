@@ -34,6 +34,14 @@ class RunnerConfig:
     variant_order: str = "fixed"  # fixed | counterbalance | random
     seed: int | None = None  # RNG seed for variant_order=random (reproducibility)
     judge_timeout_seconds: int = 60
+    # Expected host `copilot --version` for judge runs. When set, analyze warns
+    # if the host Copilot CLI used for judging differs from this value.
+    judge_copilot_version: str | None = None
+    # Context budgets (in characters) for the judge prompt. Conversation and
+    # output-file text are truncated to these limits; truncation is recorded in
+    # judge score metadata and surfaced in the report.
+    judge_max_conversation_chars: int = 8000
+    judge_max_output_chars: int = 8000
     output_format: str = "text"
     capture_content: bool = True
     # Instruction appended to every prompt so generated files reach the judges.
@@ -206,6 +214,8 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
     timeout_seconds = _require_int(runner_raw, "timeout_seconds", 300, minimum=1)
     max_workers = _require_int(runner_raw, "max_workers", 8, minimum=1)
     judge_timeout_seconds = _require_int(runner_raw, "judge_timeout_seconds", 60, minimum=1)
+    judge_max_conversation_chars = _require_int(runner_raw, "judge_max_conversation_chars", 8000, minimum=1)
+    judge_max_output_chars = _require_int(runner_raw, "judge_max_output_chars", 8000, minimum=1)
     max_turns = runner_raw.get("max_turns")
     if max_turns is not None:
         max_turns = _coerce_int("runner.max_turns", max_turns, minimum=1)
@@ -230,6 +240,9 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         variant_order=variant_order,
         seed=seed,
         judge_timeout_seconds=judge_timeout_seconds,
+        judge_copilot_version=runner_raw.get("judge_copilot_version"),
+        judge_max_conversation_chars=judge_max_conversation_chars,
+        judge_max_output_chars=judge_max_output_chars,
         output_format=output_format,
         capture_content=runner_raw.get("capture_content", True),
         output_instruction=output_instruction,
