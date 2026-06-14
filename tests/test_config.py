@@ -124,6 +124,8 @@ def test_evaluator_invalid_regex(tmp_path):
     ({"judge_timeout_seconds": 0}, "runner.judge_timeout_seconds"),
     ({"epochs": "two"}, "runner.epochs"),
     ({"max_turns": 0}, "runner.max_turns"),
+    ({"variant_order": "shuffle"}, "runner.variant_order"),
+    ({"seed": "abc"}, "runner.seed"),
 ])
 def test_runner_validation(tmp_path, runner, msg):
     with pytest.raises(ConfigError, match=msg):
@@ -133,12 +135,20 @@ def test_runner_validation(tmp_path, runner, msg):
 def test_runner_valid_values(tmp_path):
     cfg = load_inline(tmp_path, {
         "runner": {"parallel": "full", "output_format": "json", "epochs": 3, "max_workers": 4,
-                   "judge_timeout_seconds": 120},
+                   "judge_timeout_seconds": 120, "variant_order": "counterbalance", "seed": 7},
         "tasks": [{"name": "t1", "prompt": "p"}],
     })
     assert cfg.runner.parallel == "full"
     assert cfg.runner.epochs == 3
     assert cfg.runner.judge_timeout_seconds == 120
+    assert cfg.runner.variant_order == "counterbalance"
+    assert cfg.runner.seed == 7
+
+
+def test_runner_variant_order_default(tmp_path):
+    cfg = load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "p"}]})
+    assert cfg.runner.variant_order == "fixed"
+    assert cfg.runner.seed is None
 
 
 def test_runner_judge_timeout_default(tmp_path):
