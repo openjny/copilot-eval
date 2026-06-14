@@ -22,6 +22,7 @@ runner:
   judge_timeout_seconds: 60      # Per-judge Copilot timeout in analyze (seconds)
   output_format: text            # text | json
   capture_content: true          # Capture prompt/response content in OTel spans (needed by judge)
+  output_instruction: Save all output files under /workspace/output/.  # Appended to every prompt; "" disables; supports {var} interpolation
   container_image_base: copilot-eval
   copilot_version: "1.0.18"
   otel_endpoint: http://host.docker.internal:4318   # OTLP collector endpoint (inside container)
@@ -49,6 +50,7 @@ tasks:
     hooks:
       before_run: scripts/setup.sh       # Run before Copilot
       after_run: scripts/cleanup.sh      # Run after Copilot
+      on_failure: fail                   # before_run failure policy: fail | warn (default: fail)
     evaluators:
       - name: quality
         type: judge                      # judge | script | contains | regex
@@ -59,7 +61,14 @@ tasks:
 
 Variables are merged in order: `global vars` → `task vars` → `variant vars`. Later values override earlier ones.
 
-The prompt also gets `"\nSave all output files under /workspace/output/."` appended automatically so that generated files are available to judges.
+The prompt also gets an output-path instruction appended automatically so that generated files are available to judges. By default this is `"\n\nSave all output files under /workspace/output/."`. Configure it via `runner.output_instruction`:
+
+- **unset** → the default sentence above (backward compatible),
+- **`""`** → nothing is appended (disable it, e.g. when the task prompt already specifies the output path, or to avoid injecting English into a non-English prompt),
+- **`null`** → same as unset (the default sentence),
+- **custom string** → appended verbatim, with the same `{var}` interpolation as the prompt (so it can adapt per variant, e.g. `Respond in {language}.`).
+
+When non-empty, the instruction is appended after a `\n\n` separator.
 
 ## Variants
 
@@ -121,6 +130,15 @@ Place files under `<config-dir>/fixtures/<fixture-name>/`. They are copied to a 
 
 - Environment setup/teardown (e.g., Azure resource reset)
 - Pre-deployment of test scenarios
+
+### Failure handling
+
+Hook exit codes are checked (a missing script is treated as success):
+
+- **`before_run`** — controlled by `hooks.on_failure`. With the default `fail`, a non-zero exit aborts the run with `status: setup_failed` (the run is not executed). With `warn`, the failure is logged and the run continues.
+- **`after_run`** — a non-zero exit is always logged and surfaced as a failing `hook` score, so the run is marked as not passed without aborting the batch.
+
+Per-run errors are isolated: an exception during setup (e.g. missing `docker` binary, fixture copy failure, a hook raising) is caught and recorded as `status: setup_failed` for that run only — it never aborts the whole batch, and the run manifest is always written.
 
 ## Health Check
 

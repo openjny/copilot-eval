@@ -126,6 +126,30 @@ def main() -> None:
     """Copilot CLI A/B evaluation framework."""
 
 
+def _safe_run_one(
+    task: Task, variant: Variant, epoch: int,
+    config: Config, run_id: str, run_dir: Path, github_token: str,
+    order_index: int | None = None,
+) -> RunResult:
+    """Run a single eval, guaranteeing the batch is never aborted by one run.
+
+    `run_one` already converts internal errors into a setup_failed RunResult, but
+    this boundary catches any truly unexpected exception (so one bad run cannot
+    take down the whole batch or prevent the manifest from being written) and
+    turns it into a synthetic setup_failed result instead of re-raising.
+    """
+    try:
+        return run_one(task, variant, epoch, config, run_id, run_dir, github_token, order_index)
+    except Exception as exc:  # noqa: BLE001 - isolate per-run failures from the batch
+        click.echo(f"    ✗ [{task.name}] epoch={epoch} variant={variant.name} errored: {exc}")
+        return RunResult(
+            task=task.name, variant=variant.name, epoch=epoch,
+            test_id=uuid.uuid4().hex, run_id=run_id,
+            log_file=run_dir / f"{task.name}_{variant.name}_epoch{epoch}.log",
+            exit_code=-1, status="setup_failed", order_index=order_index,
+        )
+
+
 @main.command()
 @click.option("--task", "-p", default=None, help="Run a specific task (overrides enabled flag)")
 @click.option("--epochs", "-n", default=None, type=int, help="Number of epochs (default: from config, typically 1)")
@@ -208,7 +232,7 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
         click.echo(f"Running {len(work)} runs in full parallel (max_workers={config.runner.max_workers})")
         with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
             futures = {
-                pool.submit(run_one, t, v, e, config, run_id, run_dir, github_token, i): f"{t.name}/{v.name}/e{e}"
+                pool.submit(_safe_run_one, t, v, e, config, run_id, run_dir, github_token, i): f"{t.name}/{v.name}/e{e}"
                 for i, (t, v, e) in enumerate(work)
             }
             for future in as_completed(futures):
@@ -227,7 +251,7 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
                 ordered = order_variants(config.variants, epoch, order, _ordering_rng(seed, task.name, epoch))
                 for variant in ordered:
                     task_results.append(
-                        run_one(task, variant, epoch, config, run_id, run_dir, github_token, order_index)
+                        _safe_run_one(task, variant, epoch, config, run_id, run_dir, github_token, order_index)
                     )
                     order_index += 1
             return task_results
@@ -246,7 +270,7 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
 
             for epoch in range(1, epochs + 1):
                 for variant in order_variants(config.variants, epoch, order, _ordering_rng(seed, p.name, epoch)):
-                    result = run_one(p, variant, epoch, config, run_id, run_dir, github_token, order_index)
+                    result = _safe_run_one(p, variant, epoch, config, run_id, run_dir, github_token, order_index)
                     results.append(result)
                     order_index += 1
 
@@ -309,9 +333,15 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
         click.echo("No traces found for this run ID, and no manifest to reconcile against.", err=True)
         return
 
-    if not metrics:
+    # With no surviving traces we can't show metrics, but a manifest still lets us
+    # report reliability (success/failure rates) — which is exactly when a run
+    # with all-failed/timed-out variants needs it most. Only bail when there is
+    # neither trace data nor a manifest to fall back on.
+    if not metrics and manifest_runs is None:
         click.echo("No traces found for this run ID.", err=True)
         return
+    if not metrics:
+        click.echo("No surviving traces; reporting reliability from the manifest only.", err=True)
 
     # Run judge evaluators if not skipped
     if not skip_eval and results_dir.exists():
@@ -319,7 +349,12 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
         _warn_unscored_judges(config, traces, results_dir)
 
     variant_order = [v.name for v in config.variants]
-    reports = build_report(metrics, results_dir if results_dir.exists() else None, variant_order, aggregate)
+    raw_tids = {t.resource_tags.get("eval.test_id") for t in traces}
+    trace_test_ids = {t for t in raw_tids if t is not None}
+    reports = build_report(
+        metrics, results_dir if results_dir.exists() else None, variant_order, aggregate,
+        manifest_runs=manifest_runs, trace_test_ids=trace_test_ids,
+    )
     if not reports:
         click.echo("No reports generated.", err=True)
         return

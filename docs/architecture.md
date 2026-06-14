@@ -151,3 +151,34 @@ filters defensively by `eval.run_id` / `eval.test_id` as a safety net.
    - **median**: Independent median per variant
    - **mean**: Independent mean per variant
 5. Outputs as table, JSON, or Markdown
+
+### Trustworthy statistics
+
+To avoid over-reading small, noisy runs (default `epochs=3`), every report
+surfaces its own uncertainty:
+
+- **Sample size**: per-variant `n` plus the shared **paired epoch** count.
+- **Dispersion**: each metric value is shown as `value ±stddev` (min/max also in
+  JSON), so a delta can be read against the spread it sits in.
+- **Confidence interval**: the paired delta carries a bootstrap CI (seeded, so
+  output is reproducible). `*` marks a delta whose CI excludes 0 (statistically
+  supported); `ns` marks an *observed only* delta whose CI includes 0.
+- **Insufficient-data warnings**: when a variant's `n` or the paired epoch count
+  is below `MIN_RELIABLE_N` (5), the report warns that deltas are observed, not
+  statistically supported.
+
+### Reliability (anti-survivorship-bias)
+
+Because `build_report` aggregates only surviving traces, a flaky variant whose
+bad runs drop out could look "faster/better". The report now includes a
+first-class **Reliability** table per task, computed from the persisted run
+manifest + ingested trace ids:
+
+- success rate, timeout rate, failed rate
+- **missing-trace rate** (completed runs that produced no trace)
+- **judge-score coverage** (share of judge evaluations that yielded a usable
+  score) when the task has judges
+
+When no manifest is available (older runs), reliability degrades to a simple
+per-variant trace count, and the rest of the report still renders.
+
