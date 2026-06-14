@@ -258,9 +258,15 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
         click.echo("No traces found for this run ID, and no manifest to reconcile against.", err=True)
         return
 
-    if not metrics:
+    # With no surviving traces we can't show metrics, but a manifest still lets us
+    # report reliability (success/failure rates) — which is exactly when a run
+    # with all-failed/timed-out variants needs it most. Only bail when there is
+    # neither trace data nor a manifest to fall back on.
+    if not metrics and manifest_runs is None:
         click.echo("No traces found for this run ID.", err=True)
         return
+    if not metrics:
+        click.echo("No surviving traces; reporting reliability from the manifest only.", err=True)
 
     # Run judge evaluators if not skipped
     if not skip_eval and results_dir.exists():
@@ -268,7 +274,12 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
         _warn_unscored_judges(config, traces, results_dir)
 
     variant_order = [v.name for v in config.variants]
-    reports = build_report(metrics, results_dir if results_dir.exists() else None, variant_order, aggregate)
+    raw_tids = {t.resource_tags.get("eval.test_id") for t in traces}
+    trace_test_ids = {t for t in raw_tids if t is not None}
+    reports = build_report(
+        metrics, results_dir if results_dir.exists() else None, variant_order, aggregate,
+        manifest_runs=manifest_runs, trace_test_ids=trace_test_ids,
+    )
     if not reports:
         click.echo("No reports generated.", err=True)
         return
