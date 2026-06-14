@@ -74,6 +74,29 @@ def test_malformed_judges_raises(tmp_path):
         load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "p", "judges": [{"name": "x"}]}]})
 
 
+# --- Hooks failure policy ---
+
+def test_hooks_on_failure_default_is_fail(tmp_path):
+    cfg = load_inline(tmp_path, {
+        "tasks": [{"name": "t1", "prompt": "p", "hooks": {"before_run": "b.sh"}}],
+    })
+    assert cfg.get_task("t1").hooks.on_failure == "fail"
+
+
+def test_hooks_on_failure_warn(tmp_path):
+    cfg = load_inline(tmp_path, {
+        "tasks": [{"name": "t1", "prompt": "p", "hooks": {"before_run": "b.sh", "on_failure": "warn"}}],
+    })
+    assert cfg.get_task("t1").hooks.on_failure == "warn"
+
+
+def test_hooks_on_failure_invalid_raises(tmp_path):
+    with pytest.raises(ConfigError, match="hooks.on_failure"):
+        load_inline(tmp_path, {
+            "tasks": [{"name": "t1", "prompt": "p", "hooks": {"before_run": "b.sh", "on_failure": "boom"}}],
+        })
+
+
 # --- Evaluator validation ---
 
 def test_evaluator_missing_name(tmp_path):
@@ -126,6 +149,7 @@ def test_evaluator_invalid_regex(tmp_path):
     ({"judge_max_output_chars": 0}, "runner.judge_max_output_chars"),
     ({"epochs": "two"}, "runner.epochs"),
     ({"max_turns": 0}, "runner.max_turns"),
+    ({"output_instruction": 123}, "runner.output_instruction"),
 ])
 def test_runner_validation(tmp_path, runner, msg):
     with pytest.raises(ConfigError, match=msg):
@@ -164,6 +188,46 @@ def test_runner_judge_context_overrides(tmp_path):
     assert cfg.runner.judge_max_conversation_chars == 20000
     assert cfg.runner.judge_max_output_chars == 15000
     assert cfg.runner.judge_copilot_version == "copilot/1.0.18"
+
+
+# --- Output instruction (resolve_prompt) ---
+
+def test_resolve_prompt_default_appends_instruction(tmp_path):
+    cfg = load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "Do it."}]})
+    task, variant = cfg.tasks[0], cfg.variants[0]
+    assert cfg.runner.output_instruction == "Save all output files under /workspace/output/."
+    assert cfg.resolve_prompt(task, variant) == (
+        "Do it.\n\nSave all output files under /workspace/output/."
+    )
+
+
+def test_resolve_prompt_empty_instruction_disables(tmp_path):
+    cfg = load_inline(tmp_path, {
+        "runner": {"output_instruction": ""},
+        "tasks": [{"name": "t1", "prompt": "Do it."}],
+    })
+    task, variant = cfg.tasks[0], cfg.variants[0]
+    assert cfg.resolve_prompt(task, variant) == "Do it."
+
+
+def test_resolve_prompt_null_instruction_uses_default(tmp_path):
+    cfg = load_inline(tmp_path, {
+        "runner": {"output_instruction": None},
+        "tasks": [{"name": "t1", "prompt": "Do it."}],
+    })
+    assert cfg.runner.output_instruction == "Save all output files under /workspace/output/."
+
+
+def test_resolve_prompt_custom_instruction_interpolates_vars(tmp_path):
+    cfg = load_inline(tmp_path, {
+        "runner": {"output_instruction": "Respond in {language}."},
+        "variants": [{"name": "ja", "vars": {"language": "Japanese"}}],
+        "tasks": [{"name": "t1", "prompt": "Review {language} code."}],
+    })
+    task, variant = cfg.tasks[0], cfg.variants[0]
+    assert cfg.resolve_prompt(task, variant) == (
+        "Review Japanese code.\n\nRespond in Japanese."
+    )
 
 
 # --- Name validation + duplicates ---

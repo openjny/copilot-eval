@@ -365,6 +365,148 @@ def test_write_sanitized_env_file_handles_missing_env(tmp_path):
         out.unlink(missing_ok=True)
 
 
+# --- run_one failure isolation & hook policy ---
+
+def _stub_no_docker(monkeypatch, runner_mod, *, docker_rc: int = 0):
+    """Stub out everything in run_one that touches Docker / external tools so the
+    function can be driven end-to-end in a unit test."""
+    monkeypatch.setattr(runner_mod, "_run_health_check", lambda *a, **k: True)
+    monkeypatch.setattr(runner_mod, "_run_evaluators", lambda *a, **k: [])
+    monkeypatch.setattr(runner_mod, "_persist_output_files", lambda *a, **k: None)
+    monkeypatch.setattr(runner_mod, "_print_summary", lambda *a, **k: None)
+
+    class _Proc:
+        returncode = docker_rc
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", lambda *a, **k: _Proc())
+
+
+def test_run_one_setup_exception_returns_setup_failed(tmp_path, monkeypatch):
+    """An exception raised during setup must be isolated, not propagated."""
+    from eval import runner as runner_mod
+    from eval.config import Task
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    config = _config(tmp_path)
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+
+    def boom(*a, **k):
+        raise RuntimeError("docker binary missing")
+
+    monkeypatch.setattr(runner_mod, "_run_hook", boom)
+
+    task = Task(name="t", prompt="p")
+    result = runner_mod.run_one(
+        task, Variant(name="v"), epoch=1, config=config, run_id="r",
+        run_dir=run_dir, github_token="tok",
+    )
+
+    assert result.status == "setup_failed"
+    assert result.exit_code == -1
+    assert "docker binary missing" in result.log_file.read_text()
+
+
+def test_run_one_before_run_fail_aborts(tmp_path, monkeypatch):
+    """before_run hook returning non-zero with on_failure=fail -> setup_failed."""
+    from eval import runner as runner_mod
+    from eval.config import Hooks, Task
+
+    config = _config(tmp_path)
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+    monkeypatch.setattr(runner_mod, "_run_hook", lambda *a, **k: 1)
+
+    task = Task(name="t", prompt="p", hooks=Hooks(before_run="b.sh", on_failure="fail"))
+    result = runner_mod.run_one(
+        task, Variant(name="v"), epoch=1, config=config, run_id="r",
+        run_dir=run_dir, github_token="tok",
+    )
+
+    assert result.status == "setup_failed"
+    assert result.exit_code == -1
+
+
+def test_run_one_before_run_warn_continues(tmp_path, monkeypatch):
+    """before_run failure with on_failure=warn lets the run proceed to completion."""
+    from eval import runner as runner_mod
+    from eval.config import Hooks, Task
+
+    config = _config(tmp_path)
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+    _stub_no_docker(monkeypatch, runner_mod, docker_rc=0)
+    # before_run fails (1), after_run absent (0)
+    monkeypatch.setattr(
+        runner_mod, "_run_hook",
+        lambda script, *a, **k: 1 if script == "b.sh" else 0,
+    )
+
+    task = Task(name="t", prompt="p", hooks=Hooks(before_run="b.sh", on_failure="warn"))
+    result = runner_mod.run_one(
+        task, Variant(name="v"), epoch=1, config=config, run_id="r",
+        run_dir=run_dir, github_token="tok",
+    )
+
+    assert result.status == "completed"
+    assert result.passed
+
+
+def test_run_one_after_run_failure_surfaces_in_scores(tmp_path, monkeypatch):
+    """after_run hook failure is surfaced as a failing score (run not passed)."""
+    from eval import runner as runner_mod
+    from eval.config import Hooks, Task
+
+    config = _config(tmp_path)
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+    _stub_no_docker(monkeypatch, runner_mod, docker_rc=0)
+    monkeypatch.setattr(
+        runner_mod, "_run_hook",
+        lambda script, *a, **k: 3 if script == "a.sh" else 0,
+    )
+
+    task = Task(name="t", prompt="p", hooks=Hooks(after_run="a.sh"))
+    result = runner_mod.run_one(
+        task, Variant(name="v"), epoch=1, config=config, run_id="r",
+        run_dir=run_dir, github_token="tok",
+    )
+
+    assert result.status == "completed"
+    assert not result.passed
+    hook_scores = [s for s in result.scores if s.type == "hook"]
+    assert len(hook_scores) == 1
+    assert hook_scores[0].passed is False
+
+
+def test_run_one_post_processing_exception_preserves_run_status(tmp_path, monkeypatch):
+    """An exception after the container ran keeps the container's exit status
+    (not setup_failed) and surfaces a failing infra score."""
+    from eval import runner as runner_mod
+    from eval.config import Task
+
+    config = _config(tmp_path)
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+    _stub_no_docker(monkeypatch, runner_mod, docker_rc=0)
+    monkeypatch.setattr(runner_mod, "_run_hook", lambda *a, **k: 0)
+
+    def boom(*a, **k):
+        raise RuntimeError("evaluator crashed")
+
+    monkeypatch.setattr(runner_mod, "_run_evaluators", boom)
+
+    result = runner_mod.run_one(
+        Task(name="t", prompt="p"), Variant(name="v"), epoch=1, config=config,
+        run_id="r", run_dir=run_dir, github_token="tok",
+    )
+
+    assert result.status == "completed"  # docker exited 0
+    assert result.exit_code == 0
+    assert not result.passed  # infra failure score
+    assert any(s.type == "infra" and not s.passed for s in result.scores)
+
+
 def test_mask_log_file_redacts_in_place(tmp_path):
     log = tmp_path / "run.log"
     log.write_text("output contains supersecretvalue in the logs\n")
@@ -387,6 +529,7 @@ def test_run_one_masks_log_on_setup_failed(tmp_path, monkeypatch):
 
     def fake_before_run(script, cfg, task, variant, log_file, label):
         log_file.write_text("before_run printed supersecretvalue\n")
+        return 0
 
     monkeypatch.setattr(runner_mod, "_run_hook", fake_before_run)
     monkeypatch.setattr(runner_mod, "_run_health_check", lambda *a, **k: False)
