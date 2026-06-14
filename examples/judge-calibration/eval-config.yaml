@@ -1,0 +1,110 @@
+# Judge calibration eval set.
+#
+# Each task pins Copilot's output to a FIXED, known answer (the prompt tells it
+# to write an exact string). Because the input to the judge is deterministic,
+# the judge's score should land in a known expected band — so this set measures
+# the judge itself: is it calibrated, and how much does it vary run-to-run?
+#
+# `judge_samples: 5` makes every judge fire five times; `analyze` reports the
+# median plus the per-evaluator score spread (σ) and parse/timeout/error rates.
+# Compare the reported median against each task's documented `Expected:` band and
+# watch σ to gauge reliability. The `gt-*` regex evaluators are deterministic,
+# LLM-free anchors: they match the canonical answer text in the run's
+# conversation log (regex/contains evaluate the log, not output files), so a low
+# judge score caused by an off-topic or empty run is easy to spot independently
+# of the judge.
+vars: {}
+
+runner:
+  epochs: 3
+  timeout_seconds: 120
+  model: gpt-5.4-mini
+  max_turns: 5
+  parallel: full
+  max_workers: 6
+  judge_model: gpt-4.1
+  judge_samples: 5
+  judge_aggregate: median
+  judge_timeout_seconds: 60
+  container_image_base: copilot-eval
+  copilot_version: "1.0.18"
+  otel_endpoint: http://host.docker.internal:4318
+
+variants:
+  - name: baseline
+    description: "Base image, no customization"
+
+tasks:
+  # Expected judge score: 9-10 (complete, correct answer).
+  - name: calib-high
+    prompt: |
+      Write EXACTLY the following text to /workspace/output/answer.md and nothing else.
+      Do not add commentary, headings, or extra lines.
+
+      HTTP 404 Not Found means the server reached the request successfully but
+      could not find the requested resource at the given URL. It is a client-side
+      (4xx) error. The resource may have been moved or deleted, or the URL may be
+      mistyped. The response does not indicate whether the absence is temporary or
+      permanent; 410 Gone is used when the resource is known to be permanently
+      removed.
+    evaluators:
+      - name: correctness
+        type: judge
+        prompt: |
+          Rate the technical correctness and completeness of this explanation of
+          HTTP status code 404 on a scale of 1-10.
+          10 = Correct, identifies it as a 4xx client error meaning the resource
+               was not found, and adds accurate nuance (e.g. vs 410 Gone).
+          5  = Roughly correct but missing key detail or slightly imprecise.
+          1  = Wrong or unrelated.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+      # Deterministic, LLM-free anchor: matches the canonical answer text in the
+      # conversation log (regex evaluates the log, not the output file).
+      - name: gt-mentions-404
+        type: regex
+        value: "404 Not Found"
+
+  # Expected judge score: 4-6 (correct core, missing nuance).
+  - name: calib-mid
+    prompt: |
+      Write EXACTLY the following text to /workspace/output/answer.md and nothing else.
+      Do not add commentary, headings, or extra lines.
+
+      HTTP 404 means the page was not found.
+    evaluators:
+      - name: correctness
+        type: judge
+        prompt: |
+          Rate the technical correctness and completeness of this explanation of
+          HTTP status code 404 on a scale of 1-10.
+          10 = Correct, identifies it as a 4xx client error meaning the resource
+               was not found, and adds accurate nuance (e.g. vs 410 Gone).
+          5  = Roughly correct but missing key detail or slightly imprecise.
+          1  = Wrong or unrelated.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: gt-mentions-404
+        type: regex
+        value: "404"
+
+  # Expected judge score: 1-2 (factually wrong).
+  - name: calib-low
+    prompt: |
+      Write EXACTLY the following text to /workspace/output/answer.md and nothing else.
+      Do not add commentary, headings, or extra lines.
+
+      HTTP 404 is a success code that means the server has accepted the request
+      and the resource was created.
+    evaluators:
+      - name: correctness
+        type: judge
+        prompt: |
+          Rate the technical correctness and completeness of this explanation of
+          HTTP status code 404 on a scale of 1-10.
+          10 = Correct, identifies it as a 4xx client error meaning the resource
+               was not found, and adds accurate nuance (e.g. vs 410 Gone).
+          5  = Roughly correct but missing key detail or slightly imprecise.
+          1  = Wrong or unrelated.
+          Output ONLY valid JSON: {"score": N, "reason": "..."}
+      - name: gt-mentions-404
+        type: regex
+        value: "404"

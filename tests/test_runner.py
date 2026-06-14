@@ -11,10 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from eval.config import Config, RunnerConfig, Variant
+from eval.config import Config, Evaluator, RunnerConfig, Variant
 from eval.runner import (
     EvalScore,
     RunResult,
+    _aggregate_scores,
     _load_env_file,
     _mask_log_file,
     _parse_json,
@@ -23,6 +24,8 @@ from eval.runner import (
     collect_secrets,
     mask_secrets,
     read_files_from_dir,
+    run_judge,
+    score_to_dict,
     status_from_exit_code,
 )
 
@@ -565,9 +568,23 @@ def test_run_one_masks_log_on_setup_failed(tmp_path, monkeypatch):
     assert "***REDACTED***" in text
     # No leftover temp env files.
     assert not list(Path(tempfile.gettempdir()).glob("eval-env-*"))
+# --- judge aggregation / self-consistency ---
+
+@pytest.mark.parametrize("samples,method,expected", [
+    ([8], "median", 8),
+    ([4, 8, 9], "median", 8),
+    ([4, 8, 9], "mean", 7),
+    ([5, 5, 9], "majority", 5),
+    ([5, 9], "majority", 5),
+    ([6, 7], "median", 7),
+    ([6, 7], "mean", 7),
+    ([7, 8], "mean", 8),
+])
+def test_aggregate_scores(samples, method, expected):
+    assert _aggregate_scores(samples, method) == expected
 
 
-# --- host_copilot_version / run_judge ---
+# --- host_copilot_version / run_judge runtime metadata ---
 
 class _FakeProc:
     def __init__(self, stdout="", stderr="", returncode=0):
@@ -635,7 +652,6 @@ def _patch_judge(monkeypatch, proc=None, exc=None, version="copilot/1.0.18"):
 
 
 def _ev():
-    from eval.config import Evaluator
     return Evaluator(name="quality", type="judge", prompt="Rate it.")
 
 
@@ -730,7 +746,6 @@ def test_run_judge_nonzero_exit_with_valid_json(tmp_path, monkeypatch):
     from eval import runner as runner_mod
     _patch_judge(monkeypatch, proc=_FakeProc(stdout='{"score": 6}', returncode=1))
     s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
-    # Verdict is kept but the anomaly (non-zero exit) is flagged, not counted ok.
     assert s.score == 6
     assert s.meta["outcome"] == "ok_nonzero"
 
@@ -751,3 +766,87 @@ def test_run_judge_masks_secrets_in_stderr(tmp_path, monkeypatch):
     s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
     assert "supersecretvalue" not in s.meta["stderr"]
     assert "supersecretvalue" not in s.reason
+
+
+# --- judge self-consistency (repeated sampling) ---
+
+def test_run_judge_single_sample_legacy(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "1.2.3")
+    monkeypatch.setattr(runner_mod, "_run_judge_once",
+                        lambda *a, **k: (7, "solid", "ok", {"returncode": 0}))
+    s = run_judge(_ev(), "conversation",
+                  _judge_config(tmp_path, judge_model="test-model"), "tok")
+    assert s.score == 7
+    assert s.reason == "solid"
+    assert s.samples == [7]
+    assert s.n_samples == 1
+    assert s.score_stddev == 0.0
+    assert s.outcomes == {"ok": 1}
+    assert s.judge_model == "test-model"
+    assert s.judge_version == "1.2.3"
+    assert s.passed is True
+
+
+def test_run_judge_repeated_sampling_median(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "v")
+    results = iter([(4, "weak", "ok", {}), (8, "good", "ok", {}), (9, "great", "ok", {})])
+    monkeypatch.setattr(runner_mod, "_run_judge_once", lambda *a, **k: next(results))
+    s = run_judge(_ev(), "conv",
+                  _judge_config(tmp_path, judge_model="test-model", judge_samples=3), "tok")
+    assert s.score == 8
+    assert sorted(s.samples) == [4, 8, 9]
+    assert s.n_samples == 3
+    assert s.score_stddev and s.score_stddev > 0
+    assert "median of 3/3" in s.reason
+    assert s.outcomes["ok"] == 3
+
+
+def test_run_judge_partial_failures(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "v")
+    results = iter([(6, "ok-ish", "ok", {}), (None, "timeout", "timeout", {}), (8, "good", "ok", {})])
+    monkeypatch.setattr(runner_mod, "_run_judge_once", lambda *a, **k: next(results))
+    s = run_judge(_ev(), "conv",
+                  _judge_config(tmp_path, judge_model="test-model", judge_samples=3), "tok")
+    assert s.score == 7
+    assert s.outcomes == {"ok": 2, "timeout": 1}
+    assert "median of 2/3" in s.reason
+
+
+def test_run_judge_all_failures_returns_dominant_outcome(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "v")
+    results = iter([(None, "parse_error", "parse_error", {}),
+                    (None, "timeout", "timeout", {}),
+                    (None, "parse_error", "parse_error", {})])
+    monkeypatch.setattr(runner_mod, "_run_judge_once", lambda *a, **k: next(results))
+    s = run_judge(_ev(), "conv",
+                  _judge_config(tmp_path, judge_model="test-model", judge_samples=3), "tok")
+    assert s.score is None
+    assert s.passed is False
+    assert s.reason == "parse_error"
+    assert s.score_stddev is None
+
+
+def test_score_to_dict_judge_includes_metadata():
+    s = EvalScore(name="q", type="judge", score=8, reason="r", passed=True,
+                  samples=[8, 8], score_stddev=0.0, n_samples=2,
+                  outcomes={"ok": 2}, judge_model="m", judge_version="v")
+    d = score_to_dict(s)
+    assert d["samples"] == [8, 8]
+    assert d["n_samples"] == 2
+    assert d["judge_model"] == "m"
+    assert d["judge_version"] == "v"
+    assert d["outcomes"] == {"ok": 2}
+
+
+def test_score_to_dict_non_judge_omits_metadata():
+    s = EvalScore(name="c", type="contains", score=1, reason="found", passed=True)
+    d = score_to_dict(s)
+    assert d == {"name": "c", "type": "contains", "score": 1, "reason": "found", "passed": True}

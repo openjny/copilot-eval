@@ -13,6 +13,8 @@ runner:
   timeout_seconds: 300           # Max seconds per Copilot run
   model: claude-sonnet-4         # Copilot model
   judge_model: claude-sonnet-4.6 # Model for LLM-as-Judge (separate from eval model)
+  judge_samples: 1               # Self-consistency: sample each judge N times, aggregate
+  judge_aggregate: median        # median | mean | majority (over successful samples)
   reasoning_effort: null         # Optional: low|medium|high
   max_turns: 20                  # Max autopilot turns
   parallel: off                  # off | per_task | full
@@ -110,6 +112,47 @@ The judge context is bounded by `runner.judge_max_conversation_chars` (conversat
 
 Judges run during `analyze` and are scored idempotently: a judge is (re)run only when no judge score yet exists for that run (non-judge `script`/`contains`/`regex` scores share the same `.scores.json` file, so file presence alone does not skip judging). Use `analyze --re-eval` to force all judges to re-run. Judge timeouts or unparseable output produce `score: null` and are surfaced as warnings rather than dropped.
 
+### Judge Self-Consistency & Reliability
+
+Single-shot judge scores are noisy. Set `runner.judge_samples > 1` to sample each
+judge multiple times and aggregate the successful scores via `runner.judge_aggregate`
+(`median` — default, `mean`, or `majority`). Each sample's outcome is classified as
+`ok` / `parse_error` / `timeout` / `error`.
+
+The aggregated `.scores.json` entry for a judge records this metadata (additive — older
+consumers ignore the extra keys):
+
+```json
+{
+  "name": "quality", "type": "judge", "score": 8,
+  "reason": "[median of 3/3, σ=0.47] solid coverage",
+  "passed": true,
+  "samples": [8, 8, 9],
+  "score_stddev": 0.47,
+  "n_samples": 3,
+  "outcomes": {"ok": 3, "parse_error": 0, "timeout": 0, "error": 0},
+  "judge_model": "gpt-4.1",
+  "judge_version": "1.0.18"
+}
+```
+
+- `score` is the aggregate; `samples` are the individual successful scores.
+- `score_stddev` is the population stddev of the samples (0 for a single sample).
+- `outcomes` counts per-sample results; `judge_model`/`judge_version` pin the judge
+  CLI/model that produced the score.
+
+`analyze` prints a **Judge reliability** summary (to stderr): the number of judge
+evaluations, per-sample outcome rates (ok/parse_error/timeout/error), and the mean/max
+score spread (σ). The markdown/JSON reports show each per-run judge score with its
+`±σ`, and the JSON report includes a `judge_stddevs` map per run.
+
+> Cached judge scores are keyed by evaluator **name** only. If you change
+> `judge_samples`, `judge_aggregate`, or `judge_model` and want existing scores
+> re-evaluated with the new settings, re-run `analyze --re-eval`.
+
+To assess whether the judge itself is calibrated, see the `examples/judge-calibration`
+eval set: it pins Copilot output to fixed answers with known expected score bands.
+
 ### Ground Truth in Judge Prompts
 
 For reliable scoring, include the expected answer in the judge prompt:
@@ -126,6 +169,12 @@ evaluators:
       Rate how many issues the review found on 1-10.
       Output ONLY valid JSON: {"score": N, "reason": "..."}
 ```
+
+For extra reliability, pair noisy judges with **deterministic ground-truth
+evaluators** (`contains`/`regex`/`script`) that check language-neutral, objective
+signals (function names, line numbers, required tokens). These score 0/1 with no LLM
+call, so they don't drift between runs and anchor the judge. See the `gt-*` evaluators
+in `examples/prompt-language` and `examples/judge-calibration`.
 
 ## Fixtures
 

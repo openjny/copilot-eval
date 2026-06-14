@@ -17,6 +17,7 @@ EVALUATOR_TYPES = ("judge", "script", "contains", "regex")
 PARALLEL_MODES = ("off", "per_task", "full")
 VARIANT_ORDER_MODES = ("fixed", "counterbalance", "random")
 OUTPUT_FORMATS = ("text", "json")
+JUDGE_AGGREGATE_MODES = ("median", "mean", "majority")
 DEFAULT_OUTPUT_INSTRUCTION = "Save all output files under /workspace/output/."
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -27,6 +28,10 @@ class RunnerConfig:
     timeout_seconds: int = 300
     model: str | None = None
     judge_model: str | None = "gpt-4.1"
+    # Self-consistency: sample each judge this many times and aggregate the
+    # successful scores. 1 keeps the legacy single-shot behavior.
+    judge_samples: int = 1
+    judge_aggregate: str = "median"  # median | mean | majority
     reasoning_effort: str | None = None
     max_turns: int | None = None
     parallel: str = "off"  # off | per_task | full
@@ -201,6 +206,12 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
             f"runner.output_format has invalid value '{output_format}'. "
             f"Must be one of: {', '.join(OUTPUT_FORMATS)}."
         )
+    judge_aggregate = runner_raw.get("judge_aggregate", "median")
+    if judge_aggregate not in JUDGE_AGGREGATE_MODES:
+        raise ConfigError(
+            f"runner.judge_aggregate has invalid value '{judge_aggregate}'. "
+            f"Must be one of: {', '.join(JUDGE_AGGREGATE_MODES)}."
+        )
 
     output_instruction = runner_raw.get("output_instruction")
     if output_instruction is None:
@@ -214,6 +225,7 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
     timeout_seconds = _require_int(runner_raw, "timeout_seconds", 300, minimum=1)
     max_workers = _require_int(runner_raw, "max_workers", 8, minimum=1)
     judge_timeout_seconds = _require_int(runner_raw, "judge_timeout_seconds", 60, minimum=1)
+    judge_samples = _require_int(runner_raw, "judge_samples", 1, minimum=1)
     judge_max_conversation_chars = _require_int(runner_raw, "judge_max_conversation_chars", 8000, minimum=1)
     judge_max_output_chars = _require_int(runner_raw, "judge_max_output_chars", 8000, minimum=1)
     max_turns = runner_raw.get("max_turns")
@@ -233,6 +245,8 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         timeout_seconds=timeout_seconds,
         model=runner_raw.get("model"),
         judge_model=runner_raw.get("judge_model", "gpt-4.1"),
+        judge_samples=judge_samples,
+        judge_aggregate=judge_aggregate,
         reasoning_effort=runner_raw.get("reasoning_effort"),
         max_turns=max_turns,
         parallel=parallel,

@@ -74,8 +74,9 @@ sequenceDiagram
 
     CLI->>Jaeger: fetch_traces (server-side run_id filter) + reconcile manifest
     CLI->>Trace: extract_conversation (chronological by startTime)
-    CLI->>Judge: run_judge (conversation + output files)
-    Judge-->>CLI: {"score": N, "reason": "..."}
+    CLI->>Judge: run_judge (conversation + output files, ×judge_samples)
+    Judge-->>CLI: {"score": N, "reason": "..."} per sample
+    CLI->>CLI: aggregate (median/mean/majority) + σ + outcome rates
     CLI->>CLI: merge with existing scores → A/B report
 ```
 

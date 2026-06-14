@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -9,9 +10,11 @@ import subprocess
 import tempfile
 import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from statistics import mean, median, pstdev
 from typing import Any
 
 from eval.config import Config, Evaluator, Task, Variant
@@ -24,16 +27,20 @@ class EvalScore:
     score: int | None
     reason: str = ""
     passed: bool = True
+    # Self-consistency metadata (judge evaluators only). ``samples`` holds the
+    # successful per-call scores; ``n_samples`` is the number of calls requested
+    # (== sum of ``outcomes``), which may exceed len(samples) when some fail.
+    samples: list[int] = field(default_factory=list)
+    score_stddev: float | None = None
+    n_samples: int = 0
+    outcomes: dict[str, int] = field(default_factory=dict)
+    judge_model: str | None = None
+    judge_version: str | None = None
+    # Free-form judge runtime/context metadata (judge runtime, truncation, etc.).
     meta: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {
-            "name": self.name, "type": self.type, "score": self.score,
-            "reason": self.reason, "passed": self.passed,
-        }
-        if self.meta:
-            d["meta"] = self.meta
-        return d
+        return score_to_dict(self)
 
 
 @dataclass
@@ -70,8 +77,33 @@ class RunResult:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "duration_seconds": self.duration_seconds,
-            "scores": [s.to_dict() for s in self.scores],
+            "scores": [score_to_dict(s) for s in self.scores],
         }
+
+
+def score_to_dict(s: EvalScore) -> dict[str, Any]:
+    """Serialize an EvalScore to the *.scores.json schema.
+
+    Base keys mirror the legacy shape; judge self-consistency metadata
+    (samples, stddev, outcomes, model/version) is added only for judge scores
+    so non-judge serialization stays byte-identical.
+    """
+    d: dict[str, Any] = {
+        "name": s.name, "type": s.type, "score": s.score,
+        "reason": s.reason, "passed": s.passed,
+    }
+    if s.meta:
+        d["meta"] = s.meta
+    if s.type == "judge" and s.n_samples:
+        d.update({
+            "samples": s.samples,
+            "score_stddev": s.score_stddev,
+            "n_samples": s.n_samples,
+            "outcomes": s.outcomes,
+            "judge_model": s.judge_model,
+            "judge_version": s.judge_version,
+        })
+    return d
 
 
 def status_from_exit_code(exit_code: int) -> str:
@@ -351,6 +383,24 @@ def _run_evaluators(task: Task, variant: Variant, config: Config, log_file: Path
     return scores
 
 
+def _aggregate_scores(samples: list[int], method: str) -> int:
+    """Aggregate successful judge sample scores into a single integer score.
+
+    Uses half-up rounding (not Python's banker's rounding) so an even-length
+    median/mean of e.g. 6.5 rounds to 7 rather than 6.
+    """
+    def _round_half_up(x: float) -> int:
+        return int(math.floor(x + 0.5))
+    if method == "mean":
+        return _round_half_up(mean(samples))
+    if method == "majority":
+        # Most common value; ties broken by the lower score for determinism.
+        counts = Counter(samples)
+        top = max(counts.values())
+        return min(v for v, c in counts.items() if c == top)
+    return _round_half_up(median(samples))  # default: median
+
+
 _STDERR_SNIPPET_CHARS = 500
 _host_copilot_version_cache: str | None = None
 
@@ -384,16 +434,62 @@ def _write_scores_file(log_file: Path, scores: list[EvalScore]) -> None:
     sf.write_text(json.dumps([s.to_dict() for s in scores], indent=2, ensure_ascii=False))
 
 
-def run_judge(ev: Evaluator, conversation: str, config: Config, token: str,
+def _run_judge_once(prompt: str, config: Config, token: str | None,
+                    secrets: list[str]) -> tuple[int | None, str, str, dict[str, Any]]:
+    """Invoke the judge Copilot once.
+
+    Returns ``(score, reason, outcome, sample_meta)`` where ``outcome`` is one of
+    ok | ok_nonzero | parse_error | invalid_score | timeout | not_found | error.
+    ``sample_meta`` carries per-call runtime details (returncode, masked stderr).
+    """
+    cmd = ["copilot", "-p", prompt, "-s"]
+    if config.runner.judge_model:
+        cmd.extend(["--model", config.runner.judge_model])
+    # Disable OTel to avoid contaminating eval traces with judge calls
+    judge_env = {**os.environ, "GITHUB_TOKEN": token or "", "COPILOT_OTEL_ENABLED": "false"}
+    sample_meta: dict[str, Any] = {}
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=config.runner.judge_timeout_seconds, env=judge_env)
+    except subprocess.TimeoutExpired:
+        return None, f"timeout after {config.runner.judge_timeout_seconds}s", "timeout", sample_meta
+    except FileNotFoundError:
+        return None, "copilot CLI not found on host", "not_found", sample_meta
+    except OSError as exc:
+        return None, f"error: {exc}", "error", sample_meta
+    sample_meta["returncode"] = proc.returncode
+    stderr = mask_secrets((proc.stderr or "").strip(), secrets) or ""
+    if stderr:
+        sample_meta["stderr"] = stderr[:_STDERR_SNIPPET_CHARS]
+    data = _parse_json(proc.stdout, require_keys=("score",))
+    if data is not None:
+        try:
+            score = int(data.get("score", 0))
+        except (TypeError, ValueError):
+            return None, f"invalid_score: {data.get('score')!r}", "invalid_score", sample_meta
+        # A parseable verdict from a process that exited non-zero is suspicious:
+        # keep the score but flag the anomaly so it isn't counted as a clean run.
+        outcome = "ok" if proc.returncode == 0 else "ok_nonzero"
+        return score, str(data.get("reason", "")), outcome, sample_meta
+    if proc.returncode != 0:
+        detail = f" — {stderr[:200]}" if stderr else ""
+        return None, f"error: rc={proc.returncode}{detail}", "error", sample_meta
+    return None, "parse_error", "parse_error", sample_meta
+
+
+def run_judge(ev: Evaluator, conversation: str, config: Config, token: str | None,
               output_files_text: str | None = None,
               extra_meta: dict[str, Any] | None = None) -> EvalScore:
-    """Run a single judge evaluator against captured conversation + output files.
+    """Run a judge evaluator against captured conversation + output files.
 
-    Shared by the `analyze` command. Builds the judge prompt, invokes Copilot
-    (with OTel disabled so judge calls don't contaminate eval traces), and parses
-    the JSON verdict. Records judge-runtime metadata (host Copilot version,
-    process returncode/stderr, and any caller-supplied truncation flags) on the
-    returned score so the analyze report can surface reproducibility issues.
+    Shared by the `analyze` command. Builds the judge prompt and samples the
+    judge ``runner.judge_samples`` times (self-consistency), disabling OTel so
+    judge calls don't contaminate eval traces. Successful samples are aggregated
+    via ``runner.judge_aggregate`` (median/mean/majority); the per-sample spread
+    (stddev) and outcome counts are recorded for reliability reporting. Judge
+    runtime metadata (host Copilot version, returncode/stderr, version mismatch,
+    and caller-supplied truncation flags) is recorded on the returned score so
+    the analyze report can surface reproducibility issues.
     """
     secrets = collect_secrets(config, token)
     conversation = mask_secrets(conversation, secrets) or ""
@@ -407,55 +503,57 @@ def run_judge(ev: Evaluator, conversation: str, config: Config, token: str,
         f"{chr(10).join(sections)}\n\n"
         f'Output ONLY valid JSON: {{"score": N, "reason": "..."}}'
     )
-    cmd = ["copilot", "-p", prompt, "-s"]
-    if config.runner.judge_model:
-        cmd.extend(["--model", config.runner.judge_model])
-    # Disable OTel to avoid contaminating eval traces with judge calls
-    judge_env = {**os.environ, "GITHUB_TOKEN": token, "COPILOT_OTEL_ENABLED": "false"}
 
     version = host_copilot_version()
-    meta: dict[str, Any] = {**(extra_meta or {})}
+    base_meta: dict[str, Any] = {**(extra_meta or {})}
     if version:
-        meta["judge_version"] = version
+        base_meta["judge_version"] = version
     expected = config.runner.judge_copilot_version
     # Record a mismatch when the host version differs from the configured
-    # expectation — including the case where the host version is unavailable,
-    # which is exactly when reproducibility is least observable.
+    # expectation -- including when the host version is unavailable, which is
+    # exactly when reproducibility is least observable.
     if expected and version != expected:
-        meta["judge_version_mismatch"] = {"expected": expected, "actual": version}
+        base_meta["judge_version_mismatch"] = {"expected": expected, "actual": version}
 
-    def _score(score: int | None, reason: str, outcome: str) -> EvalScore:
-        meta["outcome"] = outcome
-        return EvalScore(name=ev.name, type="judge", score=score,
-                         reason=mask_secrets(reason, secrets) or reason, meta=meta)
+    n = max(1, config.runner.judge_samples)
+    # Each entry: (score, masked_reason, outcome, sample_meta)
+    per_sample: list[tuple[int | None, str, str, dict[str, Any]]] = []
+    samples: list[int] = []
+    outcomes: dict[str, int] = {}
+    for _ in range(n):
+        score, reason, outcome, smeta = _run_judge_once(prompt, config, token, secrets)
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        per_sample.append((score, mask_secrets(reason, secrets) or reason, outcome, smeta))
+        if score is not None:
+            samples.append(score)
 
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=config.runner.judge_timeout_seconds, env=judge_env)
-    except subprocess.TimeoutExpired:
-        return _score(None, f"timeout after {config.runner.judge_timeout_seconds}s", "timeout")
-    except FileNotFoundError:
-        return _score(None, "copilot CLI not found on host", "not_found")
+    if not samples:
+        # No usable score across all samples; surface the dominant failure mode
+        # along with its representative reason and runtime meta.
+        dominant = max(outcomes, key=lambda o: outcomes[o])
+        idx = next(i for i, t in enumerate(per_sample) if t[2] == dominant)
+        meta = {**base_meta, **per_sample[idx][3], "outcome": dominant}
+        reason = per_sample[idx][1] if n == 1 else dominant
+        return EvalScore(
+            name=ev.name, type="judge", score=None, reason=reason, passed=False,
+            samples=samples, score_stddev=None, n_samples=n, outcomes=outcomes,
+            judge_model=config.runner.judge_model, judge_version=version, meta=meta,
+        )
 
-    meta["returncode"] = proc.returncode
-    stderr = mask_secrets((proc.stderr or "").strip(), secrets) or ""
-    if stderr:
-        meta["stderr"] = stderr[:_STDERR_SNIPPET_CHARS]
-
-    data = _parse_json(proc.stdout, require_keys=("score",))
-    if data is not None:
-        try:
-            score = int(data.get("score", 0))
-        except (TypeError, ValueError):
-            return _score(None, f"invalid_score: {data.get('score')!r}", "invalid_score")
-        # A parseable verdict from a process that exited non-zero is suspicious:
-        # keep the score but flag the anomaly so it isn't counted as a clean run.
-        outcome = "ok" if proc.returncode == 0 else "ok_nonzero"
-        return _score(score, str(data.get("reason", "")), outcome)
-    if proc.returncode != 0:
-        detail = f" — {stderr[:200]}" if stderr else ""
-        return _score(None, f"error: rc={proc.returncode}{detail}", "error")
-    return _score(None, "parse_error", "parse_error")
+    agg = _aggregate_scores(samples, config.runner.judge_aggregate)
+    stddev = float(pstdev(samples)) if len(samples) > 1 else 0.0
+    # Representative: successful call whose score is closest to the aggregate.
+    succ = [(s, t) for t in per_sample if (s := t[0]) is not None]
+    _, rep = min(succ, key=lambda it: abs(it[0] - agg))
+    reason = rep[1]
+    if n > 1:
+        reason = f"[{config.runner.judge_aggregate} of {len(samples)}/{n}, σ={stddev:.2f}] {reason}"
+    meta = {**base_meta, **rep[3], "outcome": rep[2]}
+    return EvalScore(
+        name=ev.name, type="judge", score=agg, reason=reason,
+        samples=samples, score_stddev=round(stddev, 4), n_samples=n, outcomes=outcomes,
+        judge_model=config.runner.judge_model, judge_version=version, meta=meta,
+    )
 
 
 def _eval_script(ev: Evaluator, config: Config, task: Task, variant: Variant, log_file: Path) -> EvalScore | None:

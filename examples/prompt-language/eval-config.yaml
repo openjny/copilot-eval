@@ -7,6 +7,9 @@ runner:
   max_turns: 10
   parallel: full
   max_workers: 6
+  # Self-consistency: sample each judge 3x and take the median to damp noise.
+  judge_samples: 3
+  judge_aggregate: median
   container_image_base: copilot-eval
   copilot_version: "1.0.18"
   otel_endpoint: http://host.docker.internal:4318
@@ -53,6 +56,15 @@ tasks:
           5 = Findings identified but fixes are vague.
           1 = No actionable recommendations.
           Output ONLY valid JSON: {"score": N, "reason": "..."}
+      # Deterministic ground-truth anchors (language-neutral code tokens). These
+      # score 0/1 with no LLM, so they don't drift between runs and provide a
+      # reliable floor next to the noisier judges above.
+      - name: gt-eval-vuln
+        type: regex
+        value: "eval\\("
+      - name: gt-password
+        type: regex
+        value: "(?i)password"
 
   - name: explain-architecture
     prompt: "Explain the architecture and design patterns used in the code in the current directory. Respond in {language}. Write your explanation to /workspace/output/architecture.md when done."
@@ -81,3 +93,9 @@ tasks:
           5 = Understandable but poorly organized or too verbose.
           1 = Confusing or incoherent.
           Output ONLY valid JSON: {"score": N, "reason": "..."}
+      # Deterministic ground-truth anchor: the GET /search endpoint is the
+      # component most often missed, so checking it is referenced gives a
+      # reproducible completeness signal independent of the judge.
+      - name: gt-search-endpoint
+        type: regex
+        value: "/search"
