@@ -475,6 +475,34 @@ def test_run_one_after_run_failure_surfaces_in_scores(tmp_path, monkeypatch):
     assert hook_scores[0].passed is False
 
 
+def test_run_one_post_processing_exception_preserves_run_status(tmp_path, monkeypatch):
+    """An exception after the container ran keeps the container's exit status
+    (not setup_failed) and surfaces a failing infra score."""
+    from eval import runner as runner_mod
+    from eval.config import Task
+
+    config = _config(tmp_path)
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+    _stub_no_docker(monkeypatch, runner_mod, docker_rc=0)
+    monkeypatch.setattr(runner_mod, "_run_hook", lambda *a, **k: 0)
+
+    def boom(*a, **k):
+        raise RuntimeError("evaluator crashed")
+
+    monkeypatch.setattr(runner_mod, "_run_evaluators", boom)
+
+    result = runner_mod.run_one(
+        Task(name="t", prompt="p"), Variant(name="v"), epoch=1, config=config,
+        run_id="r", run_dir=run_dir, github_token="tok",
+    )
+
+    assert result.status == "completed"  # docker exited 0
+    assert result.exit_code == 0
+    assert not result.passed  # infra failure score
+    assert any(s.type == "infra" and not s.passed for s in result.scores)
+
+
 def test_mask_log_file_redacts_in_place(tmp_path):
     log = tmp_path / "run.log"
     log.write_text("output contains supersecretvalue in the logs\n")
