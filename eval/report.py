@@ -222,7 +222,10 @@ def _build_summary_row(metric: str, vals_by_variant: dict[str, dict[str, float]]
         ci = _bootstrap_ci(deltas)
         if ci is not None:
             row.ci_low, row.ci_high = ci
-        row.significant = _ci_significant(ci)
+        # Only claim statistical support with enough paired samples. At tiny n a
+        # bootstrap of the median can produce a degenerate CI that excludes 0,
+        # which would re-create the "looks decisive at n=3" failure mode.
+        row.significant = _ci_significant(ci) if row.paired_n >= MIN_RELIABLE_N else None
     return row
 
 
@@ -241,15 +244,24 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None,
     for older runs without a manifest still render — reliability simply degrades
     to per-variant trace counts.
     """
-    if not results:
+    if not results and not manifest_runs:
         return []
 
     by_task: dict[str, list[RunMetrics]] = defaultdict(list)
     for r in results:
         by_task[r.scenario].append(r)
 
+    # Seed tasks/variants from the manifest too, so a variant (or whole task)
+    # whose every run failed/timed out still appears — with a 0% success rate —
+    # instead of silently vanishing (the survivorship bias this fixes).
+    mlist = manifest_runs or []
+    manifest_tasks: set[str] = {str(mr.get("task")) for mr in mlist}
+    manifest_vars_by_task: dict[str, set[str]] = defaultdict(set)
+    for mr in mlist:
+        manifest_vars_by_task[str(mr.get("task"))].add(str(mr.get("variant")))
+
     reports: list[Report] = []
-    for task_name in sorted(by_task.keys()):
+    for task_name in sorted(set(by_task.keys()) | manifest_tasks):
         task_runs = by_task[task_name]
         task_runs.sort(key=lambda r: (r.variant, _epoch_sort_key(r.epoch)))
 
@@ -257,10 +269,11 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None,
         for r in task_runs:
             by_variant[r.variant].append(r)
 
+        manifest_vars = manifest_vars_by_task.get(task_name, set())
         if variant_order:
-            variants = [v for v in variant_order if v in by_variant]
+            variants = [v for v in variant_order if v in by_variant or v in manifest_vars]
         else:
-            variants = list(by_variant.keys())
+            variants = sorted(set(by_variant.keys()) | manifest_vars)
 
         # OTel metrics summary (with n, dispersion, and paired CI)
         summary = []
@@ -304,7 +317,8 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None,
             paired_n = len(e0 & e1)
 
         reliability = _build_reliability(
-            task_name, variants, by_variant, manifest_runs, trace_test_ids, bool(judge_names),
+            task_name, variants, by_variant, manifest_runs, trace_test_ids,
+            epoch_judges if judge_names else None,
         )
         warnings = _build_warnings(variants, variant_n, paired_n, aggregate)
 
@@ -346,7 +360,8 @@ def _build_reliability(task: str, variants: list[str],
                        by_variant: dict[str, list[RunMetrics]],
                        manifest_runs: list[dict[str, Any]] | None,
                        trace_test_ids: set[str] | None,
-                       has_judges: bool) -> list[ReliabilityRow]:
+                       epoch_judges: dict[tuple[str, str], dict[str, int]] | None,
+                       ) -> list[ReliabilityRow]:
     """Compute per-variant success/failure rates as first-class metrics.
 
     Without a manifest the full set of attempted runs is unknown, so only the
@@ -394,42 +409,38 @@ def _build_reliability(task: str, variants: list[str],
         ReliabilityRow("Failed rate", {v: pct(counts[v]["failed"], counts[v]["total"]) for v in variants}),
         ReliabilityRow("Missing-trace rate", {v: pct(counts[v]["missing"], counts[v]["total"]) for v in variants}),
     ]
-    if has_judges:
+    if epoch_judges is not None:
         rows.append(ReliabilityRow(
             "Judge-score coverage",
-            {v: _judge_coverage(task, v, manifest_runs) for v in variants},
+            {v: _judge_coverage(v, epoch_judges, counts[v]["success"]) for v in variants},
         ))
     return rows
 
 
-def _judge_coverage(task: str, variant: str, manifest_runs: list[dict[str, Any]]) -> str:
-    """Fraction of judge evaluations that produced a usable (non-null) score.
+def _judge_coverage(variant: str, epoch_judges: dict[tuple[str, str], dict[str, int]],
+                    success_n: int) -> str:
+    """Share of successful runs that yielded a usable judge score.
 
-    Read from the persisted manifest scores so timeouts/parse-failures count
-    against coverage rather than silently vanishing.
+    Judge scores are written to ``*.scores.json`` during ``analyze`` (not into
+    the run manifest), so coverage is computed from the loaded scores: a run with
+    only null judge scores (timeout / parse error) has an empty score dict and so
+    counts against coverage instead of silently vanishing.
     """
-    total = 0
-    scored = 0
-    for r in manifest_runs:
-        if r.get("task") != task or str(r.get("variant")) != variant:
-            continue
-        for s in r.get("scores", []) or []:
-            if s.get("type") != "judge":
-                continue
-            total += 1
-            if s.get("score") is not None:
-                scored += 1
-    if total == 0:
+    if success_n == 0:
         return "—"
-    return f"{(scored / total) * 100:.1f}%"
-
-
+    scored = sum(1 for (rv, _ep), scores in epoch_judges.items() if rv == variant and scores)
+    # Cap at the success denominator: a judge can in principle run off a log-file
+    # fallback for a trace-less run, which shouldn't push coverage past 100%.
+    scored = min(scored, success_n)
+    return f"{(scored / success_n) * 100:.1f}%"
 
 
 # --- Format functions ---
 
 def _fmt_value(row: SummaryRow, v: str) -> str:
     """Aggregate value with ±stddev when a spread is meaningful."""
+    if row.n.get(v, 0) == 0:
+        return "\u2014"  # no traces for this variant
     val = row.values.get(v, 0.0)
     sd = row.stddev.get(v, 0.0)
     if row.n.get(v, 0) >= 2 and sd > 0:
@@ -438,13 +449,20 @@ def _fmt_value(row: SummaryRow, v: str) -> str:
 
 
 def _fmt_delta(row: SummaryRow) -> str:
-    """Delta string annotated with paired CI and significance marker."""
+    """Delta (percentage) annotated with the absolute-unit paired CI + marker."""
     if not row.delta:
         return ""
     out = row.delta
     if row.ci_low is not None and row.ci_high is not None:
-        out += f" [CI {row.ci_low:+.1f},{row.ci_high:+.1f}]"
-        out += "*" if row.significant else " ns"
+        # CI is in absolute metric units, not percentage points — labelled to
+        # avoid being misread against the % delta it sits beside.
+        out += f" [CI {row.ci_low:+.1f},{row.ci_high:+.1f} abs]"
+        if row.significant is True:
+            out += "*"
+        elif row.significant is False:
+            out += " ns"
+        else:
+            out += " low-n"
     return out
 
 
@@ -521,9 +539,11 @@ def format_table(reports: list[Report]) -> str:
         sections.append("\n".join(lines))
     body = "\n".join(sections)
     if _significance_legend(reports):
-        body += ("\n\nLegend: value \u00b1stddev; Delta [CI low,high] from bootstrap of "
-                 "paired deltas; * = CI excludes 0 (statistically supported), "
-                 "ns = not supported (observed only).")
+        body += ("\n\nLegend: value \u00b1stddev; Delta is a percentage, [CI low,high abs] is a "
+                 "bootstrap interval of the paired delta in absolute metric units; "
+                 "* = CI excludes 0 (statistically supported), ns = not supported "
+                 f"(observed only), low-n = fewer than {MIN_RELIABLE_N} paired samples "
+                 "(significance not assessed). No multiple-comparison correction applied.")
     return body
 
 
@@ -656,9 +676,11 @@ def format_markdown(reports: list[Report]) -> str:
         sections.append("\n".join(lines))
     body = "\n\n---\n\n".join(sections)
     if _significance_legend(reports):
-        body += ("\n\n---\n\n_Legend: value ±stddev; Delta `[CI low,high]` is a bootstrap "
-                 "interval of paired deltas; `*` = CI excludes 0 (statistically supported), "
-                 "`ns` = observed only (not statistically supported)._")
+        body += ("\n\n---\n\n_Legend: value ±stddev; Delta is a percentage, `[CI low,high abs]` "
+                 "is a bootstrap interval of the paired delta in **absolute metric units**; "
+                 "`*` = CI excludes 0 (statistically supported), `ns` = observed only "
+                 f"(not supported), `low-n` = fewer than {MIN_RELIABLE_N} paired samples "
+                 "(significance not assessed). No multiple-comparison correction applied._")
     return body
 
 

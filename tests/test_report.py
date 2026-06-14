@@ -201,10 +201,41 @@ def test_summary_row_carries_n_and_dispersion():
     assert row.vmin["a"] == 10.0 and row.vmax["a"] == 14.0
     assert row.stddev["a"] > 0
     assert row.paired_n == 3
-    # b is uniformly ~+10 over a -> CI excludes 0 -> significant
-    assert row.ci_low is not None and row.significant is True
+    # CI is computed, but with only 3 paired samples (<MIN_RELIABLE_N) significance
+    # must NOT be asserted — that would re-create the "decisive at n=3" failure.
+    assert row.ci_low is not None
+    assert row.significant is None
     assert reports[0].variant_n == {"a": 3, "b": 3}
     assert reports[0].paired_n == 3
+
+
+def test_significance_asserted_only_above_threshold():
+    from eval.report import MIN_RELIABLE_N
+    results = []
+    for e in range(1, MIN_RELIABLE_N + 1):
+        results.append(make_metrics("t1", "a", str(e), duration=10.0))
+        results.append(make_metrics("t1", "b", str(e), duration=20.0))  # uniformly +10
+    reports = build_report(results, variant_order=["a", "b"], aggregate="paired")
+    row = next(r for r in reports[0].summary if r.metric == "Duration (s)")
+    assert row.paired_n == MIN_RELIABLE_N
+    # With enough paired samples and a consistent gap, the CI excludes 0.
+    assert row.significant is True
+
+
+def test_low_n_significance_not_rendered_as_star():
+    from eval.report import _fmt_delta
+    results = [
+        make_metrics("t1", "a", "1", duration=10.0),
+        make_metrics("t1", "a", "2", duration=10.0),
+        make_metrics("t1", "b", "1", duration=20.0),
+        make_metrics("t1", "b", "2", duration=20.0),
+    ]
+    reports = build_report(results, variant_order=["a", "b"], aggregate="paired")
+    row = next(r for r in reports[0].summary if r.metric == "Duration (s)")
+    rendered = _fmt_delta(row)
+    assert "low-n" in rendered
+    assert "*" not in rendered
+    assert "abs" in rendered  # CI labelled as absolute units
 
 
 # --- Small-n warnings ---
@@ -272,28 +303,62 @@ def test_reliability_missing_trace_rate():
     assert rel["Success rate"]["b"] == "50.0%"
 
 
-def test_reliability_judge_coverage():
+def test_reliability_judge_coverage(tmp_path):
+    # Two successful runs; epoch 1 has a usable judge score, epoch 2's judge
+    # produced only a null score (timeout). Coverage = 1/2 successful = 50%.
     manifest = [
-        _manifest("t1", "a", 1, "completed", "a1", scores=[
-            {"name": "q", "type": "judge", "score": 8},
-            {"name": "r", "type": "judge", "score": None},
-        ]),
+        _manifest("t1", "a", 1, "completed", "a1"),
+        _manifest("t1", "a", 2, "completed", "a2"),
     ]
-    results = [make_metrics("t1", "a", "1", test_id="a1")]
-    # judge_names is derived from results_dir scores; supply via tmp not needed:
-    # _build_reliability includes coverage only when has_judges (judge_names non-empty),
-    # so emulate by writing a scores file.
-    import json as _json
-    import tempfile
-    from pathlib import Path
-    d = Path(tempfile.mkdtemp())
-    (d / "t1_a_epoch1.scores.json").write_text(_json.dumps([
+    results = [
+        make_metrics("t1", "a", "1", test_id="a1"),
+        make_metrics("t1", "a", "2", test_id="a2"),
+    ]
+    _write_scores(tmp_path, "t1", "a", "1", [
         {"name": "q", "type": "judge", "score": 8, "reason": "ok"},
-    ]))
-    reports = build_report(results, d, ["a"], "median",
-                           manifest_runs=manifest, trace_test_ids={"a1"})
+    ])
+    _write_scores(tmp_path, "t1", "a", "2", [
+        {"name": "q", "type": "judge", "score": None, "reason": "timeout"},
+    ])
+    reports = build_report(results, tmp_path, ["a"], "median",
+                           manifest_runs=manifest, trace_test_ids={"a1", "a2"})
     rel = {row.metric: row.values for row in reports[0].reliability}
     assert rel["Judge-score coverage"]["a"] == "50.0%"
+
+
+def test_zero_trace_variant_still_appears_in_reliability():
+    # variant b timed out on every epoch -> no traces. It must NOT vanish from
+    # the report; reliability should expose its 0% success / 100% timeout.
+    manifest = [
+        _manifest("t1", "a", 1, "completed", "a1"),
+        _manifest("t1", "b", 1, "timeout", "b1"),
+        _manifest("t1", "b", 2, "timeout", "b2"),
+    ]
+    results = [make_metrics("t1", "a", "1", test_id="a1")]
+    reports = build_report(results, variant_order=["a", "b"], aggregate="paired",
+                           manifest_runs=manifest, trace_test_ids={"a1"})
+    rep = reports[0]
+    assert "b" in rep.variants
+    assert rep.variant_n["b"] == 0
+    rel = {row.metric: row.values for row in rep.reliability}
+    assert rel["Success rate"]["b"] == "0.0%"
+    assert rel["Timeout rate"]["b"] == "100.0%"
+
+
+def test_manifest_only_report_when_no_traces():
+    # Every run failed -> no surviving metrics. A manifest-only report should
+    # still be produced (build_report seeds the task from the manifest).
+    manifest = [
+        _manifest("t1", "a", 1, "timeout", "a1"),
+        _manifest("t1", "b", 1, "failed", "b1"),
+    ]
+    reports = build_report([], variant_order=["a", "b"], aggregate="paired",
+                           manifest_runs=manifest, trace_test_ids=set())
+    assert len(reports) == 1
+    rel = {row.metric: row.values for row in reports[0].reliability}
+    assert rel["Success rate"] == {"a": "0.0%", "b": "0.0%"}
+    assert rel["Timeout rate"]["a"] == "100.0%"
+    assert rel["Failed rate"]["b"] == "100.0%"
 
 
 def test_reliability_degrades_without_manifest():
