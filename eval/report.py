@@ -65,7 +65,7 @@ class Report:
     judge_names: list[str] = field(default_factory=list)
     # Per-task judge-runtime aggregate (outcome counts, host Copilot versions,
     # truncated-context count, version-mismatch flag). Empty when no judges ran.
-    judge_runtime: dict = field(default_factory=dict)
+    judge_runtime: dict[str, Any] = field(default_factory=dict)
     aggregate: str = "paired"
     # Per-variant run count (traces with extracted metrics) and shared paired n.
     variant_n: dict[str, int] = field(default_factory=dict)
@@ -296,7 +296,7 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None,
         # Judge scores (both aggregated + per-epoch)
         epoch_judges, epoch_reasons, judge_names = {}, {}, []
         judge_rows: list[SummaryRow] = []
-        judge_runtime: dict = {}
+        judge_runtime: dict[str, Any] = {}
         if results_dir:
             raw, reasons, names = _load_judge_raw(results_dir, variants, task_name)
             epoch_judges = raw
@@ -759,7 +759,7 @@ def _load_judge_raw(results_dir: Path, variants: list[str], task: str
     return epoch_data, epoch_reasons, sorted(all_names)
 
 
-def _load_judge_runtime(results_dir: Path, variants: list[str], task: str) -> dict:
+def _load_judge_runtime(results_dir: Path, variants: list[str], task: str) -> dict[str, Any]:
     """Aggregate judge-runtime metadata across a task's scores files.
 
     Returns outcome counts (ok/parse_error/error/timeout/...), the set of host

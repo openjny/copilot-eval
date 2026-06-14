@@ -492,7 +492,7 @@ def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path
 
 def _is_truncated(text: str | None) -> bool:
     """Whether judge context text was cut to its char budget by the readers."""
-    return bool(text) and text.rstrip().endswith("(truncated)")
+    return bool(text and text.rstrip().endswith("(truncated)"))
 
 
 def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: bool = False) -> None:
