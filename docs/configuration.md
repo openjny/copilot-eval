@@ -143,10 +143,10 @@ In serial (`off`) and `per_task` modes, variants run one after another within ea
 | Mode | Behavior |
 |------|----------|
 | `fixed` | Config order, every epoch (default; backward compatible). |
-| `counterbalance` | Rotate the order by epoch so each variant occupies every position across epochs (systematic Latin-square-style balance). |
+| `counterbalance` | Cyclic rotation by epoch. Each variant occupies every position once per complete cycle of `N = len(variants)` epochs. This is position-balanced, not a full permutation/carryover counterbalance — to fully balance positions, set `epochs` to a multiple of `N` (otherwise the trailing partial cycle is imbalanced). |
 | `random` | Shuffle each epoch. Set `runner.seed` for a reproducible schedule. |
 
-Ordering applies to `off` and `per_task` modes. Under `full` parallel, true concurrency is decided by the thread pool, so ordering only affects submission order; the recorded per-run start times are what matter for analysis.
+Ordering applies to `off` and `per_task` modes. Under `full` parallel, true concurrency is decided by the thread pool, so ordering only affects submission order; the recorded per-run start times are what matter for analysis. With a `seed`, `random` ordering is reproducible in every mode (each task/epoch derives its own RNG, so parallel scheduling does not affect the result).
 
 **Measurement-friendly preset.** For the least-biased comparison, run serially with counterbalanced order:
 
@@ -154,6 +154,7 @@ Ordering applies to `off` and `per_task` modes. Under `full` parallel, true conc
 runner:
   parallel: off
   variant_order: counterbalance
+  epochs: 4            # a multiple of the number of variants for full balance
 ```
 
 If you prefer randomization, use `variant_order: random` with a fixed `seed` so the run is reproducible.
@@ -163,7 +164,10 @@ If you prefer randomization, use `variant_order: random` with a fixed `seed` so 
 Each run writes a `results.json` manifest under `results/<run-id>/`. It records the schedule so order/concurrency confounders can be analyzed after the fact:
 
 - A top-level `schedule` block: `parallel`, `max_workers`, `variant_order`, `seed`.
-- Per run: `order_index` (scheduled position), `started_at`, `finished_at`, and `duration_seconds`.
+- Per run:
+  - `order_index` — scheduled position. In `off` it is the global execution sequence; in `per_task` it is the position within that task; in `full` it is the submission index. It reflects *intended* order, not actual start order under concurrency — use `started_at` for that.
+  - `started_at` / `finished_at` — microsecond wall-clock timestamps (`started_at` is captured before hooks/health-check).
+  - `duration_seconds` — total run wall time, including hooks, the Copilot container run, and non-judge evaluators (not Copilot execution time alone).
 
 ## Secrets & `.env`
 

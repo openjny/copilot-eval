@@ -61,9 +61,11 @@ def order_variants(
     """Order variants for a given epoch to reduce order-effect bias.
 
     - ``fixed``: original config order (backward compatible).
-    - ``counterbalance``: rotate the order by ``epoch`` so each variant occupies
-      every position across epochs (a systematic Latin-square-style balance).
-    - ``random``: shuffle using the supplied seeded RNG (reproducible via seed).
+    - ``counterbalance``: cyclic rotation by ``epoch``. Each variant occupies
+      every position once per complete cycle of ``len(variants)`` epochs
+      (position-balanced; not a full permutation/carryover counterbalance).
+    - ``random``: shuffle using the supplied RNG. Pass a seeded RNG (see
+      ``_ordering_rng``) for a reproducible schedule.
     """
     if len(variants) <= 1 or strategy == "fixed":
         return list(variants)
@@ -75,6 +77,20 @@ def order_variants(
         rng.shuffle(ordered)
         return ordered
     return list(variants)
+
+
+def _ordering_rng(seed: int | None, *parts: object) -> random.Random:
+    """Build a per-context RNG for variant ordering.
+
+    A fresh ``random.Random`` is returned per call (so concurrent schedulers in
+    ``per_task`` mode never share mutable RNG state — ``random.Random`` is not
+    thread-safe). When ``seed`` is set, the RNG is derived deterministically
+    from ``(seed, *parts)`` so the schedule is reproducible regardless of thread
+    timing; when ``seed`` is ``None`` the RNG is non-deterministic.
+    """
+    if seed is None:
+        return random.Random()
+    return random.Random("|".join(str(p) for p in (seed, *parts)))
 
 
 def _write_manifest(run_dir: Path, run_id: str, results: list[RunResult],
@@ -173,19 +189,21 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
         _ensure_images(config, github_token)
     results: list[RunResult] = []
 
-    rng = random.Random(config.runner.seed)
+    order = config.runner.variant_order
+    seed = config.runner.seed
 
     if config.runner.parallel == "full":
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         # variant_order is applied per epoch so the submission schedule is
         # balanced; actual start times are still recorded per run since the
-        # thread pool decides true concurrency.
+        # thread pool decides true concurrency. A per-(task, epoch) RNG keeps the
+        # schedule reproducible under a seed without sharing RNG state.
         work = [
             (t, v, e)
             for t in tasks
             for e in range(1, epochs + 1)
-            for v in order_variants(config.variants, e, config.runner.variant_order, rng)
+            for v in order_variants(config.variants, e, order, _ordering_rng(seed, t.name, e))
         ]
         click.echo(f"Running {len(work)} runs in full parallel (max_workers={config.runner.max_workers})")
         with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
@@ -204,7 +222,10 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
             task_results: list[RunResult] = []
             order_index = 0
             for epoch in range(1, epochs + 1):
-                for variant in order_variants(config.variants, epoch, config.runner.variant_order, rng):
+                # Each worker thread uses its own RNG (random.Random is not
+                # thread-safe); derived from the seed for reproducibility.
+                ordered = order_variants(config.variants, epoch, order, _ordering_rng(seed, task.name, epoch))
+                for variant in ordered:
                     task_results.append(
                         run_one(task, variant, epoch, config, run_id, run_dir, github_token, order_index)
                     )
@@ -224,7 +245,7 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
             click.echo(f">>> Prompt:  {prompt}\n")
 
             for epoch in range(1, epochs + 1):
-                for variant in order_variants(config.variants, epoch, config.runner.variant_order, rng):
+                for variant in order_variants(config.variants, epoch, order, _ordering_rng(seed, p.name, epoch)):
                     result = run_one(p, variant, epoch, config, run_id, run_dir, github_token, order_index)
                     results.append(result)
                     order_index += 1

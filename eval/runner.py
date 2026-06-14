@@ -101,15 +101,16 @@ def run_one(
     print(f"--- [{task.name}] epoch={epoch} variant={variant.name} test_id={test_id[:8]}")
 
     # Capture wall-clock schedule so post-hoc analysis can detect order/concurrency
-    # confounders. monotonic clock is used for duration to avoid clock-skew issues.
-    started_at = datetime.now().isoformat(timespec="seconds")
+    # confounders. monotonic clock is used for duration to avoid clock-skew issues;
+    # microsecond timestamps preserve sub-second ordering under concurrency.
+    started_at = datetime.now().isoformat(timespec="microseconds")
     started_monotonic = time.monotonic()
 
     def _timing() -> dict[str, Any]:
         return {
             "order_index": order_index,
             "started_at": started_at,
-            "finished_at": datetime.now().isoformat(timespec="seconds"),
+            "finished_at": datetime.now().isoformat(timespec="microseconds"),
             "duration_seconds": round(time.monotonic() - started_monotonic, 3),
         }
 
