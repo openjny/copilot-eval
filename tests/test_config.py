@@ -167,6 +167,14 @@ def test_resolve_prompt_empty_instruction_disables(tmp_path):
     assert cfg.resolve_prompt(task, variant) == "Do it."
 
 
+def test_resolve_prompt_null_instruction_uses_default(tmp_path):
+    cfg = load_inline(tmp_path, {
+        "runner": {"output_instruction": None},
+        "tasks": [{"name": "t1", "prompt": "Do it."}],
+    })
+    assert cfg.runner.output_instruction == "Save all output files under /workspace/output/."
+
+
 def test_resolve_prompt_custom_instruction_interpolates_vars(tmp_path):
     cfg = load_inline(tmp_path, {
         "runner": {"output_instruction": "Respond in {language}."},

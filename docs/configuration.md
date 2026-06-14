@@ -62,6 +62,7 @@ The prompt also gets an output-path instruction appended automatically so that g
 
 - **unset** → the default sentence above (backward compatible),
 - **`""`** → nothing is appended (disable it, e.g. when the task prompt already specifies the output path, or to avoid injecting English into a non-English prompt),
+- **`null`** → same as unset (the default sentence),
 - **custom string** → appended verbatim, with the same `{var}` interpolation as the prompt (so it can adapt per variant, e.g. `Respond in {language}.`).
 
 When non-empty, the instruction is appended after a `\n\n` separator.
