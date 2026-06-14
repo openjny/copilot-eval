@@ -17,6 +17,8 @@ runner:
   max_turns: 20                  # Max autopilot turns
   parallel: off                  # off | per_task | full
   max_workers: 8                 # Max concurrent runs (for parallel modes + analyze judges)
+  variant_order: fixed           # fixed | counterbalance | random (order of variants per epoch)
+  seed: null                     # Optional RNG seed for variant_order=random (reproducibility)
   judge_timeout_seconds: 60      # Per-judge Copilot timeout in analyze (seconds)
   judge_copilot_version: null    # Optional: expected host `copilot --version`; analyze warns on mismatch
   judge_max_conversation_chars: 8000  # Max chars of conversation passed to the judge
@@ -158,6 +160,39 @@ A script that validates the environment is ready before running Copilot. If it e
 | `full` | All task×variant×epoch combinations run in parallel (up to `max_workers`) |
 
 During `analyze`, judge evaluators are always run in parallel across traces (up to `max_workers`), independent of the `parallel` mode above. Each judge's Copilot invocation is bounded by `judge_timeout_seconds`. Scores files are written per trace, so parallel judging does not cause write conflicts.
+
+## Variant Order (reducing measurement bias)
+
+In serial (`off`) and `per_task` modes, variants run one after another within each epoch. Always running them in the same order lets order effects (cache warmup, rate limits, time-of-day drift) accumulate on whichever variant runs first. `runner.variant_order` controls how variants are ordered per epoch:
+
+| Mode | Behavior |
+|------|----------|
+| `fixed` | Config order, every epoch (default; backward compatible). |
+| `counterbalance` | Cyclic rotation by epoch. Each variant occupies every position once per complete cycle of `N = len(variants)` epochs. This is position-balanced, not a full permutation/carryover counterbalance — to fully balance positions, set `epochs` to a multiple of `N` (otherwise the trailing partial cycle is imbalanced). |
+| `random` | Shuffle each epoch. Set `runner.seed` for a reproducible schedule. |
+
+Ordering applies to `off` and `per_task` modes. Under `full` parallel, true concurrency is decided by the thread pool, so ordering only affects submission order; the recorded per-run start times are what matter for analysis. With a `seed`, `random` ordering is reproducible in every mode (each task/epoch derives its own RNG, so parallel scheduling does not affect the result).
+
+**Measurement-friendly preset.** For the least-biased comparison, run serially with counterbalanced order:
+
+```yaml
+runner:
+  parallel: off
+  variant_order: counterbalance
+  epochs: 4            # a multiple of the number of variants for full balance
+```
+
+If you prefer randomization, use `variant_order: random` with a fixed `seed` so the run is reproducible.
+
+## Execution Schedule Recording
+
+Each run writes a `results.json` manifest under `results/<run-id>/`. It records the schedule so order/concurrency confounders can be analyzed after the fact:
+
+- A top-level `schedule` block: `parallel`, `max_workers`, `variant_order`, `seed`.
+- Per run:
+  - `order_index` — scheduled position. In `off` it is the global execution sequence; in `per_task` it is the position within that task; in `full` it is the submission index. It reflects *intended* order, not actual start order under concurrency — use `started_at` for that.
+  - `started_at` / `finished_at` — microsecond wall-clock timestamps (`started_at` is captured before hooks/health-check).
+  - `duration_seconds` — total run wall time, including hooks, the Copilot container run, and non-judge evaluators (not Copilot execution time alone).
 
 ## Secrets & `.env`
 

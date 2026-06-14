@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 import time
 import uuid
@@ -54,11 +55,51 @@ def _ensure_jaeger(config: Config) -> None:
 MANIFEST_NAME = "results.json"
 
 
-def _write_manifest(run_dir: Path, run_id: str, results: list[RunResult]) -> None:
+def order_variants(
+    variants: list[Variant], epoch: int, strategy: str, rng: random.Random,
+) -> list[Variant]:
+    """Order variants for a given epoch to reduce order-effect bias.
+
+    - ``fixed``: original config order (backward compatible).
+    - ``counterbalance``: cyclic rotation by ``epoch``. Each variant occupies
+      every position once per complete cycle of ``len(variants)`` epochs
+      (position-balanced; not a full permutation/carryover counterbalance).
+    - ``random``: shuffle using the supplied RNG. Pass a seeded RNG (see
+      ``_ordering_rng``) for a reproducible schedule.
+    """
+    if len(variants) <= 1 or strategy == "fixed":
+        return list(variants)
+    if strategy == "counterbalance":
+        k = (epoch - 1) % len(variants)
+        return variants[k:] + variants[:k]
+    if strategy == "random":
+        ordered = list(variants)
+        rng.shuffle(ordered)
+        return ordered
+    return list(variants)
+
+
+def _ordering_rng(seed: int | None, *parts: object) -> random.Random:
+    """Build a per-context RNG for variant ordering.
+
+    A fresh ``random.Random`` is returned per call (so concurrent schedulers in
+    ``per_task`` mode never share mutable RNG state — ``random.Random`` is not
+    thread-safe). When ``seed`` is set, the RNG is derived deterministically
+    from ``(seed, *parts)`` so the schedule is reproducible regardless of thread
+    timing; when ``seed`` is ``None`` the RNG is non-deterministic.
+    """
+    if seed is None:
+        return random.Random()
+    return random.Random("|".join(str(p) for p in (seed, *parts)))
+
+
+def _write_manifest(run_dir: Path, run_id: str, results: list[RunResult],
+                    schedule: dict[str, Any] | None = None) -> None:
     """Persist the full set of runs so `analyze` can detect missing/failed ones."""
     manifest = {
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        "schedule": schedule or {},
         "runs": [r.to_dict() for r in results],
     }
     try:
@@ -88,6 +129,7 @@ def main() -> None:
 def _safe_run_one(
     task: Task, variant: Variant, epoch: int,
     config: Config, run_id: str, run_dir: Path, github_token: str,
+    order_index: int | None = None,
 ) -> RunResult:
     """Run a single eval, guaranteeing the batch is never aborted by one run.
 
@@ -97,14 +139,14 @@ def _safe_run_one(
     turns it into a synthetic setup_failed result instead of re-raising.
     """
     try:
-        return run_one(task, variant, epoch, config, run_id, run_dir, github_token)
+        return run_one(task, variant, epoch, config, run_id, run_dir, github_token, order_index)
     except Exception as exc:  # noqa: BLE001 - isolate per-run failures from the batch
         click.echo(f"    ✗ [{task.name}] epoch={epoch} variant={variant.name} errored: {exc}")
         return RunResult(
             task=task.name, variant=variant.name, epoch=epoch,
             test_id=uuid.uuid4().hex, run_id=run_id,
             log_file=run_dir / f"{task.name}_{variant.name}_epoch{epoch}.log",
-            exit_code=-1, status="setup_failed",
+            exit_code=-1, status="setup_failed", order_index=order_index,
         )
 
 
@@ -145,6 +187,11 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
     click.echo(f" Max turns:{config.runner.max_turns or 'unlimited'}")
     click.echo(f" Epochs:   {epochs}")
     click.echo(f" Timeout:  {config.runner.timeout_seconds}s")
+    click.echo(f" Parallel: {config.runner.parallel}")
+    order_desc = config.runner.variant_order
+    if config.runner.variant_order == "random" and config.runner.seed is not None:
+        order_desc += f" (seed={config.runner.seed})"
+    click.echo(f" Order:    {order_desc}")
     click.echo(f" Run ID:   {run_id}")
     if config.vars:
         click.echo(f" Vars:     {config.vars}")
@@ -166,13 +213,28 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
         _ensure_images(config, github_token)
     results: list[RunResult] = []
 
+    order = config.runner.variant_order
+    seed = config.runner.seed
+
     if config.runner.parallel == "full":
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        work = [(t, v, e) for t in tasks for e in range(1, epochs + 1) for v in config.variants]
+        # variant_order is applied per epoch so the submission schedule is
+        # balanced; actual start times are still recorded per run since the
+        # thread pool decides true concurrency. A per-(task, epoch) RNG keeps the
+        # schedule reproducible under a seed without sharing RNG state.
+        work = [
+            (t, v, e)
+            for t in tasks
+            for e in range(1, epochs + 1)
+            for v in order_variants(config.variants, e, order, _ordering_rng(seed, t.name, e))
+        ]
         click.echo(f"Running {len(work)} runs in full parallel (max_workers={config.runner.max_workers})")
         with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
-            futures = {pool.submit(_safe_run_one, t, v, e, config, run_id, run_dir, github_token): f"{t.name}/{v.name}/e{e}" for t, v, e in work}
+            futures = {
+                pool.submit(_safe_run_one, t, v, e, config, run_id, run_dir, github_token, i): f"{t.name}/{v.name}/e{e}"
+                for i, (t, v, e) in enumerate(work)
+            }
             for future in as_completed(futures):
                 results.append(future.result())
 
@@ -182,11 +244,16 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
         def _run_task_serial(task: Task) -> list[RunResult]:
             """Run all epochs × variants for a single task sequentially."""
             task_results: list[RunResult] = []
+            order_index = 0
             for epoch in range(1, epochs + 1):
-                for variant in config.variants:
+                # Each worker thread uses its own RNG (random.Random is not
+                # thread-safe); derived from the seed for reproducibility.
+                ordered = order_variants(config.variants, epoch, order, _ordering_rng(seed, task.name, epoch))
+                for variant in ordered:
                     task_results.append(
-                        _safe_run_one(task, variant, epoch, config, run_id, run_dir, github_token)
+                        _safe_run_one(task, variant, epoch, config, run_id, run_dir, github_token, order_index)
                     )
+                    order_index += 1
             return task_results
 
         click.echo(f"Running {len(tasks)} tasks in parallel (variants serial within each task)")
@@ -195,15 +262,17 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
             for task_future in as_completed(task_futures):
                 results.extend(task_future.result())
     else:
+        order_index = 0
         for p in tasks:
             prompt = config.resolve_prompt(p, config.variants[0])
             click.echo(f"\n>>> Task: {p.name}")
             click.echo(f">>> Prompt:  {prompt}\n")
 
             for epoch in range(1, epochs + 1):
-                for variant in config.variants:
-                    result = _safe_run_one(p, variant, epoch, config, run_id, run_dir, github_token)
+                for variant in order_variants(config.variants, epoch, order, _ordering_rng(seed, p.name, epoch)):
+                    result = _safe_run_one(p, variant, epoch, config, run_id, run_dir, github_token, order_index)
                     results.append(result)
+                    order_index += 1
 
     # Summary
     passed = sum(1 for r in results if r.passed)
@@ -213,7 +282,13 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
 
     # Persist a run manifest so `analyze` knows the full expected set of runs
     # (including failed/timeout runs that may have produced no trace).
-    _write_manifest(run_dir, run_id, results)
+    schedule = {
+        "parallel": config.runner.parallel,
+        "max_workers": config.runner.max_workers,
+        "variant_order": config.runner.variant_order,
+        "seed": config.runner.seed,
+    }
+    _write_manifest(run_dir, run_id, results, schedule)
 
     click.echo("=" * 50)
     click.echo(f" Run complete: {run_id}")

@@ -55,7 +55,10 @@ sequenceDiagram
 `status == "completed"`, so timed-out or errored runs are never counted as passing.
 After all runs finish, `run` writes a **`results.json` manifest** into the run
 directory recording every run (task/variant/epoch, test_id, exit_code, status,
-scores). `analyze` reconciles against this manifest so failed/timeout/missing
+scores) plus the execution schedule: a top-level `schedule` block (parallel mode,
+max_workers, variant_order, seed) and per-run timing (order_index, started_at,
+finished_at, duration_seconds) so order/concurrency confounders can be analyzed
+post-hoc. `analyze` reconciles against this manifest so failed/timeout/missing
 runs are reported rather than silently dropped.
 
 Judge (LLM-as-Judge) evaluators do **not** run during `run`. They run later in
