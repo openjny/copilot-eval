@@ -75,6 +75,10 @@ class Evaluator:
 class Hooks:
     before_run: str | None = None
     after_run: str | None = None
+    # Failure policy for before_run: "fail" aborts the run (setup_failed),
+    # "warn" logs and continues. after_run failures are always warned and
+    # surfaced in the run's scores regardless of this setting.
+    on_failure: str = "fail"
 
 
 @dataclass
@@ -307,7 +311,16 @@ def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Eva
 def _parse_hooks(raw: dict[str, Any] | None) -> Hooks:
     if not raw:
         return Hooks()
-    return Hooks(before_run=raw.get("before_run"), after_run=raw.get("after_run"))
+    on_failure = str(raw.get("on_failure", "fail")).lower()
+    if on_failure not in ("fail", "warn"):
+        raise ConfigError(
+            f"Invalid hooks.on_failure '{on_failure}'. Use 'fail' or 'warn'."
+        )
+    return Hooks(
+        before_run=raw.get("before_run"),
+        after_run=raw.get("after_run"),
+        on_failure=on_failure,
+    )
 
 
 def _parse_task(p: dict[str, Any], fallback_name: str = "") -> Task:

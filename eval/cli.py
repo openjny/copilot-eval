@@ -85,6 +85,29 @@ def main() -> None:
     """Copilot CLI A/B evaluation framework."""
 
 
+def _safe_run_one(
+    task: Task, variant: Variant, epoch: int,
+    config: Config, run_id: str, run_dir: Path, github_token: str,
+) -> RunResult:
+    """Run a single eval, guaranteeing the batch is never aborted by one run.
+
+    `run_one` already converts internal errors into a setup_failed RunResult, but
+    this boundary catches any truly unexpected exception (so one bad run cannot
+    take down the whole batch or prevent the manifest from being written) and
+    turns it into a synthetic setup_failed result instead of re-raising.
+    """
+    try:
+        return run_one(task, variant, epoch, config, run_id, run_dir, github_token)
+    except Exception as exc:  # noqa: BLE001 - isolate per-run failures from the batch
+        click.echo(f"    ✗ [{task.name}] epoch={epoch} variant={variant.name} errored: {exc}")
+        return RunResult(
+            task=task.name, variant=variant.name, epoch=epoch,
+            test_id=uuid.uuid4().hex, run_id=run_id,
+            log_file=run_dir / f"{task.name}_{variant.name}_epoch{epoch}.log",
+            exit_code=-1, status="setup_failed",
+        )
+
+
 @main.command()
 @click.option("--task", "-p", default=None, help="Run a specific task (overrides enabled flag)")
 @click.option("--epochs", "-n", default=None, type=int, help="Number of epochs (default: from config, typically 1)")
@@ -149,7 +172,7 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
         work = [(t, v, e) for t in tasks for e in range(1, epochs + 1) for v in config.variants]
         click.echo(f"Running {len(work)} runs in full parallel (max_workers={config.runner.max_workers})")
         with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
-            futures = {pool.submit(run_one, t, v, e, config, run_id, run_dir, github_token): f"{t.name}/{v.name}/e{e}" for t, v, e in work}
+            futures = {pool.submit(_safe_run_one, t, v, e, config, run_id, run_dir, github_token): f"{t.name}/{v.name}/e{e}" for t, v, e in work}
             for future in as_completed(futures):
                 results.append(future.result())
 
@@ -162,7 +185,7 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
             for epoch in range(1, epochs + 1):
                 for variant in config.variants:
                     task_results.append(
-                        run_one(task, variant, epoch, config, run_id, run_dir, github_token)
+                        _safe_run_one(task, variant, epoch, config, run_id, run_dir, github_token)
                     )
             return task_results
 
@@ -179,7 +202,7 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
 
             for epoch in range(1, epochs + 1):
                 for variant in config.variants:
-                    result = run_one(p, variant, epoch, config, run_id, run_dir, github_token)
+                    result = _safe_run_one(p, variant, epoch, config, run_id, run_dir, github_token)
                     results.append(result)
 
     # Summary

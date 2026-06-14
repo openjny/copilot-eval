@@ -96,7 +96,18 @@ def run_one(
     scores: list[EvalScore] = []
     proc: subprocess.CompletedProcess[bytes] | None = None
     try:
-        _run_hook(task.hooks.before_run, config, task, variant, log_file, "before_run")
+        before_rc = _run_hook(task.hooks.before_run, config, task, variant, log_file, "before_run")
+        if before_rc != 0:
+            if task.hooks.on_failure == "fail":
+                print(f"    ✗ before_run hook failed (exit {before_rc}) — skipping run")
+                _append_log(log_file, f"before_run hook failed with exit code {before_rc}")
+                return RunResult(
+                    task=task.name, variant=variant.name, epoch=epoch,
+                    test_id=test_id, run_id=run_id, log_file=log_file,
+                    exit_code=-1, status="setup_failed",
+                )
+            print(f"    WARNING: before_run hook failed (exit {before_rc}) — continuing (on_failure=warn)")
+            _append_log(log_file, f"before_run hook failed with exit code {before_rc}; continuing because hooks.on_failure=warn")
 
         # Health check: verify environment is ready before running Copilot
         if task.health_check:
@@ -168,13 +179,47 @@ def run_one(
             proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=run_env)
         _print_summary(log_file)
 
-        _run_hook(task.hooks.after_run, config, task, variant, log_file, "after_run")
+        after_rc = _run_hook(task.hooks.after_run, config, task, variant, log_file, "after_run")
+        if after_rc != 0:
+            print(f"    WARNING: after_run hook failed (exit {after_rc}) — surfacing in results")
+            _append_log(log_file, f"after_run hook failed with exit code {after_rc}")
+            scores.append(EvalScore(
+                name="after_run_hook", type="hook", score=None,
+                reason=f"after_run hook failed with exit code {after_rc}", passed=False,
+            ))
 
         # Persist output files to results dir before tmpdir cleanup
         _persist_output_files(work_dir, run_dir, task.name, variant.name, epoch)
 
-        scores = _run_evaluators(task, variant, config, log_file, github_token, work_dir)
+        scores.extend(_run_evaluators(task, variant, config, log_file, github_token, work_dir))
+        # Persist the full score set (hook + evaluator scores) so later analysis
+        # sees hook failures too, not just evaluator-produced scores.
+        _write_scores_file(log_file, scores)
         _print_scores(scores)
+    except Exception as exc:  # noqa: BLE001 - isolate per-run failures from the batch
+        # A failure before the container ran is a setup problem; a failure during
+        # post-processing (persist/evaluators/after_run) happened after a real run,
+        # so preserve the container's exit status instead of mislabeling it.
+        if proc is None:
+            print(f"    ✗ Run errored during setup: {exc}")
+            _append_log(log_file, f"run_one raised during setup: {exc!r}")
+            return RunResult(
+                task=task.name, variant=variant.name, epoch=epoch,
+                test_id=test_id, run_id=run_id, log_file=log_file,
+                exit_code=-1, status="setup_failed", scores=scores,
+            )
+        print(f"    ✗ Run errored during post-processing: {exc}")
+        _append_log(log_file, f"run_one raised during post-processing: {exc!r}")
+        scores.append(EvalScore(
+            name="post_processing", type="infra", score=None,
+            reason=f"post-run exception: {exc!r}", passed=False,
+        ))
+        return RunResult(
+            task=task.name, variant=variant.name, epoch=epoch,
+            test_id=test_id, run_id=run_id, log_file=log_file,
+            exit_code=proc.returncode, status=status_from_exit_code(proc.returncode),
+            scores=scores,
+        )
     finally:
         if work_dir is not None:
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -193,20 +238,32 @@ def run_one(
     )
 
 
-def _run_hook(script: str | None, config: Config, task: Task, variant: Variant, log_file: Path, label: str) -> None:
+def _run_hook(script: str | None, config: Config, task: Task, variant: Variant, log_file: Path, label: str) -> int:
+    """Run a before/after hook script. Returns the script's exit code (0 when no
+    script is configured or the script is missing, so a missing hook never fails)."""
     if not script:
-        return
+        return 0
     resolved = (config.config_dir / script).resolve()
     if not resolved.exists():
         resolved = (config.project_dir / script).resolve()
     if not resolved.exists():
         print(f"    WARNING: {label} script not found: {script}")
-        return
+        return 0
     print(f"    Running {label}...")
     merged_vars = config.resolve_vars(task, variant)
     env = {**os.environ, **_load_env_file(config.env_file), **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()}}
     with open(log_file, "a") as lf:
-        subprocess.run(["bash", str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)
+        proc = subprocess.run(["bash", str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)
+    return proc.returncode
+
+
+def _append_log(log_file: Path, message: str) -> None:
+    """Append a diagnostic line to the run log, ignoring I/O errors."""
+    try:
+        with open(log_file, "a") as lf:
+            lf.write(f"\n[eval] {message}\n")
+    except OSError:
+        pass
 
 
 def _run_health_check(script: str, config: Config, task: Task, variant: Variant, log_file: Path) -> bool:
@@ -258,12 +315,19 @@ def _run_evaluators(task: Task, variant: Variant, config: Config, log_file: Path
         if s:
             scores.append(s)
     if scores:
-        sf = log_file.with_suffix(".scores.json")
-        sf.write_text(json.dumps(
-            [{"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed} for s in scores],
-            indent=2, ensure_ascii=False,
-        ))
+        _write_scores_file(log_file, scores)
     return scores
+
+
+def _write_scores_file(log_file: Path, scores: list[EvalScore]) -> None:
+    """Persist scores next to the run log as `<log>.scores.json`."""
+    if not scores:
+        return
+    sf = log_file.with_suffix(".scores.json")
+    sf.write_text(json.dumps(
+        [{"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed} for s in scores],
+        indent=2, ensure_ascii=False,
+    ))
 
 
 def run_judge(ev: Evaluator, conversation: str, config: Config, token: str,
