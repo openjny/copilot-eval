@@ -14,9 +14,11 @@ expected band. Running the judge repeatedly then tells you whether it is
 | **calib-mid**  | Correct core, missing detail   | 4–6  |
 | **calib-low**  | Factually wrong                | 1–2  |
 
-Each task also has a deterministic `gt-mentions-404` (`type: regex`) evaluator
-that confirms the canonical answer was actually written — so a low judge score
-can be told apart from a task that simply failed to emit the fixed text.
+Each task also has a deterministic `gt-mentions-404` (`type: regex`) evaluator.
+`contains`/`regex` evaluators match against the run's **conversation log** (not
+the output file), so this is an LLM-free anchor that the canonical answer text
+appeared in the run — useful for spotting an off-topic or empty run independently
+of the judge.
 
 ## How it works
 
@@ -42,5 +44,7 @@ uv run copilot-eval analyze --run-id <RUN_ID> --config-dir examples/judge-calibr
 2. **Reliability** — check the Judge reliability summary. A non-zero
    parse_error/timeout rate means the judge prompt or model is unreliable;
    a large σ means single-shot scores would have been noisy.
-3. **Ground truth** — `gt-mentions-404` should always pass; if it doesn't, the
-   deterministic input wasn't produced and the judge score is not meaningful.
+3. **Ground truth** — `gt-mentions-404` should pass whenever Copilot echoes the
+   canonical answer in its log; if it doesn't, the run likely went off-topic and
+   the judge score isn't meaningful. (It checks the conversation log, so a run
+   that writes the file silently without echoing it may still not match.)

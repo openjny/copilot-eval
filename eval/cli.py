@@ -471,12 +471,14 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
                 text = log_file.read_text()
                 conversation = text[:8000] + "\n... (truncated)" if len(text) > 8000 else text
 
-        if not conversation:
-            continue
-
-        # Read output files from persisted outputs
+        # Read output files from persisted outputs. The judge can score on output
+        # files alone (e.g. file-writing tasks), so only skip when neither the
+        # conversation nor any output file is available.
         output_dir = results_dir / "outputs" / f"{scenario}_{variant}_epoch{epoch}"
         output_files_text = read_files_from_dir(output_dir, max_chars=8000)
+
+        if not conversation and not output_files_text:
+            continue
 
         contexts[key] = {
             "scenario": scenario,
@@ -534,8 +536,12 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
                 key, score = future.result()
             except Exception as exc:  # never let one judge abort the whole batch
                 click.echo(f"    ! {ev.name}: error — {exc}", err=True)
+                n = max(1, config.runner.judge_samples)
                 score = {"name": ev.name, "type": "judge", "score": None,
-                         "reason": f"error: {exc}", "passed": False}
+                         "reason": f"error: {exc}", "passed": False,
+                         "samples": [], "score_stddev": None, "n_samples": n,
+                         "outcomes": {"ok": 0, "parse_error": 0, "timeout": 0, "error": n},
+                         "judge_model": config.runner.judge_model, "judge_version": None}
             ctx = contexts[key]
             ctx["scores"].append(score)
             ctx["remaining"] -= 1

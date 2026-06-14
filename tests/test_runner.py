@@ -409,9 +409,12 @@ def test_run_one_masks_log_on_setup_failed(tmp_path, monkeypatch):
 @pytest.mark.parametrize("samples,method,expected", [
     ([8], "median", 8),
     ([4, 8, 9], "median", 8),
-    ([4, 8, 9], "mean", 7),         # round(7.0)
+    ([4, 8, 9], "mean", 7),         # 7.0
     ([5, 5, 9], "majority", 5),
     ([5, 9], "majority", 5),        # tie -> lower for determinism
+    ([6, 7], "median", 7),          # 6.5 -> half-up 7 (not banker's 6)
+    ([6, 7], "mean", 7),            # 6.5 -> half-up 7
+    ([7, 8], "mean", 8),            # 7.5 -> half-up 8
 ])
 def test_aggregate_scores(samples, method, expected):
     assert _aggregate_scores(samples, method) == expected

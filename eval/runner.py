@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -24,7 +25,9 @@ class EvalScore:
     score: int | None
     reason: str = ""
     passed: bool = True
-    # Self-consistency metadata (judge evaluators only).
+    # Self-consistency metadata (judge evaluators only). ``samples`` holds the
+    # successful per-call scores; ``n_samples`` is the number of calls requested
+    # (== sum of ``outcomes``), which may exceed len(samples) when some fail.
     samples: list[int] = field(default_factory=list)
     score_stddev: float | None = None
     n_samples: int = 0
@@ -320,15 +323,21 @@ def judge_cli_version() -> str:
 
 
 def _aggregate_scores(samples: list[int], method: str) -> int:
-    """Aggregate successful judge sample scores into a single integer score."""
+    """Aggregate successful judge sample scores into a single integer score.
+
+    Uses half-up rounding (not Python's banker's rounding) so an even-length
+    median/mean of e.g. 6.5 rounds to 7 rather than 6.
+    """
+    def _round_half_up(x: float) -> int:
+        return int(math.floor(x + 0.5))
     if method == "mean":
-        return int(round(mean(samples)))
+        return _round_half_up(mean(samples))
     if method == "majority":
         # Most common value; ties broken by the lower score for determinism.
         counts = Counter(samples)
         top = max(counts.values())
         return min(v for v, c in counts.items() if c == top)
-    return int(round(median(samples)))  # default: median
+    return _round_half_up(median(samples))  # default: median
 
 
 def _run_judge_once(prompt: str, config: Config, token: str) -> tuple[int | None, str, str]:

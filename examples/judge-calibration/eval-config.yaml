@@ -8,9 +8,11 @@
 # `judge_samples: 5` makes every judge fire five times; `analyze` reports the
 # median plus the per-evaluator score spread (σ) and parse/timeout/error rates.
 # Compare the reported median against each task's documented `Expected:` band and
-# watch σ to gauge reliability. The `gt-*` regex evaluators deterministically
-# confirm the canonical answer was actually written, so a low judge score can be
-# distinguished from a task that simply failed to produce the fixed text.
+# watch σ to gauge reliability. The `gt-*` regex evaluators are deterministic,
+# LLM-free anchors: they match the canonical answer text in the run's
+# conversation log (regex/contains evaluate the log, not output files), so a low
+# judge score caused by an off-topic or empty run is easy to spot independently
+# of the judge.
 vars: {}
 
 runner:
@@ -56,7 +58,8 @@ tasks:
           5  = Roughly correct but missing key detail or slightly imprecise.
           1  = Wrong or unrelated.
           Output ONLY valid JSON: {"score": N, "reason": "..."}
-      # Ground truth: confirm the canonical answer was written.
+      # Deterministic, LLM-free anchor: matches the canonical answer text in the
+      # conversation log (regex evaluates the log, not the output file).
       - name: gt-mentions-404
         type: regex
         value: "404 Not Found"

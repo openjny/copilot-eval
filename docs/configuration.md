@@ -128,6 +128,10 @@ evaluations, per-sample outcome rates (ok/parse_error/timeout/error), and the me
 score spread (σ). The markdown/JSON reports show each per-run judge score with its
 `±σ`, and the JSON report includes a `judge_stddevs` map per run.
 
+> Cached judge scores are keyed by evaluator **name** only. If you change
+> `judge_samples`, `judge_aggregate`, or `judge_model` and want existing scores
+> re-evaluated with the new settings, re-run `analyze --re-eval`.
+
 To assess whether the judge itself is calibrated, see the `examples/judge-calibration`
 eval set: it pins Copilot output to fixed answers with known expected score bands.
 
