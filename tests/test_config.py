@@ -124,6 +124,7 @@ def test_evaluator_invalid_regex(tmp_path):
     ({"judge_timeout_seconds": 0}, "runner.judge_timeout_seconds"),
     ({"epochs": "two"}, "runner.epochs"),
     ({"max_turns": 0}, "runner.max_turns"),
+    ({"output_instruction": 123}, "runner.output_instruction"),
 ])
 def test_runner_validation(tmp_path, runner, msg):
     with pytest.raises(ConfigError, match=msg):
@@ -144,6 +145,46 @@ def test_runner_valid_values(tmp_path):
 def test_runner_judge_timeout_default(tmp_path):
     cfg = load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "p"}]})
     assert cfg.runner.judge_timeout_seconds == 60
+
+
+# --- Output instruction (resolve_prompt) ---
+
+def test_resolve_prompt_default_appends_instruction(tmp_path):
+    cfg = load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "Do it."}]})
+    task, variant = cfg.tasks[0], cfg.variants[0]
+    assert cfg.runner.output_instruction == "Save all output files under /workspace/output/."
+    assert cfg.resolve_prompt(task, variant) == (
+        "Do it.\n\nSave all output files under /workspace/output/."
+    )
+
+
+def test_resolve_prompt_empty_instruction_disables(tmp_path):
+    cfg = load_inline(tmp_path, {
+        "runner": {"output_instruction": ""},
+        "tasks": [{"name": "t1", "prompt": "Do it."}],
+    })
+    task, variant = cfg.tasks[0], cfg.variants[0]
+    assert cfg.resolve_prompt(task, variant) == "Do it."
+
+
+def test_resolve_prompt_null_instruction_uses_default(tmp_path):
+    cfg = load_inline(tmp_path, {
+        "runner": {"output_instruction": None},
+        "tasks": [{"name": "t1", "prompt": "Do it."}],
+    })
+    assert cfg.runner.output_instruction == "Save all output files under /workspace/output/."
+
+
+def test_resolve_prompt_custom_instruction_interpolates_vars(tmp_path):
+    cfg = load_inline(tmp_path, {
+        "runner": {"output_instruction": "Respond in {language}."},
+        "variants": [{"name": "ja", "vars": {"language": "Japanese"}}],
+        "tasks": [{"name": "t1", "prompt": "Review {language} code."}],
+    })
+    task, variant = cfg.tasks[0], cfg.variants[0]
+    assert cfg.resolve_prompt(task, variant) == (
+        "Review Japanese code.\n\nRespond in Japanese."
+    )
 
 
 # --- Name validation + duplicates ---

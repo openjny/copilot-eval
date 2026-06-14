@@ -16,6 +16,7 @@ class ConfigError(ValueError):
 EVALUATOR_TYPES = ("judge", "script", "contains", "regex")
 PARALLEL_MODES = ("off", "per_task", "full")
 OUTPUT_FORMATS = ("text", "json")
+DEFAULT_OUTPUT_INSTRUCTION = "Save all output files under /workspace/output/."
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -32,6 +33,9 @@ class RunnerConfig:
     judge_timeout_seconds: int = 60
     output_format: str = "text"
     capture_content: bool = True
+    # Instruction appended to every prompt so generated files reach the judges.
+    # Empty string disables it; supports {var} interpolation like prompts.
+    output_instruction: str = DEFAULT_OUTPUT_INSTRUCTION
     container_image_base: str = "copilot-eval"
     copilot_version: str = "1.0.18"
     otel_endpoint: str = "http://host.docker.internal:4318"
@@ -120,10 +124,17 @@ class Config:
         return {**self.vars, **task.vars, **variant.vars}
 
     def resolve_prompt(self, task: Task, variant: Variant) -> str:
-        result = task.prompt
-        for key, value in self.resolve_vars(task, variant).items():
-            result = result.replace("{" + key + "}", str(value))
-        result += "\n\nSave all output files under /workspace/output/."
+        vars_ = self.resolve_vars(task, variant)
+
+        def interpolate(text: str) -> str:
+            for key, value in vars_.items():
+                text = text.replace("{" + key + "}", str(value))
+            return text
+
+        result = interpolate(task.prompt)
+        instruction = interpolate(self.runner.output_instruction)
+        if instruction:
+            result += "\n\n" + instruction
         return result
 
 
@@ -170,6 +181,14 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
             f"Must be one of: {', '.join(OUTPUT_FORMATS)}."
         )
 
+    output_instruction = runner_raw.get("output_instruction")
+    if output_instruction is None:
+        output_instruction = DEFAULT_OUTPUT_INSTRUCTION
+    elif not isinstance(output_instruction, str):
+        raise ConfigError(
+            f"runner.output_instruction must be a string, got {output_instruction!r}."
+        )
+
     epochs = _require_int(runner_raw, "epochs", 1, minimum=1)
     timeout_seconds = _require_int(runner_raw, "timeout_seconds", 300, minimum=1)
     max_workers = _require_int(runner_raw, "max_workers", 8, minimum=1)
@@ -194,6 +213,7 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         judge_timeout_seconds=judge_timeout_seconds,
         output_format=output_format,
         capture_content=runner_raw.get("capture_content", True),
+        output_instruction=output_instruction,
         container_image_base=runner_raw.get("container_image_base", "copilot-eval"),
         copilot_version=runner_raw.get("copilot_version", "1.0.18"),
         otel_endpoint=runner_raw.get("otel_endpoint", "http://host.docker.internal:4318"),

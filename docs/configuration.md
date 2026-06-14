@@ -20,6 +20,7 @@ runner:
   judge_timeout_seconds: 60      # Per-judge Copilot timeout in analyze (seconds)
   output_format: text            # text | json
   capture_content: true          # Capture prompt/response content in OTel spans (needed by judge)
+  output_instruction: Save all output files under /workspace/output/.  # Appended to every prompt; "" disables; supports {var} interpolation
   container_image_base: copilot-eval
   copilot_version: "1.0.18"
   otel_endpoint: http://host.docker.internal:4318   # OTLP collector endpoint (inside container)
@@ -57,7 +58,14 @@ tasks:
 
 Variables are merged in order: `global vars` → `task vars` → `variant vars`. Later values override earlier ones.
 
-The prompt also gets `"\nSave all output files under /workspace/output/."` appended automatically so that generated files are available to judges.
+The prompt also gets an output-path instruction appended automatically so that generated files are available to judges. By default this is `"\n\nSave all output files under /workspace/output/."`. Configure it via `runner.output_instruction`:
+
+- **unset** → the default sentence above (backward compatible),
+- **`""`** → nothing is appended (disable it, e.g. when the task prompt already specifies the output path, or to avoid injecting English into a non-English prompt),
+- **`null`** → same as unset (the default sentence),
+- **custom string** → appended verbatim, with the same `{var}` interpolation as the prompt (so it can adapt per variant, e.g. `Respond in {language}.`).
+
+When non-empty, the instruction is appended after a `\n\n` separator.
 
 ## Variants
 
