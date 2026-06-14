@@ -297,10 +297,28 @@ def test_to_dict_structure():
         "exit_code": 0,
         "status": "completed",
         "passed": True,
+        "order_index": None,
+        "started_at": None,
+        "finished_at": None,
+        "duration_seconds": None,
         "scores": [
             {"name": "a", "type": "contains", "score": 1, "reason": "found", "passed": True},
         ],
     }
+
+
+def test_to_dict_includes_schedule_fields():
+    r = RunResult(
+        task="t", variant="v", epoch=2, test_id="tid", run_id="rid",
+        log_file=Path("/tmp/x.log"), exit_code=0, status="completed",
+        order_index=3, started_at="2026-01-01T00:00:00",
+        finished_at="2026-01-01T00:01:00", duration_seconds=60.0,
+    )
+    d = r.to_dict()
+    assert d["order_index"] == 3
+    assert d["started_at"] == "2026-01-01T00:00:00"
+    assert d["finished_at"] == "2026-01-01T00:01:00"
+    assert d["duration_seconds"] == 60.0
 
 
 # --- collect_secrets / mask_secrets ---

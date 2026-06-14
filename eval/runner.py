@@ -7,8 +7,10 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,10 @@ class RunResult:
     exit_code: int
     status: str = "completed"  # completed | setup_failed | timeout | failed
     scores: list[EvalScore] = field(default_factory=list)
+    order_index: int | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_seconds: float | None = None
 
     @property
     def passed(self) -> bool:
@@ -50,6 +56,10 @@ class RunResult:
             "exit_code": self.exit_code,
             "status": self.status,
             "passed": self.passed,
+            "order_index": self.order_index,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "duration_seconds": self.duration_seconds,
             "scores": [
                 {"name": s.name, "type": s.type, "score": s.score, "reason": s.reason, "passed": s.passed}
                 for s in self.scores
@@ -84,10 +94,25 @@ def get_github_token() -> str:
 def run_one(
     task: Task, variant: Variant, epoch: int,
     config: Config, run_id: str, run_dir: Path, github_token: str,
+    order_index: int | None = None,
 ) -> RunResult:
     test_id = str(uuid.uuid4())
     log_file = run_dir / f"{task.name}_{variant.name}_epoch{epoch}.log"
     print(f"--- [{task.name}] epoch={epoch} variant={variant.name} test_id={test_id[:8]}")
+
+    # Capture wall-clock schedule so post-hoc analysis can detect order/concurrency
+    # confounders. monotonic clock is used for duration to avoid clock-skew issues;
+    # microsecond timestamps preserve sub-second ordering under concurrency.
+    started_at = datetime.now().isoformat(timespec="microseconds")
+    started_monotonic = time.monotonic()
+
+    def _timing() -> dict[str, Any]:
+        return {
+            "order_index": order_index,
+            "started_at": started_at,
+            "finished_at": datetime.now().isoformat(timespec="microseconds"),
+            "duration_seconds": round(time.monotonic() - started_monotonic, 3),
+        }
 
     # Tracked across the run so the outer `finally` can always clean up and
     # redact secrets, even on early returns (e.g. setup_failed) or exceptions.
@@ -116,7 +141,7 @@ def run_one(
                 return RunResult(
                     task=task.name, variant=variant.name, epoch=epoch,
                     test_id=test_id, run_id=run_id, log_file=log_file,
-                    exit_code=-1, status="setup_failed",
+                    exit_code=-1, status="setup_failed", **_timing(),
                 )
 
         prompt = config.resolve_prompt(task, variant)
@@ -234,7 +259,7 @@ def run_one(
         task=task.name, variant=variant.name, epoch=epoch,
         test_id=test_id, run_id=run_id, log_file=log_file,
         exit_code=proc.returncode, status=status_from_exit_code(proc.returncode),
-        scores=scores,
+        scores=scores, **_timing(),
     )
 
 

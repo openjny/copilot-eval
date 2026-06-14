@@ -15,6 +15,7 @@ class ConfigError(ValueError):
 
 EVALUATOR_TYPES = ("judge", "script", "contains", "regex")
 PARALLEL_MODES = ("off", "per_task", "full")
+VARIANT_ORDER_MODES = ("fixed", "counterbalance", "random")
 OUTPUT_FORMATS = ("text", "json")
 DEFAULT_OUTPUT_INSTRUCTION = "Save all output files under /workspace/output/."
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -30,6 +31,8 @@ class RunnerConfig:
     max_turns: int | None = None
     parallel: str = "off"  # off | per_task | full
     max_workers: int = 8
+    variant_order: str = "fixed"  # fixed | counterbalance | random
+    seed: int | None = None  # RNG seed for variant_order=random (reproducibility)
     judge_timeout_seconds: int = 60
     output_format: str = "text"
     capture_content: bool = True
@@ -178,6 +181,12 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         raise ConfigError(
             f"runner.parallel has invalid value '{parallel}'. Must be one of: {', '.join(PARALLEL_MODES)}."
         )
+    variant_order = runner_raw.get("variant_order", "fixed")
+    if variant_order not in VARIANT_ORDER_MODES:
+        raise ConfigError(
+            f"runner.variant_order has invalid value '{variant_order}'. "
+            f"Must be one of: {', '.join(VARIANT_ORDER_MODES)}."
+        )
     output_format = runner_raw.get("output_format", "text")
     if output_format not in OUTPUT_FORMATS:
         raise ConfigError(
@@ -201,6 +210,10 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
     if max_turns is not None:
         max_turns = _coerce_int("runner.max_turns", max_turns, minimum=1)
 
+    seed = runner_raw.get("seed")
+    if seed is not None:
+        seed = _coerce_int("runner.seed", seed)
+
     trace_fetch_limit = _require_int(runner_raw, "trace_fetch_limit", 2000, minimum=1)
     trace_fetch_retries = _require_int(runner_raw, "trace_fetch_retries", 5, minimum=0)
     trace_fetch_retry_delay = _require_number(runner_raw, "trace_fetch_retry_delay", 2.0, minimum=0)
@@ -214,6 +227,8 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         max_turns=max_turns,
         parallel=parallel,
         max_workers=max_workers,
+        variant_order=variant_order,
+        seed=seed,
         judge_timeout_seconds=judge_timeout_seconds,
         output_format=output_format,
         capture_content=runner_raw.get("capture_content", True),
