@@ -329,12 +329,16 @@ def run_judge(ev: Evaluator, conversation: str, config: Config, token: str,
     if version:
         meta["judge_version"] = version
     expected = config.runner.judge_copilot_version
-    if expected and version and version != expected:
+    # Record a mismatch when the host version differs from the configured
+    # expectation — including the case where the host version is unavailable,
+    # which is exactly when reproducibility is least observable.
+    if expected and version != expected:
         meta["judge_version_mismatch"] = {"expected": expected, "actual": version}
 
     def _score(score: int | None, reason: str, outcome: str) -> EvalScore:
         meta["outcome"] = outcome
-        return EvalScore(name=ev.name, type="judge", score=score, reason=reason, meta=meta)
+        return EvalScore(name=ev.name, type="judge", score=score,
+                         reason=mask_secrets(reason, secrets) or reason, meta=meta)
 
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
@@ -345,13 +349,20 @@ def run_judge(ev: Evaluator, conversation: str, config: Config, token: str,
         return _score(None, "copilot CLI not found on host", "not_found")
 
     meta["returncode"] = proc.returncode
-    stderr = (proc.stderr or "").strip()
+    stderr = mask_secrets((proc.stderr or "").strip(), secrets) or ""
     if stderr:
         meta["stderr"] = stderr[:_STDERR_SNIPPET_CHARS]
 
     data = _parse_json(proc.stdout, require_keys=("score",))
-    if data:
-        return _score(int(data.get("score", 0)), str(data.get("reason", "")), "ok")
+    if data is not None:
+        try:
+            score = int(data.get("score", 0))
+        except (TypeError, ValueError):
+            return _score(None, f"invalid_score: {data.get('score')!r}", "invalid_score")
+        # A parseable verdict from a process that exited non-zero is suspicious:
+        # keep the score but flag the anomaly so it isn't counted as a clean run.
+        outcome = "ok" if proc.returncode == 0 else "ok_nonzero"
+        return _score(score, str(data.get("reason", "")), outcome)
     if proc.returncode != 0:
         detail = f" — {stderr[:200]}" if stderr else ""
         return _score(None, f"error: rc={proc.returncode}{detail}", "error")
@@ -392,14 +403,19 @@ def _eval_regex(ev: Evaluator, log_file: Path) -> EvalScore | None:
 
 
 def read_files_from_dir(directory: Path | None, max_chars: int = 8000) -> str | None:
-    """Read all files under a directory, concatenated with per-file headers."""
+    """Read all files under a directory, concatenated with per-file headers.
+
+    When the combined content exceeds ``max_chars`` the output is truncated, but
+    truncation is never silent: a trailing ``... (truncated)`` marker is always
+    emitted and any fully omitted files are listed by name so the judge prompt
+    (and the report's truncation metadata) reflects that evidence was dropped.
+    """
     if not directory or not directory.is_dir():
         return None
+    files = [f for f in sorted(directory.rglob("*")) if f.is_file()]
     parts: list[str] = []
     total = 0
-    for f in sorted(directory.rglob("*")):
-        if not f.is_file():
-            continue
+    for i, f in enumerate(files):
         rel = f.relative_to(directory)
         try:
             content = f.read_text(errors="replace")
@@ -408,7 +424,11 @@ def read_files_from_dir(directory: Path | None, max_chars: int = 8000) -> str | 
         if total + len(content) > max_chars:
             remaining = max_chars - total
             if remaining > 0:
-                parts.append(f"=== {rel} ===\n{content[:remaining]}\n... (truncated)")
+                parts.append(f"=== {rel} ===\n{content[:remaining]}")
+            omitted = [str(g.relative_to(directory)) for g in files[i + (1 if remaining > 0 else 0):]]
+            if omitted:
+                parts.append(f"[omitted {len(omitted)} file(s): {', '.join(omitted)}]")
+            parts.append("... (truncated)")
             break
         parts.append(f"=== {rel} ===\n{content}")
         total += len(content)

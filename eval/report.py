@@ -419,7 +419,10 @@ def _load_judge_runtime(results_dir: Path, variants: list[str], task: str) -> di
         if not stem.startswith(f"{task}_"):
             continue
         name_variant = stem.rsplit("_epoch", 1)[0]
-        if not any(name_variant.endswith(f"_{v}") for v in variants):
+        # Match the longest variant name (mirrors _load_judge_raw) so a shorter
+        # variant doesn't claim a file belonging to a longer-named one.
+        matches = [v for v in variants if name_variant.endswith(f"_{v}")]
+        if not matches:
             continue
         if jf in seen:
             continue

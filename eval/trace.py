@@ -154,7 +154,8 @@ def extract_conversation(trace: Trace, max_chars: int = 8000) -> str | None:
                 if total + len(text) > max_chars:
                     remaining = max_chars - total
                     if remaining > 0:
-                        parts.append(text[:remaining] + "\n... (truncated)")
+                        parts.append(text[:remaining])
+                    parts.append("... (truncated)")
                     break
                 parts.append(text)
                 total += len(text)

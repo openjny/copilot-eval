@@ -234,9 +234,9 @@ def test_read_files_from_dir_truncates_at_max_chars(tmp_path: Path):
     # a.txt fills 10 chars (total==10), b.txt would exceed max_chars=15.
     result = read_files_from_dir(d, max_chars=15)
     assert "=== a.txt ===\n0123456789" in result
-    assert "... (truncated)" in result
+    assert result.rstrip().endswith("... (truncated)")
     # Only the remaining 5 chars of b.txt are included.
-    assert "ABCDE\n... (truncated)" in result
+    assert "ABCDE" in result
     assert "ABCDEF" not in result
 
 
@@ -245,10 +245,14 @@ def test_read_files_from_dir_stops_when_no_remaining_budget(tmp_path: Path):
     d.mkdir()
     (d / "a.txt").write_text("0123456789")
     (d / "b.txt").write_text("ABCDEFGHIJ")
-    # a.txt exactly fills max_chars; b.txt has zero remaining budget so it is
-    # dropped entirely (no truncated marker, no partial content).
+    # a.txt exactly fills max_chars; b.txt has zero remaining budget. Its content
+    # is dropped, but the omission is surfaced (not silent) so the judge context
+    # and truncation metadata reflect the missing file.
     result = read_files_from_dir(d, max_chars=10)
-    assert result == "=== a.txt ===\n0123456789"
+    assert "=== a.txt ===\n0123456789" in result
+    assert "ABCDEFGHIJ" not in result
+    assert "omitted 1 file(s): b.txt" in result
+    assert result.rstrip().endswith("... (truncated)")
 
 
 # --- RunResult.passed / to_dict ---
@@ -551,3 +555,38 @@ def test_evalscore_to_dict_includes_meta():
 def test_evalscore_to_dict_omits_empty_meta():
     s = EvalScore(name="c", type="contains", score=1, reason="found")
     assert "meta" not in s.to_dict()
+
+
+def test_run_judge_invalid_score_value(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    _patch_judge(monkeypatch, proc=_FakeProc(stdout='{"score": "N/A", "reason": "x"}'))
+    s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
+    assert s.score is None
+    assert s.meta["outcome"] == "invalid_score"
+
+
+def test_run_judge_nonzero_exit_with_valid_json(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    _patch_judge(monkeypatch, proc=_FakeProc(stdout='{"score": 6}', returncode=1))
+    s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
+    # Verdict is kept but the anomaly (non-zero exit) is flagged, not counted ok.
+    assert s.score == 6
+    assert s.meta["outcome"] == "ok_nonzero"
+
+
+def test_run_judge_mismatch_when_version_unavailable(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    _patch_judge(monkeypatch, proc=_FakeProc(stdout='{"score": 5}'), version=None)
+    config = _judge_config(tmp_path, judge_copilot_version="copilot/1.0.18")
+    s = runner_mod.run_judge(_ev(), "c", config, token=None)
+    assert s.meta["judge_version_mismatch"] == {"expected": "copilot/1.0.18", "actual": None}
+
+
+def test_run_judge_masks_secrets_in_stderr(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    (tmp_path / ".env").write_text('SECRET="supersecretvalue"\n')
+    _patch_judge(monkeypatch, proc=_FakeProc(stdout="nope", stderr="boom supersecretvalue", returncode=2))
+    s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
+    assert "supersecretvalue" not in s.meta["stderr"]
+    assert "supersecretvalue" not in s.reason
