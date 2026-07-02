@@ -368,7 +368,9 @@ def test_write_sanitized_env_file_strips_quotes(tmp_path):
     out = _write_sanitized_env_file(config)
     try:
         assert out != config.env_file
-        assert (out.stat().st_mode & 0o777) == 0o600
+        import sys
+        if sys.platform != "win32":
+            assert (out.stat().st_mode & 0o777) == 0o600
         content = out.read_text()
         assert "DQ=quoted value\n" in content
         assert "PLAIN=value\n" in content

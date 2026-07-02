@@ -611,13 +611,13 @@ def read_files_from_dir(directory: Path | None, max_chars: int = 8000) -> str | 
         if total + len(content) > max_chars:
             remaining = max_chars - total
             if remaining > 0:
-                parts.append(f"=== {rel} ===\n{content[:remaining]}")
-            omitted = [str(g.relative_to(directory)) for g in files[i + (1 if remaining > 0 else 0):]]
+                parts.append(f"=== {rel.as_posix()} ===\n{content[:remaining]}")
+            omitted = [g.relative_to(directory).as_posix() for g in files[i + (1 if remaining > 0 else 0):]]
             if omitted:
                 parts.append(f"[omitted {len(omitted)} file(s): {', '.join(omitted)}]")
             parts.append("... (truncated)")
             break
-        parts.append(f"=== {rel} ===\n{content}")
+        parts.append(f"=== {rel.as_posix()} ===\n{content}")
         total += len(content)
     return "\n\n".join(parts) if parts else None
 
