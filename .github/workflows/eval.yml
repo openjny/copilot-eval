@@ -1,0 +1,68 @@
+name: Scheduled Eval
+
+on:
+  schedule:
+    - cron: "0 0 * * 1" # Weekly on Monday at 00:00 UTC
+  workflow_dispatch:
+    inputs:
+      config-dir:
+        description: "Config directory to evaluate"
+        required: true
+        default: "examples/prompt-language"
+        type: choice
+        options:
+          - examples/prompt-language
+          - examples/azure-skills
+          - examples/judge-calibration
+      epochs:
+        description: "Number of epochs"
+        required: false
+        default: "3"
+        type: string
+      dry-run:
+        description: "Dry run (skip actual Copilot calls)"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    name: Run evaluation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --locked --python 3.13
+
+      - name: Build variant images
+        run: uv run copilot-eval build --config-dir ${{ inputs.config-dir || 'examples/prompt-language' }}
+
+      - name: Run evaluation
+        run: |
+          ARGS="--config-dir ${{ inputs.config-dir || 'examples/prompt-language' }}"
+          ARGS="$ARGS --epochs ${{ inputs.epochs || '3' }}"
+          if [ "${{ inputs.dry-run || 'true' }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          uv run copilot-eval run $ARGS
+
+      - name: Upload traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-traces
+          path: .traces/
+          if-no-files-found: ignore
