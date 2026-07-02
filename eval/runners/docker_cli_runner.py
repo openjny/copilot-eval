@@ -11,7 +11,7 @@ from typing import Any
 
 from eval.config import Config, Variant
 from eval.env_utils import write_sanitized_env_file
-from eval.protocols import RunArtifacts, RunContext, RunStatus
+from eval.protocols import RunArtifacts, RunContext, status_from_exit_code
 
 _TRACE_FILE = Path(".traces") / "traces.jsonl"
 _CONTAINER_TRACE_DIR = "/workspace/.traces"
@@ -143,15 +143,7 @@ class DockerCLIRunner:
             trace_file=trace_file,
             output_dir=output_dir,
             duration_seconds=duration_seconds,
-            status=_status_from_exit_code(proc.returncode),
+            status=status_from_exit_code(proc.returncode),
             started_at=started_at,
             finished_at=finished_at,
         )
-
-
-def _status_from_exit_code(exit_code: int) -> str:
-    if exit_code == 0:
-        return RunStatus.SUCCESS.value
-    if exit_code == 124:
-        return RunStatus.TIMEOUT.value
-    return RunStatus.FAILED.value

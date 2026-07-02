@@ -1,7 +1,7 @@
 """Runner implementations."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from eval.runners.docker_cli_runner import DockerCLIRunner
 
@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 RUNNER_TYPES = {"cli": DockerCLIRunner}
 
 
-def create_runner(runner_type: str, **kwargs) -> AgentRunner:
+def create_runner(runner_type: str, **kwargs: Any) -> AgentRunner:
     """Create a runner instance by type."""
     try:
         runner_cls = RUNNER_TYPES[runner_type]

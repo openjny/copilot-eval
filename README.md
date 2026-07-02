@@ -80,6 +80,22 @@ The framework tags each run with `eval.test_id`, `eval.variant`, `eval.scenario`
 
 > **Note**: `COPILOT_HOME` must be writable for OTel span correlation to work correctly. The entrypoint handles this by copying auth from a read-only mount to a writable directory.
 
+## Upgrading
+
+### v0.2.0 — OTel generalization
+
+- **Breaking**: Default trace collector changed from `jaeger` to `file` (JSONL file exporter).
+
+- Existing configs without an explicit `runner.collector` now use `file`.
+- To keep Jaeger, set:
+
+```yaml
+runner:
+  collector: jaeger
+```
+
+- The `file` collector requires no external services — traces are stored as `.traces/*.jsonl` files in the results directory.
+
 ## Development
 
 Run the unit tests (pure logic: config parsing/validation, report aggregation, trace parsing):

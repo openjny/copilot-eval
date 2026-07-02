@@ -11,6 +11,7 @@ from statistics import median
 from statistics import stdev as _stdev
 from typing import Any
 
+from eval.protocols import RunStatus
 from eval.trace import RunMetrics
 
 # Below this many (paired) samples, A/B deltas are treated as low-confidence: a
@@ -400,11 +401,11 @@ def _build_reliability(task: str, variants: list[str],
             continue
         c = counts[v]
         c["total"] += 1
-        status = r.get("status", "completed")
+        status = r.get("status", RunStatus.SUCCESS.value)
         has_trace = r.get("test_id") in tids
-        if status == "timeout":
+        if status == RunStatus.TIMEOUT.value:
             c["timeout"] += 1
-        elif status in ("failed", "setup_failed"):
+        elif status in (RunStatus.FAILED.value, RunStatus.SETUP_FAILED.value):
             c["failed"] += 1
         elif not has_trace:
             c["missing"] += 1

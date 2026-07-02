@@ -11,13 +11,22 @@ from eval.trace import Trace
 
 
 class RunStatus(str, Enum):  # noqa: UP042 - keep Python 3.10 compatibility without StrEnum.
-    SUCCESS = "success"
+    SUCCESS = "completed"
     SETUP_FAILED = "setup_failed"
     TIMEOUT = "timeout"
     FAILED = "failed"
 
     def __str__(self) -> str:
         return self.value
+
+
+def status_from_exit_code(exit_code: int) -> RunStatus:
+    """Map a process exit code to a normalized run status."""
+    if exit_code == 0:
+        return RunStatus.SUCCESS
+    if exit_code == 124:
+        return RunStatus.TIMEOUT
+    return RunStatus.FAILED
 
 
 @dataclass
@@ -40,7 +49,7 @@ class RunArtifacts:
     trace_file: Path | None
     output_dir: Path | None
     duration_seconds: float
-    status: str
+    status: RunStatus
     started_at: str | None
     finished_at: str | None
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from eval.runners import DockerCLIRunner
+from eval.runners import DockerCLIRunner, create_runner
 from eval.runners import docker_cli_runner as docker_runner_mod
 
 
@@ -46,3 +46,14 @@ def test_docker_cli_runner_health_check_failure(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Docker daemon is not available"):
         DockerCLIRunner("token").health_check()
+
+
+def test_create_runner_cli():
+    runner = create_runner("cli", github_token="tok")
+
+    assert isinstance(runner, DockerCLIRunner)
+
+
+def test_create_runner_unknown():
+    with pytest.raises(ValueError, match="Unknown runner type"):
+        create_runner("unknown", github_token="tok")

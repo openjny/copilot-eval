@@ -16,7 +16,7 @@ import requests
 
 from eval.collectors import create_collector
 from eval.config import Config, Task, Variant, load_config
-from eval.protocols import RunContext
+from eval.protocols import RunContext, RunStatus
 from eval.report import build_report, format_json, format_markdown, format_table
 from eval.runner import RunResult, get_github_token, run_one
 from eval.trace import (
@@ -148,7 +148,7 @@ def _safe_run_one(
             task=task.name, variant=variant.name, epoch=epoch,
             test_id=uuid.uuid4().hex, run_id=run_id,
             log_file=run_dir / f"{task.name}_{variant.name}_epoch{epoch}.log",
-            exit_code=-1, status="setup_failed", order_index=order_index,
+            exit_code=-1, status=RunStatus.SETUP_FAILED, order_index=order_index,
         )
 
 
@@ -281,8 +281,8 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
     # Summary
     passed = sum(1 for r in results if r.passed)
     failed = sum(1 for r in results if not r.passed)
-    timed_out = sum(1 for r in results if r.status == "timeout")
-    errored = sum(1 for r in results if r.status in ("failed", "setup_failed"))
+    timed_out = sum(1 for r in results if r.status == RunStatus.TIMEOUT)
+    errored = sum(1 for r in results if r.status in (RunStatus.FAILED, RunStatus.SETUP_FAILED))
 
     # Persist a run manifest so `analyze` knows the full expected set of runs
     # (including failed/timeout runs that may have produced no trace).
@@ -390,7 +390,7 @@ def _fetch_traces_for_run(config: Config, jaeger: str, run_id: str,
     if manifest_runs is not None:
         # Only completed runs are guaranteed to emit a trace; timeout/failed
         # runs may not, so don't let them keep the retry loop waiting forever.
-        expected = sum(1 for r in manifest_runs if r.get("status") == "completed")
+        expected = sum(1 for r in manifest_runs if r.get("status") == RunStatus.SUCCESS.value)
 
     retries = max(1, config.runner.trace_fetch_retries)
     traces: list[Trace] = []
@@ -446,13 +446,13 @@ def _report_run_coverage(manifest_runs: list[dict[str, Any]], traces: list[Trace
     failed: list[str] = []
     for r in manifest_runs:
         label = f"{r.get('task')}/{r.get('variant')}/e{r.get('epoch')}"
-        status = r.get("status", "completed")
+        status = r.get("status", RunStatus.SUCCESS.value)
         has_trace = r.get("test_id") in trace_test_ids
-        if status == "timeout":
+        if status == RunStatus.TIMEOUT.value:
             failed.append(f"{label} (timeout)")
-        elif status == "failed":
+        elif status == RunStatus.FAILED.value:
             failed.append(f"{label} (exit {r.get('exit_code')})")
-        elif status == "setup_failed":
+        elif status == RunStatus.SETUP_FAILED.value:
             failed.append(f"{label} (setup_failed)")
         elif not has_trace:
             # Run reported as completed but no trace ingested → silently dropped.

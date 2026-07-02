@@ -29,8 +29,17 @@ from eval.env_utils import (
 from eval.env_utils import (
     load_env_file as _load_env_file,
 )
-from eval.protocols import RunArtifacts, RunContext
+from eval.protocols import (
+    RunArtifacts,
+    RunContext,
+    RunStatus,
+)
+from eval.protocols import (
+    status_from_exit_code as _status_from_exit_code,
+)
 from eval.runners.docker_cli_runner import DockerCLIRunner
+
+status_from_exit_code = _status_from_exit_code
 
 
 @dataclass
@@ -65,7 +74,7 @@ class RunResult:
     run_id: str
     log_file: Path
     exit_code: int
-    status: str = "completed"  # completed | setup_failed | timeout | failed
+    status: RunStatus = RunStatus.SUCCESS
     scores: list[EvalScore] = field(default_factory=list)
     order_index: int | None = None
     started_at: str | None = None
@@ -74,7 +83,7 @@ class RunResult:
 
     @property
     def passed(self) -> bool:
-        return self.status == "completed" and (all(s.passed for s in self.scores) if self.scores else True)
+        return self.status == RunStatus.SUCCESS and (all(s.passed for s in self.scores) if self.scores else True)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,7 +93,7 @@ class RunResult:
             "test_id": self.test_id,
             "run_id": self.run_id,
             "exit_code": self.exit_code,
-            "status": self.status,
+            "status": str(self.status),
             "passed": self.passed,
             "order_index": self.order_index,
             "started_at": self.started_at,
@@ -117,20 +126,6 @@ def score_to_dict(s: EvalScore) -> dict[str, Any]:
             "judge_version": s.judge_version,
         })
     return d
-
-
-def status_from_exit_code(exit_code: int) -> str:
-    """Map a process exit code to a run status.
-
-    124 is GNU `timeout`'s signal that the command was killed for exceeding
-    its time budget; any other non-zero code indicates a failed run.
-    """
-    if exit_code == 0:
-        return "completed"
-    if exit_code == 124:
-        return "timeout"
-    return "failed"
-
 
 def get_github_token() -> str:
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -181,7 +176,7 @@ def run_one(
                 return RunResult(
                     task=task.name, variant=variant.name, epoch=epoch,
                     test_id=test_id, run_id=run_id, log_file=log_file,
-                    exit_code=-1, status="setup_failed",
+                    exit_code=-1, status=RunStatus.SETUP_FAILED,
                 )
             print(f"    WARNING: before_run hook failed (exit {before_rc}) — continuing (on_failure=warn)")
             _append_log(log_file, f"before_run hook failed with exit code {before_rc}; continuing because hooks.on_failure=warn")
@@ -193,7 +188,7 @@ def run_one(
                 return RunResult(
                     task=task.name, variant=variant.name, epoch=epoch,
                     test_id=test_id, run_id=run_id, log_file=log_file,
-                    exit_code=-1, status="setup_failed", **_timing(),
+                    exit_code=-1, status=RunStatus.SETUP_FAILED, **_timing(),
                 )
 
         # Writable workspace: copy fixture to tmpdir so Copilot can read AND write
@@ -253,6 +248,15 @@ def run_one(
         # Persist output files to results dir before tmpdir cleanup
         _persist_output_files(work_dir, run_dir, task.name, variant.name, epoch)
         _persist_trace_file(work_dir, run_dir, task.name, variant.name, epoch)
+        if (
+            config.runner.collector == "file"
+            and artifacts.exit_code == 0
+            and not (work_dir / TRACE_FILE).exists()
+        ):
+            print(
+                "    WARNING: file collector enabled but no trace file was written; "
+                "ensure your Copilot CLI supports COPILOT_OTEL_FILE_EXPORTER_PATH."
+            )
 
         scores.extend(_run_evaluators(task, variant, config, log_file, github_token, work_dir))
         # Persist the full score set (hook + evaluator scores) so later analysis
@@ -269,7 +273,7 @@ def run_one(
             return RunResult(
                 task=task.name, variant=variant.name, epoch=epoch,
                 test_id=test_id, run_id=run_id, log_file=log_file,
-                exit_code=-1, status="setup_failed", scores=scores,
+                exit_code=-1, status=RunStatus.SETUP_FAILED, scores=scores,
             )
         print(f"    ✗ Run errored during post-processing: {exc}")
         _append_log(log_file, f"run_one raised during post-processing: {exc!r}")
@@ -280,7 +284,7 @@ def run_one(
         return RunResult(
             task=task.name, variant=variant.name, epoch=epoch,
             test_id=test_id, run_id=run_id, log_file=log_file,
-            exit_code=artifacts.exit_code, status=status_from_exit_code(artifacts.exit_code),
+            exit_code=artifacts.exit_code, status=artifacts.status,
             scores=scores,
         )
     finally:
@@ -294,7 +298,7 @@ def run_one(
     return RunResult(
         task=task.name, variant=variant.name, epoch=epoch,
         test_id=test_id, run_id=run_id, log_file=log_file,
-        exit_code=artifacts.exit_code, status=status_from_exit_code(artifacts.exit_code),
+        exit_code=artifacts.exit_code, status=artifacts.status,
         scores=scores, **_timing(),
     )
 
