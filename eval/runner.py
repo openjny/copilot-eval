@@ -17,7 +17,10 @@ from pathlib import Path
 from statistics import mean, median, pstdev
 from typing import Any
 
+from eval.collectors import create_collector
+from eval.collectors.file_collector import TRACE_FILE
 from eval.config import Config, Evaluator, Task, Variant
+from eval.protocols import RunContext
 
 
 @dataclass
@@ -193,20 +196,6 @@ def run_one(
         # same values as hooks/evaluators. Values are passed via --env-file rather
         # than -e KEY=value so they never appear in argv (`ps` leakage).
         env_file_arg = _write_sanitized_env_file(config)
-        cmd = [
-            "docker", "run", "--rm", "--add-host=host.docker.internal:host-gateway",
-            "--env-file", str(env_file_arg),
-            "-e", "GITHUB_TOKEN",
-            "-e", "COPILOT_OTEL_ENABLED=true",
-            "-e", f"COPILOT_OTEL_CAPTURE_CONTENT={'true' if config.runner.capture_content else 'false'}",
-            "-e", f"OTEL_EXPORTER_OTLP_ENDPOINT={config.runner.otel_endpoint}",
-            "-e", f"OTEL_RESOURCE_ATTRIBUTES={otel_attrs}",
-            "-e", "OTEL_SERVICE_NAME=github-copilot",
-        ]
-        copilot_home = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot")).resolve()
-        if copilot_home.is_dir():
-            cmd.extend(["-v", f"{copilot_home}:/copilot-home-src:ro"])
-
         # Writable workspace: copy fixture to tmpdir so Copilot can read AND write
         work_dir = Path(tempfile.mkdtemp(prefix="eval-work-"))
         fixture_dir = (config.config_dir / "fixtures" / (task.fixture or task.name)).resolve()
@@ -214,6 +203,33 @@ def run_one(
             shutil.copytree(fixture_dir, work_dir, dirs_exist_ok=True)
         # Create output dir for Copilot to write artifacts (used by judge evaluator)
         (work_dir / "output").mkdir(exist_ok=True)
+        collector_kwargs = {"jaeger_url": config.runner.jaeger_url} if config.runner.collector == "jaeger" else {}
+        collector = create_collector(config.runner.collector, **collector_kwargs)
+        collector_env = collector.exporter_env(RunContext(
+            run_id=run_id,
+            test_id=test_id,
+            epoch=epoch,
+            run_dir=run_dir,
+            task=task,
+            variant=variant,
+            config=config,
+            work_dir=work_dir,
+        ))
+        cmd = [
+            "docker", "run", "--rm", "--add-host=host.docker.internal:host-gateway",
+            "--env-file", str(env_file_arg),
+            "-e", "GITHUB_TOKEN",
+            "-e", "COPILOT_OTEL_ENABLED=true",
+            "-e", f"COPILOT_OTEL_CAPTURE_CONTENT={'true' if config.runner.capture_content else 'false'}",
+            "-e", f"OTEL_RESOURCE_ATTRIBUTES={otel_attrs}",
+            "-e", "OTEL_SERVICE_NAME=github-copilot",
+        ]
+        for key, value in collector_env.items():
+            cmd.extend(["-e", f"{key}={value}"])
+        copilot_home = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot")).resolve()
+        if copilot_home.is_dir():
+            cmd.extend(["-v", f"{copilot_home}:/copilot-home-src:ro"])
+
         cmd.extend(["-v", f"{work_dir}:/workspace"])
 
         if variant.run_script:
@@ -254,6 +270,7 @@ def run_one(
 
         # Persist output files to results dir before tmpdir cleanup
         _persist_output_files(work_dir, run_dir, task.name, variant.name, epoch)
+        _persist_trace_file(work_dir, run_dir, task.name, variant.name, epoch)
 
         scores.extend(_run_evaluators(task, variant, config, log_file, github_token, work_dir))
         # Persist the full score set (hook + evaluator scores) so later analysis
@@ -361,6 +378,29 @@ def _persist_output_files(work_dir: Path, run_dir: Path, task: str, variant: str
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(f, target)
+
+
+def _persist_trace_file(work_dir: Path, run_dir: Path, task: str, variant: str, epoch: int) -> None:
+    """Copy trace file from tmpdir to results dir for later analysis."""
+    del task, variant, epoch
+
+    trace_src = work_dir / TRACE_FILE
+    if not trace_src.exists():
+        return
+
+    payload = trace_src.read_text(encoding="utf-8")
+    if not payload:
+        return
+
+    trace_dest = run_dir / TRACE_FILE
+    trace_dest.parent.mkdir(parents=True, exist_ok=True)
+    needs_newline = trace_dest.exists() and trace_dest.stat().st_size > 0 and not payload.startswith("\n")
+    with open(trace_dest, "a", encoding="utf-8") as dest_f:
+        if needs_newline:
+            dest_f.write("\n")
+        dest_f.write(payload)
+        if not payload.endswith("\n"):
+            dest_f.write("\n")
 
 
 def _run_evaluators(task: Task, variant: Variant, config: Config, log_file: Path, token: str, work_dir: Path | None = None) -> list[EvalScore]:

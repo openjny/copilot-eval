@@ -18,6 +18,7 @@ PARALLEL_MODES = ("off", "per_task", "full")
 VARIANT_ORDER_MODES = ("fixed", "counterbalance", "random")
 OUTPUT_FORMATS = ("text", "json")
 JUDGE_AGGREGATE_MODES = ("median", "mean", "majority")
+COLLECTOR_TYPES = ("file", "jaeger")
 DEFAULT_OUTPUT_INSTRUCTION = "Save all output files under /workspace/output/."
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -56,7 +57,8 @@ class RunnerConfig:
     copilot_version: str = "1.0.18"
     otel_endpoint: str = "http://host.docker.internal:4318"
     jaeger_url: str = "http://localhost:16686"
-    # analyze: how many traces to request from Jaeger, and how long to wait
+    collector: str = "file"  # file | jaeger
+    # analyze: how many traces to request from a remote collector, and how long to wait
     # for ingestion to catch up with the expected set of runs.
     trace_fetch_limit: int = 2000
     trace_fetch_retries: int = 5
@@ -212,6 +214,11 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
             f"runner.judge_aggregate has invalid value '{judge_aggregate}'. "
             f"Must be one of: {', '.join(JUDGE_AGGREGATE_MODES)}."
         )
+    collector = runner_raw.get("collector", "file")
+    if collector not in COLLECTOR_TYPES:
+        raise ConfigError(
+            f"runner.collector has invalid value '{collector}'. Must be one of: {', '.join(COLLECTOR_TYPES)}."
+        )
 
     output_instruction = runner_raw.get("output_instruction")
     if output_instruction is None:
@@ -264,6 +271,7 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         copilot_version=runner_raw.get("copilot_version", "1.0.18"),
         otel_endpoint=runner_raw.get("otel_endpoint", "http://host.docker.internal:4318"),
         jaeger_url=runner_raw.get("jaeger_url", "http://localhost:16686"),
+        collector=collector,
         trace_fetch_limit=trace_fetch_limit,
         trace_fetch_retries=trace_fetch_retries,
         trace_fetch_retry_delay=trace_fetch_retry_delay,

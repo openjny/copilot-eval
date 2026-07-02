@@ -6,7 +6,7 @@
 eval-config.yaml
        ↓
   copilot-eval build     → Docker images per variant
-  copilot-eval run       → Containers → OTel → Jaeger
+  copilot-eval run       → Containers → OTel → Trace Collector (file by default, jaeger optional)
   copilot-eval analyze   → Traces → A/B report
 ```
 
@@ -19,6 +19,8 @@ eval/
 ├── cli.py        Click CLI: list, build, run, analyze
 ├── config.py     YAML config → dataclasses (Config, Task, Variant, Evaluator, Hooks)
 ├── runner.py     Single eval run: hooks → Docker container → evaluators
+├── protocols.py  AgentRunner / TraceCollector protocol interfaces (dual abstraction)
+├── collectors/   TraceCollector implementations: file_collector.py (default), jaeger_collector.py
 ├── trace.py      Jaeger API: fetch + parse OTel traces
 └── report.py     A/B comparison: build_report() → format_table/json/markdown
 
@@ -34,19 +36,20 @@ sequenceDiagram
     participant CLI as copilot-eval run
     participant Runner as runner.py
     participant Docker as Container
-    participant Jaeger as Jaeger
+    participant Collector as Trace Collector
 
     CLI->>Runner: run_one(task, variant, epoch)
     Runner->>Runner: before_run hook
     Runner->>Runner: health_check
     Runner->>Runner: Copy fixture → tmpdir + create output/
-    Runner->>Docker: docker run (tmpdir:/workspace)
+    Runner->>Collector: exporter_env() (file: JSONL path | jaeger: OTLP endpoint)
+    Runner->>Docker: docker run (tmpdir:/workspace, exporter env)
     Docker->>Docker: entrypoint.sh (auth merge)
     Docker->>Docker: copilot -p "prompt" --yolo
-    Docker->>Jaeger: OTel spans (OTLP)
+    Docker->>Docker: OTel spans → .traces/traces.jsonl (file, default) or → Jaeger (OTLP, optional)
     Docker-->>Runner: exit + log file
     Runner->>Runner: after_run hook
-    Runner->>Runner: persist output files + non-judge evaluators (script/contains/regex)
+    Runner->>Runner: persist output files + trace file + non-judge evaluators (script/contains/regex)
     Runner->>Runner: Cleanup tmpdir
     Runner-->>CLI: RunResult (status from exit code)
 ```
@@ -70,11 +73,11 @@ scores it:
 ```mermaid
 sequenceDiagram
     participant CLI as copilot-eval analyze
-    participant Jaeger as Jaeger
+    participant Collector as Trace Collector
     participant Trace as trace.py
     participant Judge as Judge LLM
 
-    CLI->>Jaeger: fetch_traces (server-side run_id filter) + reconcile manifest
+    CLI->>Collector: collect(run_context) — file: read results/<run_id>/.traces/traces.jsonl | jaeger: fetch_traces (server-side run_id filter) + reconcile manifest
     CLI->>Trace: extract_conversation (chronological by startTime)
     CLI->>Judge: run_judge (conversation + output files, ×judge_samples)
     Judge-->>CLI: {"score": N, "reason": "..."} per sample
@@ -109,9 +112,47 @@ COPILOT_HOME **must be writable** inside the container. The entrypoint merges ho
 
 Fixtures are copied to a host tmpdir and mounted as `/workspace` (read-write). An `output/` subdirectory is created automatically for Copilot to write artifacts. The tmpdir is cleaned up in a `finally` block after evaluators run.
 
+## Trace Collection
+
+The framework separates **execution** from **trace collection** via two protocols
+defined in `eval/protocols.py`:
+
+- **`AgentRunner`** — builds variant images and executes the Copilot container
+  (implemented by `runner.py`).
+- **`TraceCollector`** — tells the container how to export OTel spans
+  (`exporter_env()`) and reads the resulting spans back (`collect()`), implemented
+  by `eval/collectors/file_collector.py` and `eval/collectors/jaeger_collector.py`.
+
+`runner.collector` (in `eval-config.yaml`) selects the implementation via
+`eval/collectors/create_collector()`. Because the two protocols are decoupled,
+trace storage can change without touching container execution logic, and vice versa.
+
+### File collector (default)
+
+`collector: file` requires **no external infrastructure**:
+
+1. The runner sets `COPILOT_OTEL_EXPORTER_TYPE=file` and
+   `COPILOT_OTEL_FILE_EXPORTER_PATH=/workspace/.traces/traces.jsonl` as container env vars.
+2. Copilot CLI appends one JSON span per line to that file as the session runs.
+3. After the container exits, `runner.py` copies the file from the mounted tmpdir
+   (`/workspace/.traces/traces.jsonl`) to `results/<run_id>/.traces/traces.jsonl`,
+   before the tmpdir is cleaned up.
+4. `copilot-eval analyze` reads `results/<run_id>/.traces/traces.jsonl` directly
+   (`file_collector.py: parse_file_traces`) — no network calls, no ingestion delay.
+
+### Jaeger collector (optional)
+
+`collector: jaeger` remains supported for **backward compatibility** and for
+**advanced debugging/visualization** — the Jaeger UI lets you browse spans
+interactively, which the file collector doesn't provide. It requires a running
+Jaeger instance (`docker-compose.yml`); spans are exported over OTLP to
+`otel_endpoint`, and `analyze` fetches them back from Jaeger's HTTP API
+(`jaeger_url`), retrying while ingestion catches up.
+
 ## OTel Tracing
 
-Copilot CLI emits spans for each agent session:
+Copilot CLI emits spans for each agent session (the span shape below is shared by
+both collectors):
 
 ```
 invoke_agent (root)
@@ -123,7 +164,7 @@ invoke_agent (root)
 
 Tags include `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `tool.name`, etc.
 
-`trace.py` fetches spans from Jaeger's HTTP API using a **server-side tag filter**
+When using the **Jaeger collector**, `trace.py` fetches spans from Jaeger's HTTP API using a **server-side tag filter**
 on `eval.run_id` (so large runs aren't truncated by the request limit) and a
 high, configurable `trace_fetch_limit`. `analyze` retries the fetch while trace
 ingestion catches up with the expected run count (from the manifest), then
@@ -147,7 +188,7 @@ filters defensively by `eval.run_id` / `eval.test_id` as a safety net.
 `report.py` builds per-task A/B comparisons:
 
 1. Groups results by task
-2. Fetches traces from Jaeger for each run
+2. Fetches traces via the configured collector for each run
 3. Computes metrics (duration, turns, tokens, tool calls)
 4. Supports three aggregation modes:
    - **paired** (default): Per-epoch delta → median

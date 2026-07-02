@@ -1,3 +1,5 @@
+# Optional: Only required when runner.collector is set to "jaeger" in eval-config.yaml.
+# The default "file" collector does not require Jaeger or any external infrastructure.
 services:
   jaeger:
     image: jaegertracing/all-in-one:latest
