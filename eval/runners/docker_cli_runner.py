@@ -17,7 +17,13 @@ _CONTAINER_RUN_SCRIPT = "/workspace/eval-setup.sh"
 
 
 class DockerCLIRunner:
-    """Docker-based Copilot CLI runner."""
+    """Docker-based Copilot CLI runner.
+
+    NOTE: This is scaffolding for the next phase of the refactoring.
+    Currently, ``run_one()`` in ``eval.runner`` still handles Docker execution
+    directly. This class will replace that logic once the orchestrator is
+    refactored to delegate to ``AgentRunner.run()``.
+    """
 
     def __init__(self, github_token: str) -> None:
         self.github_token = github_token

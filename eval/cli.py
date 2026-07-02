@@ -420,12 +420,17 @@ def _fetch_traces_from_files(config: Config, run_id: str, results_dir: Path,
     del config, manifest_runs
 
     all_traces: list[Trace] = []
-    trace_file = results_dir / TRACE_FILE
-    if trace_file.exists():
-        all_traces = parse_file_traces(trace_file)
+    traces_dir = results_dir / TRACE_FILE.parent
+    if traces_dir.is_dir():
+        trace_paths = sorted(traces_dir.glob("*.jsonl"))
     else:
-        for trace_path in results_dir.rglob("traces.jsonl"):
-            all_traces.extend(parse_file_traces(trace_path))
+        trace_paths = [
+            trace_path
+            for trace_path in sorted(results_dir.rglob("*.jsonl"))
+            if TRACE_FILE.parent.name in trace_path.parts
+        ]
+    for trace_path in trace_paths:
+        all_traces.extend(parse_file_traces(trace_path))
 
     if run_id:
         all_traces = filter_by_run(all_traces, run_id)

@@ -22,7 +22,11 @@ class FileCollector:
         }
 
     def collect(self, run_context: RunContext) -> list[Trace]:
-        traces = parse_file_traces(run_context.run_dir / TRACE_FILE)
+        traces: list[Trace] = []
+        traces_dir = run_context.run_dir / TRACE_FILE.parent
+        if traces_dir.is_dir():
+            for trace_path in sorted(traces_dir.glob("*.jsonl")):
+                traces.extend(parse_file_traces(trace_path))
         if run_context.run_id:
             return [
                 trace for trace in traces

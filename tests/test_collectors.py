@@ -26,6 +26,15 @@ def _write_trace_fixture(run_dir: Path) -> Path:
     return trace_file
 
 
+def _fixture_payload(run_id: str = "spike-run", test_id: str = "spike-001", trace_id: str = "c5b55d939c5df4939aa20c7090a13cc9") -> str:
+    return (
+        FIXTURE.read_text(encoding="utf-8")
+        .replace("spike-run", run_id)
+        .replace("spike-001", test_id)
+        .replace("c5b55d939c5df4939aa20c7090a13cc9", trace_id)
+    )
+
+
 def test_file_collector_parses_fixture(tmp_path: Path):
     trace_file = _write_trace_fixture(tmp_path)
 
@@ -36,6 +45,22 @@ def test_file_collector_parses_fixture(tmp_path: Path):
     trace = traces[0]
     assert trace.trace_id == "c5b55d939c5df4939aa20c7090a13cc9"
     assert {span.name for span in trace.spans} == {"chat claude-opus-4.8", "invoke_agent"}
+
+
+def test_file_collector_collects_multiple_trace_files(tmp_path: Path):
+    trace_dir = tmp_path / ".traces"
+    trace_dir.mkdir()
+    (trace_dir / "task_a_epoch1.jsonl").write_text(_fixture_payload(), encoding="utf-8")
+    (trace_dir / "task_b_epoch1.jsonl").write_text(
+        _fixture_payload(run_id="run-2", test_id="test-2", trace_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        encoding="utf-8",
+    )
+
+    traces = FileCollector().collect(_run_context(tmp_path, "run-2"))
+
+    assert len(traces) == 1
+    assert traces[0].trace_id == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert traces[0].resource_tags["eval.run_id"] == "run-2"
 
 
 def test_file_collector_normalizes_time():
@@ -73,7 +98,7 @@ def test_file_collector_exporter_env():
 def test_jaeger_collector_exporter_env():
     assert JaegerCollector("http://localhost:16686").exporter_env(_run_context(Path("."))) == {
         "COPILOT_OTEL_EXPORTER_TYPE": "otlp-http",
-        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://host.docker.internal:4318",
     }
 
 

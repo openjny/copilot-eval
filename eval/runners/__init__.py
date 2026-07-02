@@ -1,4 +1,10 @@
-"""Runner implementations."""
+"""Runner implementations.
+
+NOTE: These runners are not yet wired into the main execution path
+(``eval.runner.run_one``). They serve as the target architecture for the next
+refactoring phase. The current production path remains in
+``eval.runner.run_one()``.
+"""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

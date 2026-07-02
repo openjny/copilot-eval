@@ -18,7 +18,6 @@ PARALLEL_MODES = ("off", "per_task", "full")
 VARIANT_ORDER_MODES = ("fixed", "counterbalance", "random")
 OUTPUT_FORMATS = ("text", "json")
 JUDGE_AGGREGATE_MODES = ("median", "mean", "majority")
-COLLECTOR_TYPES = ("file", "jaeger")
 DEFAULT_OUTPUT_INSTRUCTION = "Save all output files under /workspace/output/."
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -215,9 +214,12 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
             f"Must be one of: {', '.join(JUDGE_AGGREGATE_MODES)}."
         )
     collector = runner_raw.get("collector", "file")
-    if collector not in COLLECTOR_TYPES:
+    from eval.collectors import COLLECTOR_TYPES as COLLECTOR_REGISTRY
+
+    collector_types = tuple(sorted(COLLECTOR_REGISTRY))
+    if collector not in collector_types:
         raise ConfigError(
-            f"runner.collector has invalid value '{collector}'. Must be one of: {', '.join(COLLECTOR_TYPES)}."
+            f"runner.collector has invalid value '{collector}'. Must be one of: {', '.join(collector_types)}."
         )
 
     output_instruction = runner_raw.get("output_instruction")

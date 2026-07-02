@@ -203,7 +203,14 @@ def run_one(
             shutil.copytree(fixture_dir, work_dir, dirs_exist_ok=True)
         # Create output dir for Copilot to write artifacts (used by judge evaluator)
         (work_dir / "output").mkdir(exist_ok=True)
-        collector_kwargs = {"jaeger_url": config.runner.jaeger_url} if config.runner.collector == "jaeger" else {}
+        collector_kwargs = (
+            {
+                "jaeger_url": config.runner.jaeger_url,
+                "otel_endpoint": config.runner.otel_endpoint,
+            }
+            if config.runner.collector == "jaeger"
+            else {}
+        )
         collector = create_collector(config.runner.collector, **collector_kwargs)
         collector_env = collector.exporter_env(RunContext(
             run_id=run_id,
@@ -381,26 +388,13 @@ def _persist_output_files(work_dir: Path, run_dir: Path, task: str, variant: str
 
 
 def _persist_trace_file(work_dir: Path, run_dir: Path, task: str, variant: str, epoch: int) -> None:
-    """Copy trace file from tmpdir to results dir for later analysis."""
-    del task, variant, epoch
-
+    """Copy trace file from work tmpdir to results dir for later analysis."""
     trace_src = work_dir / TRACE_FILE
     if not trace_src.exists():
         return
-
-    payload = trace_src.read_text(encoding="utf-8")
-    if not payload:
-        return
-
-    trace_dest = run_dir / TRACE_FILE
+    trace_dest = run_dir / TRACE_FILE.parent / f"{task}_{variant}_epoch{epoch}.jsonl"
     trace_dest.parent.mkdir(parents=True, exist_ok=True)
-    needs_newline = trace_dest.exists() and trace_dest.stat().st_size > 0 and not payload.startswith("\n")
-    with open(trace_dest, "a", encoding="utf-8") as dest_f:
-        if needs_newline:
-            dest_f.write("\n")
-        dest_f.write(payload)
-        if not payload.endswith("\n"):
-            dest_f.write("\n")
+    shutil.copy2(trace_src, trace_dest)
 
 
 def _run_evaluators(task: Task, variant: Variant, config: Config, log_file: Path, token: str, work_dir: Path | None = None) -> list[EvalScore]:
