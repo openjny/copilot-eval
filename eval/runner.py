@@ -17,7 +17,29 @@ from pathlib import Path
 from statistics import mean, median, pstdev
 from typing import Any
 
+from eval.collectors import create_collector
+from eval.collectors.file_collector import TRACE_FILE
 from eval.config import Config, Evaluator, Task, Variant
+from eval.env_utils import (
+    _SECRET_PLACEHOLDER,
+    collect_secrets,
+    strip_quotes,
+    write_sanitized_env_file,
+)
+from eval.env_utils import (
+    load_env_file as _load_env_file,
+)
+from eval.protocols import (
+    RunArtifacts,
+    RunContext,
+    RunStatus,
+)
+from eval.protocols import (
+    status_from_exit_code as _status_from_exit_code,
+)
+from eval.runners.docker_cli_runner import DockerCLIRunner
+
+status_from_exit_code = _status_from_exit_code
 
 
 @dataclass
@@ -52,7 +74,7 @@ class RunResult:
     run_id: str
     log_file: Path
     exit_code: int
-    status: str = "completed"  # completed | setup_failed | timeout | failed
+    status: RunStatus = RunStatus.SUCCESS
     scores: list[EvalScore] = field(default_factory=list)
     order_index: int | None = None
     started_at: str | None = None
@@ -61,7 +83,7 @@ class RunResult:
 
     @property
     def passed(self) -> bool:
-        return self.status == "completed" and (all(s.passed for s in self.scores) if self.scores else True)
+        return self.status == RunStatus.SUCCESS and (all(s.passed for s in self.scores) if self.scores else True)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,7 +93,7 @@ class RunResult:
             "test_id": self.test_id,
             "run_id": self.run_id,
             "exit_code": self.exit_code,
-            "status": self.status,
+            "status": str(self.status),
             "passed": self.passed,
             "order_index": self.order_index,
             "started_at": self.started_at,
@@ -104,20 +126,6 @@ def score_to_dict(s: EvalScore) -> dict[str, Any]:
             "judge_version": s.judge_version,
         })
     return d
-
-
-def status_from_exit_code(exit_code: int) -> str:
-    """Map a process exit code to a run status.
-
-    124 is GNU `timeout`'s signal that the command was killed for exceeding
-    its time budget; any other non-zero code indicates a failed run.
-    """
-    if exit_code == 0:
-        return "completed"
-    if exit_code == 124:
-        return "timeout"
-    return "failed"
-
 
 def get_github_token() -> str:
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -155,10 +163,10 @@ def run_one(
 
     # Tracked across the run so the outer `finally` can always clean up and
     # redact secrets, even on early returns (e.g. setup_failed) or exceptions.
-    env_file_arg: Path | None = None
     work_dir: Path | None = None
     scores: list[EvalScore] = []
-    proc: subprocess.CompletedProcess[bytes] | None = None
+    artifacts: RunArtifacts | None = None
+    container_run_completed = False
     try:
         before_rc = _run_hook(task.hooks.before_run, config, task, variant, log_file, "before_run")
         if before_rc != 0:
@@ -168,7 +176,7 @@ def run_one(
                 return RunResult(
                     task=task.name, variant=variant.name, epoch=epoch,
                     test_id=test_id, run_id=run_id, log_file=log_file,
-                    exit_code=-1, status="setup_failed",
+                    exit_code=-1, status=RunStatus.SETUP_FAILED,
                 )
             print(f"    WARNING: before_run hook failed (exit {before_rc}) — continuing (on_failure=warn)")
             _append_log(log_file, f"before_run hook failed with exit code {before_rc}; continuing because hooks.on_failure=warn")
@@ -180,67 +188,52 @@ def run_one(
                 return RunResult(
                     task=task.name, variant=variant.name, epoch=epoch,
                     test_id=test_id, run_id=run_id, log_file=log_file,
-                    exit_code=-1, status="setup_failed", **_timing(),
+                    exit_code=-1, status=RunStatus.SETUP_FAILED, **_timing(),
                 )
-
-        prompt = config.resolve_prompt(task, variant)
-        image = config.image_name(variant)
-        otel_attrs = ",".join([
-            f"eval.test_id={test_id}", f"eval.scenario={task.name}",
-            f"eval.variant={variant.name}", f"eval.epoch={epoch}", f"eval.run_id={run_id}",
-        ])
-        # Build a sanitized env file (quotes stripped) so the container sees the
-        # same values as hooks/evaluators. Values are passed via --env-file rather
-        # than -e KEY=value so they never appear in argv (`ps` leakage).
-        env_file_arg = _write_sanitized_env_file(config)
-        cmd = [
-            "docker", "run", "--rm", "--add-host=host.docker.internal:host-gateway",
-            "--env-file", str(env_file_arg),
-            "-e", "GITHUB_TOKEN",
-            "-e", "COPILOT_OTEL_ENABLED=true",
-            "-e", f"COPILOT_OTEL_CAPTURE_CONTENT={'true' if config.runner.capture_content else 'false'}",
-            "-e", f"OTEL_EXPORTER_OTLP_ENDPOINT={config.runner.otel_endpoint}",
-            "-e", f"OTEL_RESOURCE_ATTRIBUTES={otel_attrs}",
-            "-e", "OTEL_SERVICE_NAME=github-copilot",
-        ]
-        copilot_home = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot")).resolve()
-        if copilot_home.is_dir():
-            cmd.extend(["-v", f"{copilot_home}:/copilot-home-src:ro"])
 
         # Writable workspace: copy fixture to tmpdir so Copilot can read AND write
         work_dir = Path(tempfile.mkdtemp(prefix="eval-work-"))
         fixture_dir = (config.config_dir / "fixtures" / (task.fixture or task.name)).resolve()
         if fixture_dir.is_dir():
             shutil.copytree(fixture_dir, work_dir, dirs_exist_ok=True)
-        # Create output dir for Copilot to write artifacts (used by judge evaluator)
+        # Create directories DockerCLIRunner expects and Copilot writes into.
         (work_dir / "output").mkdir(exist_ok=True)
-        cmd.extend(["-v", f"{work_dir}:/workspace"])
-
-        if variant.run_script:
-            rsp = (config.project_dir / variant.run_script).resolve()
-            if rsp.exists():
-                cmd.extend(["-v", f"{rsp}:/tmp/eval-setup.sh:ro", "-e", "EVAL_SETUP_SCRIPT=/tmp/eval-setup.sh"])
-
-        copilot_args = ["copilot", "-p", prompt, "--yolo"]
-        model = variant.model or config.runner.model
-        if model:
-            copilot_args.extend(["--model", model])
-        if config.runner.reasoning_effort:
-            copilot_args.extend(["--effort", config.runner.reasoning_effort])
-        if config.runner.max_turns:
-            copilot_args.extend(["--max-autopilot-continues", str(config.runner.max_turns)])
-        if config.runner.output_format == "json":
-            copilot_args.extend(["--output-format", "json"])
-        timeout = task.timeout_seconds or config.runner.timeout_seconds
-        cmd.extend([image, "timeout", f"{timeout}s", *copilot_args])
+        (work_dir / TRACE_FILE.parent).mkdir(exist_ok=True)
+        collector_kwargs = (
+            {
+                "jaeger_url": config.runner.jaeger_url,
+                "otel_endpoint": config.runner.otel_endpoint,
+            }
+            if config.runner.collector == "jaeger"
+            else {}
+        )
+        collector = create_collector(config.runner.collector, **collector_kwargs)
+        collector_context = RunContext(
+            run_id=run_id,
+            test_id=test_id,
+            epoch=epoch,
+            run_dir=run_dir,
+            task=task,
+            variant=variant,
+            config=config,
+            work_dir=work_dir,
+        )
+        run_context = RunContext(
+            run_id=run_id,
+            test_id=test_id,
+            epoch=epoch,
+            run_dir=run_dir,
+            task=task,
+            variant=variant,
+            config=config,
+            extra_env=collector.exporter_env(collector_context),
+            work_dir=work_dir,
+        )
 
         print("    Running copilot in container...")
-        # Pass GITHUB_TOKEN through the process environment rather than embedding the
-        # value in argv, so it does not leak via `ps` / process-args listings.
-        # (Residual exposure via `docker inspect` requires Docker socket access.)
-        run_env = {**os.environ, "GITHUB_TOKEN": github_token}
-        with open(log_file, "a") as lf:
-            proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=run_env)
+        runner = DockerCLIRunner(github_token, run_command=subprocess.run)
+        artifacts = runner.run(run_context)
+        container_run_completed = True
         _print_summary(log_file)
 
         after_rc = _run_hook(task.hooks.after_run, config, task, variant, log_file, "after_run")
@@ -254,6 +247,16 @@ def run_one(
 
         # Persist output files to results dir before tmpdir cleanup
         _persist_output_files(work_dir, run_dir, task.name, variant.name, epoch)
+        _persist_trace_file(work_dir, run_dir, task.name, variant.name, epoch)
+        if (
+            config.runner.collector == "file"
+            and artifacts.exit_code == 0
+            and not (work_dir / TRACE_FILE).exists()
+        ):
+            print(
+                "    WARNING: file collector enabled but no trace file was written; "
+                "ensure your Copilot CLI supports COPILOT_OTEL_FILE_EXPORTER_PATH."
+            )
 
         scores.extend(_run_evaluators(task, variant, config, log_file, github_token, work_dir))
         # Persist the full score set (hook + evaluator scores) so later analysis
@@ -264,13 +267,13 @@ def run_one(
         # A failure before the container ran is a setup problem; a failure during
         # post-processing (persist/evaluators/after_run) happened after a real run,
         # so preserve the container's exit status instead of mislabeling it.
-        if proc is None:
+        if not container_run_completed or artifacts is None:
             print(f"    ✗ Run errored during setup: {exc}")
             _append_log(log_file, f"run_one raised during setup: {exc!r}")
             return RunResult(
                 task=task.name, variant=variant.name, epoch=epoch,
                 test_id=test_id, run_id=run_id, log_file=log_file,
-                exit_code=-1, status="setup_failed", scores=scores,
+                exit_code=-1, status=RunStatus.SETUP_FAILED, scores=scores,
             )
         print(f"    ✗ Run errored during post-processing: {exc}")
         _append_log(log_file, f"run_one raised during post-processing: {exc!r}")
@@ -281,14 +284,12 @@ def run_one(
         return RunResult(
             task=task.name, variant=variant.name, epoch=epoch,
             test_id=test_id, run_id=run_id, log_file=log_file,
-            exit_code=proc.returncode, status=status_from_exit_code(proc.returncode),
+            exit_code=artifacts.exit_code, status=artifacts.status,
             scores=scores,
         )
     finally:
         if work_dir is not None:
             shutil.rmtree(work_dir, ignore_errors=True)
-        if env_file_arg is not None:
-            env_file_arg.unlink(missing_ok=True)
         # Redact secret values from the persisted log. Done in `finally` (after
         # evaluators, which read the raw log for contains/regex) so it also
         # covers early returns and exceptions, and never skews evaluator results.
@@ -297,7 +298,7 @@ def run_one(
     return RunResult(
         task=task.name, variant=variant.name, epoch=epoch,
         test_id=test_id, run_id=run_id, log_file=log_file,
-        exit_code=proc.returncode, status=status_from_exit_code(proc.returncode),
+        exit_code=artifacts.exit_code, status=artifacts.status,
         scores=scores, **_timing(),
     )
 
@@ -361,6 +362,16 @@ def _persist_output_files(work_dir: Path, run_dir: Path, task: str, variant: str
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(f, target)
+
+
+def _persist_trace_file(work_dir: Path, run_dir: Path, task: str, variant: str, epoch: int) -> None:
+    """Copy trace file from work tmpdir to results dir for later analysis."""
+    trace_src = work_dir / TRACE_FILE
+    if not trace_src.exists():
+        return
+    trace_dest = run_dir / TRACE_FILE.parent / f"{task}_{variant}_epoch{epoch}.jsonl"
+    trace_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(trace_src, trace_dest)
 
 
 def _run_evaluators(task: Task, variant: Variant, config: Config, log_file: Path, token: str, work_dir: Path | None = None) -> list[EvalScore]:
@@ -696,64 +707,8 @@ def _parse_json(text: str, require_keys: tuple[str, ...] | None = None) -> dict[
 
 
 def _strip_quotes(value: str) -> str:
-    """Remove a single pair of matching surrounding quotes from a value.
-
-    Mirrors standard dotenv semantics: ``KEY="value"`` and ``KEY='value'``
-    yield ``value`` (without the quotes). Values without matching surrounding
-    quotes are returned unchanged.
-    """
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-        return value[1:-1]
-    return value
-
-
-def _load_env_file(env_file: Path) -> dict[str, str]:
-    """Parse a .env file into a dict, ignoring comments and empty lines.
-
-    Surrounding matching quotes are stripped from values so hooks and
-    evaluator scripts receive the same value the container sees (the sanitized
-    env file passed to ``docker --env-file`` is built from this same parse).
-    """
-    env: dict[str, str] = {}
-    if not env_file.exists():
-        return env
-    for line in env_file.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" in line:
-            key, _, value = line.partition("=")
-            env[key.strip()] = _strip_quotes(value.strip())
-    return env
-
-
-# Values shorter than this are not treated as secrets to mask, to avoid
-# redacting trivial non-sensitive values like "1", "true", or short flags.
-_MIN_SECRET_LEN = 6
-_SECRET_PLACEHOLDER = "***REDACTED***"
-
-
-def collect_secrets(config: Config, token: str | None = None) -> list[str]:
-    """Collect secret values to redact from logs and judge input.
-
-    Combines the values of the project's ``.env`` file with ``GITHUB_TOKEN``
-    (and any explicitly provided ``token``). Short values are filtered out to
-    avoid masking trivial, non-sensitive values.
-    """
-    candidates = list(_load_env_file(config.env_file).values())
-    candidates.append(os.environ.get("GITHUB_TOKEN", ""))
-    if token:
-        candidates.append(token)
-    secrets: list[str] = []
-    seen: set[str] = set()
-    for value in candidates:
-        value = (value or "").strip()
-        if len(value) >= _MIN_SECRET_LEN and value not in seen:
-            seen.add(value)
-            secrets.append(value)
-    # Mask longer values first so overlapping substrings are handled correctly.
-    secrets.sort(key=len, reverse=True)
-    return secrets
+    """Backward-compatible alias for :func:`eval.env_utils.strip_quotes`."""
+    return strip_quotes(value)
 
 
 def mask_secrets(text: str | None, secrets: list[str]) -> str | None:
@@ -767,21 +722,8 @@ def mask_secrets(text: str | None, secrets: list[str]) -> str | None:
 
 
 def _write_sanitized_env_file(config: Config) -> Path:
-    """Write a quote-stripped copy of the project's .env for ``docker --env-file``.
-
-    Returns a temp file path (mode 0600) so the container receives the same
-    normalized values as hooks/evaluators, without exposing them via argv. The
-    caller is responsible for deleting the returned file. If no .env exists, an
-    empty temp file is returned so ``--env-file`` still gets a valid path.
-    """
-    parsed = _load_env_file(config.env_file)
-    fd, name = tempfile.mkstemp(prefix="eval-env-", suffix=".env")
-    path = Path(name)
-    os.chmod(path, 0o600)
-    with os.fdopen(fd, "w") as f:
-        for key, value in parsed.items():
-            f.write(f"{key}={value}\n")
-    return path
+    """Backward-compatible alias for :func:`eval.env_utils.write_sanitized_env_file`."""
+    return write_sanitized_env_file(config)
 
 
 def _mask_log_file(log_file: Path, secrets: list[str]) -> None:

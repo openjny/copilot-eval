@@ -14,7 +14,9 @@ from typing import Any
 import click
 import requests
 
+from eval.collectors import create_collector
 from eval.config import Config, Task, Variant, load_config
+from eval.protocols import RunContext, RunStatus
 from eval.report import build_report, format_json, format_markdown, format_table
 from eval.runner import RunResult, get_github_token, run_one
 from eval.trace import (
@@ -27,9 +29,9 @@ from eval.trace import (
 )
 
 
-def _ensure_jaeger(config: Config) -> None:
+def _ensure_jaeger(config: Config, jaeger_url: str | None = None) -> None:
     """Check if Jaeger is reachable, start it via docker compose if not."""
-    jaeger_url = config.runner.jaeger_url
+    jaeger_url = jaeger_url or config.runner.jaeger_url
     try:
         requests.get(f"{jaeger_url}/api/services", timeout=3)
         return  # already running
@@ -146,7 +148,7 @@ def _safe_run_one(
             task=task.name, variant=variant.name, epoch=epoch,
             test_id=uuid.uuid4().hex, run_id=run_id,
             log_file=run_dir / f"{task.name}_{variant.name}_epoch{epoch}.log",
-            exit_code=-1, status="setup_failed", order_index=order_index,
+            exit_code=-1, status=RunStatus.SETUP_FAILED, order_index=order_index,
         )
 
 
@@ -188,6 +190,7 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
     click.echo(f" Epochs:   {epochs}")
     click.echo(f" Timeout:  {config.runner.timeout_seconds}s")
     click.echo(f" Parallel: {config.runner.parallel}")
+    click.echo(f" Collector: {config.runner.collector}")
     order_desc = config.runner.variant_order
     if config.runner.variant_order == "random" and config.runner.seed is not None:
         order_desc += f" (seed={config.runner.seed})"
@@ -207,7 +210,8 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
         click.echo(f"[dry-run] Would run {epochs} epoch(s) × {len(config.variants)} variants for each task.")
         return
 
-    _ensure_jaeger(config)
+    if config.runner.collector == "jaeger":
+        _ensure_jaeger(config)
     github_token = get_github_token()
     if not no_build:
         _ensure_images(config, github_token)
@@ -277,8 +281,8 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
     # Summary
     passed = sum(1 for r in results if r.passed)
     failed = sum(1 for r in results if not r.passed)
-    timed_out = sum(1 for r in results if r.status == "timeout")
-    errored = sum(1 for r in results if r.status in ("failed", "setup_failed"))
+    timed_out = sum(1 for r in results if r.status == RunStatus.TIMEOUT)
+    errored = sum(1 for r in results if r.status in (RunStatus.FAILED, RunStatus.SETUP_FAILED))
 
     # Persist a run manifest so `analyze` knows the full expected set of runs
     # (including failed/timeout runs that may have produced no trace).
@@ -295,7 +299,10 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
     click.echo(f" Results: {passed} passed, {failed} failed")
     if timed_out or errored:
         click.echo(f"   (of which {timed_out} timed out, {errored} errored)")
-    click.echo(f" Jaeger:  {config.runner.jaeger_url}")
+    if config.runner.collector == "jaeger":
+        click.echo(f" Jaeger:  {config.runner.jaeger_url}")
+    else:
+        click.echo(f" Collector: {config.runner.collector}")
     analyze_cmd = f"uv run copilot-eval analyze --run-id {run_id}"
     if config_dir:
         analyze_cmd += f" --config-dir {config_dir}"
@@ -307,7 +314,7 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
 @click.option("--run-id", required=True, help="Run ID to analyze")
 @click.option("--output", "-o", type=click.Choice(["table", "json", "markdown"]), default="table", help="Output format")
 @click.option("--aggregate", "-a", type=click.Choice(["paired", "median", "mean"]), default="paired", help="Aggregation method")
-@click.option("--jaeger-url", default=None, help="Jaeger URL (default: runner.jaeger_url from config)")
+@click.option("--jaeger-url", default=None, help="Jaeger URL override (forces jaeger collector)")
 @click.option("--config-dir", default=None, type=click.Path(exists=True))
 @click.option("--skip-eval", is_flag=True, help="Skip judge evaluation, use existing scores")
 @click.option("--re-eval", is_flag=True, help="Force re-run judge evaluation (ignore cached scores)")
@@ -315,13 +322,19 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
             config_dir: str | None, skip_eval: bool, re_eval: bool) -> None:
     """Analyze traces from a previous eval run."""
     config = load_config(Path(config_dir) if config_dir else None)
-    jaeger = jaeger_url or config.runner.jaeger_url
     results_dir = config.results_dir / run_id
 
     manifest_runs = _load_manifest(results_dir)
 
-    click.echo(f"Fetching traces from {jaeger} for run {run_id}...", err=True)
-    traces = _fetch_traces_for_run(config, jaeger, run_id, manifest_runs)
+    collector_type = "jaeger" if jaeger_url else config.runner.collector
+    if collector_type == "jaeger":
+        jaeger = jaeger_url or config.runner.jaeger_url
+        _ensure_jaeger(config, jaeger)
+        click.echo(f"Fetching traces from {jaeger} for run {run_id}...", err=True)
+        traces = _fetch_traces_for_run(config, jaeger, run_id, manifest_runs)
+    else:
+        click.echo(f"Reading traces from file collector for run {run_id}...", err=True)
+        traces = _collect_file_traces(config, run_id, results_dir)
 
     metrics: list[RunMetrics] = [m for m in (extract_metrics(t) for t in traces) if m is not None]
 
@@ -377,7 +390,7 @@ def _fetch_traces_for_run(config: Config, jaeger: str, run_id: str,
     if manifest_runs is not None:
         # Only completed runs are guaranteed to emit a trace; timeout/failed
         # runs may not, so don't let them keep the retry loop waiting forever.
-        expected = sum(1 for r in manifest_runs if r.get("status") == "completed")
+        expected = sum(1 for r in manifest_runs if r.get("status") == RunStatus.SUCCESS.value)
 
     retries = max(1, config.runner.trace_fetch_retries)
     traces: list[Trace] = []
@@ -402,6 +415,29 @@ def _fetch_traces_for_run(config: Config, jaeger: str, run_id: str,
     return traces
 
 
+def _fetch_traces_from_files(config: Config, run_id: str, results_dir: Path,
+                             manifest_runs: list[dict[str, Any]] | None) -> list[Trace]:
+    """Deprecated compatibility wrapper for file trace collection."""
+    del manifest_runs
+    return _collect_file_traces(config, run_id, results_dir)
+
+
+def _collect_file_traces(config: Config, run_id: str, results_dir: Path) -> list[Trace]:
+    """Collect traces from file exporter output stored in results directory."""
+    task = config.tasks[0] if config.tasks else Task(name="analyze", prompt="")
+    variant = config.variants[0] if config.variants else Variant(name="analyze")
+    collector = create_collector("file")
+    return collector.collect(RunContext(
+        run_id=run_id,
+        test_id="",
+        epoch=0,
+        run_dir=results_dir,
+        task=task,
+        variant=variant,
+        config=config,
+    ))
+
+
 def _report_run_coverage(manifest_runs: list[dict[str, Any]], traces: list[Trace]) -> None:
     """Reconcile persisted runs against ingested traces and warn about gaps."""
     trace_test_ids = {t.resource_tags.get("eval.test_id") for t in traces}
@@ -410,13 +446,13 @@ def _report_run_coverage(manifest_runs: list[dict[str, Any]], traces: list[Trace
     failed: list[str] = []
     for r in manifest_runs:
         label = f"{r.get('task')}/{r.get('variant')}/e{r.get('epoch')}"
-        status = r.get("status", "completed")
+        status = r.get("status", RunStatus.SUCCESS.value)
         has_trace = r.get("test_id") in trace_test_ids
-        if status == "timeout":
+        if status == RunStatus.TIMEOUT.value:
             failed.append(f"{label} (timeout)")
-        elif status == "failed":
+        elif status == RunStatus.FAILED.value:
             failed.append(f"{label} (exit {r.get('exit_code')})")
-        elif status == "setup_failed":
+        elif status == RunStatus.SETUP_FAILED.value:
             failed.append(f"{label} (setup_failed)")
         elif not has_trace:
             # Run reported as completed but no trace ingested → silently dropped.

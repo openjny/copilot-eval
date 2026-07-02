@@ -1,8 +1,11 @@
 """Tests for CLI scheduling helpers (variant ordering for bias reduction)."""
 import random
+from pathlib import Path
 
-from eval.cli import _ordering_rng, order_variants
-from eval.config import Variant
+from eval.cli import _fetch_traces_from_files, _ordering_rng, order_variants
+from eval.config import Config, RunnerConfig, Variant
+
+FIXTURE = Path(__file__).parent / "fixtures" / "file-exporter-sample.jsonl"
 
 
 def _variants(*names: str) -> list[Variant]:
@@ -93,3 +96,34 @@ def test_ordering_rng_returns_fresh_instance_each_call():
 def test_ordering_rng_none_seed_is_nondeterministic():
     r = _ordering_rng(None, "x")
     assert isinstance(r, random.Random)
+
+
+def test_fetch_traces_from_files_reads_all_per_run_files(tmp_path: Path):
+    results_dir = tmp_path / "results"
+    traces_dir = results_dir / ".traces"
+    traces_dir.mkdir(parents=True)
+    traces_dir.joinpath("task_a_epoch1.jsonl").write_text(
+        FIXTURE.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    traces_dir.joinpath("task_b_epoch1.jsonl").write_text(
+        FIXTURE.read_text(encoding="utf-8")
+        .replace("spike-run", "run-2")
+        .replace("spike-001", "test-2")
+        .replace("c5b55d939c5df4939aa20c7090a13cc9", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        encoding="utf-8",
+    )
+    config = Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[],
+        variants=[],
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+
+    traces = _fetch_traces_from_files(config, "run-2", results_dir, manifest_runs=None)
+
+    assert len(traces) == 1
+    assert traces[0].trace_id == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    assert traces[0].resource_tags["eval.run_id"] == "run-2"

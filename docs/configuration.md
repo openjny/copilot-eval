@@ -67,8 +67,10 @@ runner:
   output_instruction: Save all output files under /workspace/output/.  # Appended to every prompt; "" disables; supports {var} interpolation
   container_image_base: copilot-eval
   copilot_version: "1.0.18"
-  otel_endpoint: http://host.docker.internal:4318   # OTLP collector endpoint (inside container)
-  jaeger_url: http://localhost:16686                # Jaeger query UI/API (host side)
+  collector: file                 # file (default) | jaeger — trace collection backend
+  # When collector: jaeger, these are used:
+  jaeger_url: "http://localhost:16686"              # Jaeger query UI/API (host side)
+  otel_endpoint: "http://host.docker.internal:4318" # OTLP collector endpoint (inside container)
   trace_fetch_limit: 2000        # analyze: max traces to request from Jaeger
   trace_fetch_retries: 5         # analyze: attempts to wait for trace ingestion
   trace_fetch_retry_delay: 2.0   # analyze: seconds between ingestion retries
@@ -113,6 +115,24 @@ The prompt also gets an output-path instruction appended automatically so that g
 - **custom string** → appended verbatim, with the same `{var}` interpolation as the prompt (so it can adapt per variant, e.g. `Respond in {language}.`).
 
 When non-empty, the instruction is appended after a `\n\n` separator.
+
+## Trace Collector
+
+`runner.collector` selects how OTel traces are captured and read back by `analyze`:
+
+- **`file`** (default) — Copilot writes spans to a JSONL file inside the container
+  (`/workspace/.traces/traces.jsonl`). After the run, it is copied to
+  `results/<run_id>/.traces/traces.jsonl` and read directly by `analyze`. No
+  external services are required — `jaeger_url`/`otel_endpoint` are ignored.
+- **`jaeger`** — spans are exported over OTLP to a running Jaeger instance
+  (`otel_endpoint`, used inside the container) and `analyze` fetches them back over
+  Jaeger's HTTP API (`jaeger_url`, used on the host). Requires `docker-compose up -d`
+  (see the repo's `docker-compose.yml`). Useful when you want to browse traces
+  interactively in the Jaeger UI, or for compatibility with existing Jaeger-based
+  workflows.
+
+See [Architecture: Trace Collection](architecture.md#trace-collection) for the full
+dual-abstraction design (`AgentRunner` + `TraceCollector`).
 
 ## Variants
 

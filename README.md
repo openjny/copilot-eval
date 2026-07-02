@@ -14,6 +14,11 @@ cd copilot-eval
 cp .env.example .env    # Configure credentials
 ```
 
+> **Note**: By default, traces are collected to a local JSONL file — no Jaeger or
+> `docker-compose` needed. Jaeger is optional; only start it (`docker-compose up -d`)
+> if you set `runner.collector: jaeger` in `eval-config.yaml` (e.g. to browse traces
+> interactively in the Jaeger UI).
+
 ### Try the prompt-language example
 
 ```bash
@@ -68,12 +73,28 @@ copilot-eval/
 ├── examples/              # Eval sets
 ├── docs/                  # Detailed documentation
 ├── tests/                 # Pytest unit tests (config, report, trace)
-└── docker-compose.yml     # Jaeger
+└── docker-compose.yml     # Jaeger (optional; only needed for runner.collector: jaeger)
 ```
 
-The framework tags each run with `eval.test_id`, `eval.variant`, `eval.scenario`, and `eval.epoch` via `OTEL_RESOURCE_ATTRIBUTES`, enabling A/B comparison in Jaeger.
+The framework tags each run with `eval.test_id`, `eval.variant`, `eval.scenario`, and `eval.epoch` via `OTEL_RESOURCE_ATTRIBUTES`, enabling A/B comparison in the collected traces (a local file by default, or Jaeger's UI when `runner.collector: jaeger`).
 
 > **Note**: `COPILOT_HOME` must be writable for OTel span correlation to work correctly. The entrypoint handles this by copying auth from a read-only mount to a writable directory.
+
+## Upgrading
+
+### v0.2.0 — OTel generalization
+
+- **Breaking**: Default trace collector changed from `jaeger` to `file` (JSONL file exporter).
+
+- Existing configs without an explicit `runner.collector` now use `file`.
+- To keep Jaeger, set:
+
+```yaml
+runner:
+  collector: jaeger
+```
+
+- The `file` collector requires no external services — traces are stored as `.traces/*.jsonl` files in the results directory.
 
 ## Development
 
