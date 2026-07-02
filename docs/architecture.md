@@ -14,6 +14,8 @@ eval-config.yaml
 
 ```
 eval/
+├── __init__.py   Package marker
+├── __main__.py   `python -m eval` entry
 ├── cli.py        Click CLI: list, build, run, analyze
 ├── config.py     YAML config → dataclasses (Config, Task, Variant, Evaluator, Hooks)
 ├── runner.py     Single eval run: hooks → Docker container → evaluators
