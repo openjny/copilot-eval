@@ -39,8 +39,8 @@ uv run copilot-eval analyze --run-id <id> [-o table|json|markdown]
 - **Tasks**: eval task definitions with prompt, evaluators, hooks, fixture
 - **Evaluators**: unified list with `type: judge|script|contains|regex`
 - **Hooks**: `before_run`/`after_run` per task for environment setup/teardown
-- **Variants**: A/B environments defined by Dockerfile + run_script
-- **Config**: single `eval-config.yaml` with inline tasks/variants
+- **Variants**: A/B environments defined by `build.dockerfile` + `run.script`
+- **Config**: `eval-config.yaml` with tasks/variants inline or in `tasks/*.yaml` / `variants/*.yaml` (primary)
 - **Vars**: `{key}` interpolation in prompts; merged global → task → variant
 - **Output dir**: Copilot writes artifacts to `/workspace/output/`; judge evaluator reads them
 

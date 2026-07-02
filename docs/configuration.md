@@ -13,6 +13,34 @@ Tasks and variants can also be defined in separate YAML files:
 
 When these directories exist and contain `.yaml` files, they are the **primary** source. Inline definitions in `eval-config.yaml` are used only as a fallback when no external files are found.
 
+> **Note**: Only `.yaml` extension is recognized (not `.yml`). Each file must be a single mapping (not wrapped in a `tasks:` or `variants:` array).
+
+**External task file example** (`tasks/code-review.yaml`):
+
+```yaml
+# No wrapping `tasks:` key — the file IS the task definition.
+name: code-review
+prompt: "Review the code for bugs and security issues."
+fixture: sample-app
+evaluators:
+  - name: thoroughness
+    type: judge
+    prompt: "Rate on 1-10..."
+```
+
+**External variant file example** (`variants/with-plugin.yaml`):
+
+```yaml
+# No wrapping `variants:` key — the file IS the variant definition.
+description: "Copilot CLI with custom plugin"
+build:
+  dockerfile: docker/Dockerfile.with-plugin
+run:
+  script: scripts/setup.sh
+vars:
+  feature: enabled
+```
+
 ```yaml
 vars:
   key: value                     # Global variables for prompt interpolation

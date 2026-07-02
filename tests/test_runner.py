@@ -6,6 +6,7 @@ and secret masking.
 """
 from __future__ import annotations
 
+import sys
 import tempfile
 from pathlib import Path
 
@@ -368,7 +369,6 @@ def test_write_sanitized_env_file_strips_quotes(tmp_path):
     out = _write_sanitized_env_file(config)
     try:
         assert out != config.env_file
-        import sys
         if sys.platform != "win32":
             assert (out.stat().st_mode & 0o777) == 0o600
         content = out.read_text()
