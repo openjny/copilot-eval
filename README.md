@@ -33,9 +33,9 @@ uv run copilot-eval <command> [options]
 | Command | Description |
 |---------|-------------|
 | `list --config-dir <dir>` | List tasks and variants |
-| `build --config-dir <dir>` | Build Docker images |
-| `run --config-dir <dir> [--task NAME] [--epochs N]` | Execute eval runs |
-| `analyze --run-id <ID> [--config-dir <dir>] [-o table\|json\|markdown]` | Analyze results |
+| `build --config-dir <dir> [--variant NAME]` | Build Docker images |
+| `run --config-dir <dir> [--task NAME] [--epochs N] [--dry-run] [--no-build]` | Execute eval runs |
+| `analyze --run-id <ID> [--config-dir <dir>] [-o table\|json\|markdown] [-a paired\|median\|mean] [--jaeger-url URL] [--skip-eval] [--re-eval]` | Analyze results |
 
 ## Examples
 
@@ -55,6 +55,8 @@ uv run copilot-eval <command> [options]
 ```
 copilot-eval/
 ├── eval/                  # Framework
+│   ├── __init__.py        # Package marker
+│   ├── __main__.py        # `python -m eval` entry
 │   ├── cli.py             # CLI entry point
 │   ├── config.py          # Config loading
 │   ├── runner.py          # Docker execution + evaluators

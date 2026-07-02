@@ -4,6 +4,15 @@
 
 Each eval set is defined by a single `eval-config.yaml` file. It contains global settings, variants, and tasks.
 
+### External task/variant files
+
+Tasks and variants can also be defined in separate YAML files:
+
+- **`tasks/*.yaml`** — one task per file (file stem is used as fallback name)
+- **`variants/*.yaml`** — one variant per file (file stem is used as fallback name)
+
+When these directories exist and contain `.yaml` files, they are the **primary** source. Inline definitions in `eval-config.yaml` are used only as a fallback when no external files are found.
+
 ```yaml
 vars:
   key: value                     # Global variables for prompt interpolation
@@ -39,8 +48,10 @@ runner:
 variants:
   - name: baseline
     description: "Control group"
-    dockerfile: path/to/Dockerfile       # Optional: custom Dockerfile
-    run_script: path/to/setup.sh         # Optional: sourced inside container before Copilot
+    build:
+      dockerfile: path/to/Dockerfile     # Optional: custom Dockerfile
+    run:
+      script: path/to/setup.sh           # Optional: sourced inside container before Copilot
     model: null                          # Optional: override runner.model per variant
     vars: {}                             # Variant-level variable overrides
 
@@ -85,7 +96,22 @@ FROM copilot-eval:base
 RUN copilot plugin install my-org/my-plugin
 ```
 
-The optional `run_script` is sourced inside the container before Copilot runs (e.g., for authentication).
+The optional `run.script` is sourced inside the container before Copilot runs (e.g., for authentication).
+
+### Variant definition example
+
+```yaml
+variants:
+  - name: with-plugin
+    description: "Copilot CLI with custom plugin"
+    build:
+      dockerfile: docker/Dockerfile.with-plugin
+    run:
+      script: scripts/setup.sh
+    model: gpt-4.1
+    vars:
+      feature: enabled
+```
 
 ## Evaluators
 
