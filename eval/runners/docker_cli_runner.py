@@ -4,12 +4,14 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from eval.config import Config, Variant
+from eval.env_utils import write_sanitized_env_file
 from eval.protocols import RunArtifacts, RunContext, RunStatus
-from eval.runner import _write_sanitized_env_file
 
 _TRACE_FILE = Path(".traces") / "traces.jsonl"
 _CONTAINER_TRACE_DIR = "/workspace/.traces"
@@ -17,16 +19,15 @@ _CONTAINER_RUN_SCRIPT = "/workspace/eval-setup.sh"
 
 
 class DockerCLIRunner:
-    """Docker-based Copilot CLI runner.
+    """Docker-based Copilot CLI runner."""
 
-    NOTE: This is scaffolding for the next phase of the refactoring.
-    Currently, ``run_one()`` in ``eval.runner`` still handles Docker execution
-    directly. This class will replace that logic once the orchestrator is
-    refactored to delegate to ``AgentRunner.run()``.
-    """
-
-    def __init__(self, github_token: str) -> None:
+    def __init__(
+        self,
+        github_token: str,
+        run_command: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+    ) -> None:
         self.github_token = github_token
+        self._run_command = run_command
 
     @property
     def supported_collectors(self) -> tuple[str, ...]:
@@ -57,9 +58,6 @@ class DockerCLIRunner:
 
         output_dir = work_dir / "output"
         trace_file = work_dir / _TRACE_FILE
-        work_dir.mkdir(parents=True, exist_ok=True)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        trace_file.parent.mkdir(parents=True, exist_ok=True)
 
         started_at = datetime.now().isoformat(timespec="microseconds")
         started_monotonic = time.monotonic()
@@ -81,13 +79,12 @@ class DockerCLIRunner:
             "COPILOT_OTEL_CAPTURE_CONTENT": (
                 "true" if config.runner.capture_content else "false"
             ),
-            "OTEL_EXPORTER_OTLP_ENDPOINT": config.runner.otel_endpoint,
             "OTEL_RESOURCE_ATTRIBUTES": otel_attrs,
             "OTEL_SERVICE_NAME": "github-copilot",
             **run_context.extra_env,
         }
 
-        env_file_arg = _write_sanitized_env_file(config)
+        env_file_arg = write_sanitized_env_file(config)
         try:
             cmd = [
                 "docker",
@@ -133,7 +130,8 @@ class DockerCLIRunner:
 
             run_env = {**os.environ, "GITHUB_TOKEN": self.github_token}
             with open(log_file, "a", encoding="utf-8") as lf:
-                proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=run_env)
+                run_command = self._run_command or subprocess.run
+                proc = run_command(cmd, stdout=lf, stderr=subprocess.STDOUT, env=run_env)
         finally:
             env_file_arg.unlink(missing_ok=True)
 

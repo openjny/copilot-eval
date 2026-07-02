@@ -14,8 +14,9 @@ from typing import Any
 import click
 import requests
 
-from eval.collectors.file_collector import TRACE_FILE, parse_file_traces
+from eval.collectors import create_collector
 from eval.config import Config, Task, Variant, load_config
+from eval.protocols import RunContext
 from eval.report import build_report, format_json, format_markdown, format_table
 from eval.runner import RunResult, get_github_token, run_one
 from eval.trace import (
@@ -333,7 +334,7 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
         traces = _fetch_traces_for_run(config, jaeger, run_id, manifest_runs)
     else:
         click.echo(f"Reading traces from file collector for run {run_id}...", err=True)
-        traces = _fetch_traces_from_files(config, run_id, results_dir, manifest_runs)
+        traces = _collect_file_traces(config, run_id, results_dir)
 
     metrics: list[RunMetrics] = [m for m in (extract_metrics(t) for t in traces) if m is not None]
 
@@ -416,26 +417,25 @@ def _fetch_traces_for_run(config: Config, jaeger: str, run_id: str,
 
 def _fetch_traces_from_files(config: Config, run_id: str, results_dir: Path,
                              manifest_runs: list[dict[str, Any]] | None) -> list[Trace]:
+    """Deprecated compatibility wrapper for file trace collection."""
+    del manifest_runs
+    return _collect_file_traces(config, run_id, results_dir)
+
+
+def _collect_file_traces(config: Config, run_id: str, results_dir: Path) -> list[Trace]:
     """Collect traces from file exporter output stored in results directory."""
-    del config, manifest_runs
-
-    all_traces: list[Trace] = []
-    traces_dir = results_dir / TRACE_FILE.parent
-    if traces_dir.is_dir():
-        trace_paths = sorted(traces_dir.glob("*.jsonl"))
-    else:
-        trace_paths = [
-            trace_path
-            for trace_path in sorted(results_dir.rglob("*.jsonl"))
-            if TRACE_FILE.parent.name in trace_path.parts
-        ]
-    for trace_path in trace_paths:
-        all_traces.extend(parse_file_traces(trace_path))
-
-    if run_id:
-        all_traces = filter_by_run(all_traces, run_id)
-
-    return all_traces
+    task = config.tasks[0] if config.tasks else Task(name="analyze", prompt="")
+    variant = config.variants[0] if config.variants else Variant(name="analyze")
+    collector = create_collector("file")
+    return collector.collect(RunContext(
+        run_id=run_id,
+        test_id="",
+        epoch=0,
+        run_dir=results_dir,
+        task=task,
+        variant=variant,
+        config=config,
+    ))
 
 
 def _report_run_coverage(manifest_runs: list[dict[str, Any]], traces: list[Trace]) -> None:

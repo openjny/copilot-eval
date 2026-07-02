@@ -25,8 +25,15 @@ class FileCollector:
         traces: list[Trace] = []
         traces_dir = run_context.run_dir / TRACE_FILE.parent
         if traces_dir.is_dir():
-            for trace_path in sorted(traces_dir.glob("*.jsonl")):
-                traces.extend(parse_file_traces(trace_path))
+            trace_paths = sorted(traces_dir.glob("*.jsonl"))
+        else:
+            trace_paths = [
+                trace_path
+                for trace_path in sorted(run_context.run_dir.rglob("*.jsonl"))
+                if TRACE_FILE.parent.name in trace_path.parts
+            ]
+        for trace_path in trace_paths:
+            traces.extend(parse_file_traces(trace_path))
         if run_context.run_id:
             return [
                 trace for trace in traces
