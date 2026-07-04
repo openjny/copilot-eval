@@ -305,6 +305,7 @@ def test_to_dict_structure():
         "task": "t",
         "variant": "v",
         "epoch": 1,
+        "fixture": "",
         "test_id": "tid",
         "run_id": "rid",
         "exit_code": 0,
@@ -611,6 +612,63 @@ def test_run_one_post_processing_exception_preserves_run_status(tmp_path, monkey
     assert result.started_at is not None
     assert result.finished_at is not None
     assert result.duration_seconds is not None
+
+
+def test_run_one_multi_fixture_records_fixture_and_slug(tmp_path, monkeypatch):
+    """A multi-fixture run records the fixture label and writes fixture-suffixed
+    result files."""
+    from eval import runner as runner_mod
+    from eval.config import Task
+
+    config = _config(tmp_path)
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+    # Two fixtures -> the task is multi-fixture, so the label is non-empty.
+    fixture_dir = tmp_path / "fixtures" / "fixB"
+    fixture_dir.mkdir(parents=True)
+    (fixture_dir / "marker.txt").write_text("hello")
+    _stub_no_docker(monkeypatch, runner_mod, docker_rc=0)
+    monkeypatch.setattr(runner_mod, "_run_hook", lambda *a, **k: 0)
+
+    task = Task(name="t", prompt="p", fixtures=["fixA", "fixB"])
+    result = runner_mod.run_one(
+        task,
+        Variant(name="v"),
+        epoch=1,
+        config=config,
+        run_id="r",
+        run_dir=run_dir,
+        github_token="tok",
+        fixture="fixB",
+    )
+
+    assert result.fixture == "fixB"
+    assert result.log_file.name == "t_v_epoch1__fixture__fixB.log"
+
+
+def test_run_one_single_fixture_has_no_label(tmp_path, monkeypatch):
+    """A single-fixture task keeps the legacy slug and an empty fixture label."""
+    from eval import runner as runner_mod
+    from eval.config import Task
+
+    config = _config(tmp_path)
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+    _stub_no_docker(monkeypatch, runner_mod, docker_rc=0)
+    monkeypatch.setattr(runner_mod, "_run_hook", lambda *a, **k: 0)
+
+    result = runner_mod.run_one(
+        Task(name="t", prompt="p"),
+        Variant(name="v"),
+        epoch=1,
+        config=config,
+        run_id="r",
+        run_dir=run_dir,
+        github_token="tok",
+    )
+
+    assert result.fixture == ""
+    assert result.log_file.name == "t_v_epoch1.log"
 
 
 def test_mask_log_file_redacts_in_place(tmp_path):

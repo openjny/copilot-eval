@@ -33,6 +33,7 @@ from eval.env_utils import (
 from eval.env_utils import (
     load_env_file as _load_env_file,
 )
+from eval.naming import run_slug
 from eval.protocols import (
     RunArtifacts,
     RunContext,
@@ -87,6 +88,10 @@ class RunResult:
     started_at: str | None = None
     finished_at: str | None = None
     duration_seconds: float | None = None
+    # Reporting fixture label ("" for single-fixture tasks; the fixture name for
+    # multi-fixture tasks). Recorded in the manifest so `analyze` can group runs
+    # along the input-coverage axis.
+    fixture: str = ""
 
     @property
     def passed(self) -> bool:
@@ -99,6 +104,7 @@ class RunResult:
             "task": self.task,
             "variant": self.variant,
             "epoch": self.epoch,
+            "fixture": self.fixture,
             "test_id": self.test_id,
             "run_id": self.run_id,
             "exit_code": self.exit_code,
@@ -162,10 +168,23 @@ def run_one(
     run_dir: Path,
     github_token: str,
     order_index: int | None = None,
+    fixture: str | None = None,
 ) -> RunResult:
+    # Concrete fixture directory to mount; the reporting label is empty for
+    # single-fixture tasks so legacy file names / report layout are preserved.
+    fixture_dir_name = fixture if fixture is not None else task.fixture_names()[0]
+    fixture_label = task.fixture_label(fixture_dir_name)
     test_id = str(uuid.uuid4())
-    log_file = run_dir / f"{task.name}_{variant.name}_epoch{epoch}.log"
-    logger.info("[%s] epoch=%s variant=%s test_id=%s", task.name, epoch, variant.name, test_id[:8])
+    log_file = run_dir / (run_slug(task.name, variant.name, epoch, fixture_label) + ".log")
+    suffix = f" fixture={fixture_label}" if fixture_label else ""
+    logger.info(
+        "[%s] epoch=%s variant=%s%s test_id=%s",
+        task.name,
+        epoch,
+        variant.name,
+        suffix,
+        test_id[:8],
+    )
 
     # Capture wall-clock schedule so post-hoc analysis can detect order/concurrency
     # confounders. monotonic clock is used for duration to avoid clock-skew issues;
@@ -214,6 +233,7 @@ def run_one(
                     exit_code=-1,
                     status=RunStatus.SETUP_FAILED,
                     **_timing(),
+                    fixture=fixture_label,
                 )
             logger.warning(
                 "before_run hook failed (exit %s) — continuing (on_failure=warn)",
@@ -237,12 +257,13 @@ def run_one(
                     log_file=log_file,
                     exit_code=-1,
                     status=RunStatus.SETUP_FAILED,
+                    fixture=fixture_label,
                     **_timing(),
                 )
 
         # Writable workspace: copy fixture to tmpdir so Copilot can read AND write
         work_dir = Path(tempfile.mkdtemp(prefix="eval-work-"))
-        fixture_dir = (config.config_dir / "fixtures" / (task.fixture or task.name)).resolve()
+        fixture_dir = (config.config_dir / "fixtures" / fixture_dir_name).resolve()
         if fixture_dir.is_dir():
             shutil.copytree(fixture_dir, work_dir, dirs_exist_ok=True)
         # Create directories DockerCLIRunner expects and Copilot writes into.
@@ -266,6 +287,8 @@ def run_one(
             variant=variant,
             config=config,
             work_dir=work_dir,
+            fixture=fixture_dir_name,
+            fixture_label=fixture_label,
         )
         run_context = RunContext(
             run_id=run_id,
@@ -277,6 +300,8 @@ def run_one(
             config=config,
             extra_env=collector.exporter_env(collector_context),
             work_dir=work_dir,
+            fixture=fixture_dir_name,
+            fixture_label=fixture_label,
         )
 
         logger.info("Running copilot in container...")
@@ -299,8 +324,8 @@ def run_one(
             )
 
         # Persist output files to results dir before tmpdir cleanup
-        _persist_output_files(work_dir, run_dir, task.name, variant.name, epoch)
-        _persist_trace_file(work_dir, run_dir, task.name, variant.name, epoch)
+        _persist_output_files(work_dir, run_dir, task.name, variant.name, epoch, fixture_label)
+        _persist_trace_file(work_dir, run_dir, task.name, variant.name, epoch, fixture_label)
         if (
             config.runner.collector == "file"
             and artifacts.exit_code == 0
@@ -334,6 +359,7 @@ def run_one(
                 status=RunStatus.SETUP_FAILED,
                 scores=scores,
                 **_timing(),
+                fixture=fixture_label,
             )
         logger.error("Run errored during post-processing: %s", exc)
         _append_log(log_file, f"run_one raised during post-processing: {exc!r}")
@@ -357,6 +383,7 @@ def run_one(
             status=artifacts.status,
             scores=scores,
             **_timing(),
+            fixture=fixture_label,
         )
     finally:
         if work_dir is not None:
@@ -376,6 +403,7 @@ def run_one(
         exit_code=artifacts.exit_code,
         status=artifacts.status,
         scores=scores,
+        fixture=fixture_label,
         **_timing(),
     )
 
@@ -437,7 +465,7 @@ def _run_health_check(
 
 
 def _persist_output_files(
-    work_dir: Path, run_dir: Path, task: str, variant: str, epoch: int
+    work_dir: Path, run_dir: Path, task: str, variant: str, epoch: int, fixture: str = ""
 ) -> None:
     """Copy output files from tmpdir to results dir for later analysis."""
     output_dir = work_dir / "output"
@@ -446,7 +474,7 @@ def _persist_output_files(
     files = [f for f in output_dir.rglob("*") if f.is_file()]
     if not files:
         return
-    dest = run_dir / "outputs" / f"{task}_{variant}_epoch{epoch}"
+    dest = run_dir / "outputs" / run_slug(task, variant, epoch, fixture)
     dest.mkdir(parents=True, exist_ok=True)
     for f in files:
         rel = f.relative_to(output_dir)
@@ -455,12 +483,14 @@ def _persist_output_files(
         shutil.copy2(f, target)
 
 
-def _persist_trace_file(work_dir: Path, run_dir: Path, task: str, variant: str, epoch: int) -> None:
+def _persist_trace_file(
+    work_dir: Path, run_dir: Path, task: str, variant: str, epoch: int, fixture: str = ""
+) -> None:
     """Copy trace file from work tmpdir to results dir for later analysis."""
     trace_src = work_dir / TRACE_FILE
     if not trace_src.exists():
         return
-    trace_dest = run_dir / TRACE_FILE.parent / f"{task}_{variant}_epoch{epoch}.jsonl"
+    trace_dest = run_dir / TRACE_FILE.parent / (run_slug(task, variant, epoch, fixture) + ".jsonl")
     trace_dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(trace_src, trace_dest)
 

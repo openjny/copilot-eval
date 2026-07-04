@@ -93,7 +93,7 @@ copilot-eval/
 └── docker-compose.yml     # Jaeger (optional; only needed for runner.collector: jaeger)
 ```
 
-The framework tags each run with `eval.test_id`, `eval.variant`, `eval.scenario`, and `eval.epoch` via `OTEL_RESOURCE_ATTRIBUTES`, enabling A/B comparison in the collected traces (a local file by default, or Jaeger's UI when `runner.collector: jaeger`).
+The framework tags each run with `eval.test_id`, `eval.variant`, `eval.scenario`, `eval.fixture` (empty unless the task declares multiple fixtures), and `eval.epoch` via `OTEL_RESOURCE_ATTRIBUTES`, enabling A/B comparison in the collected traces (a local file by default, or Jaeger's UI when `runner.collector: jaeger`).
 
 > **Note**: `COPILOT_HOME` must be writable for OTel span correlation to work correctly. The entrypoint handles this by copying auth from a read-only mount to a writable directory.
 

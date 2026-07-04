@@ -59,6 +59,9 @@ class RunMetrics:
     total_cache_tokens: int
     model: str
     cost: float
+    # Reporting fixture label ("" for single-fixture tasks). Distinguishes runs
+    # along the input-coverage axis when a task declares multiple fixtures.
+    fixture: str = ""
 
 
 def _parse_float(value: object) -> float | None:
@@ -185,6 +188,7 @@ def extract_metrics(trace: Trace) -> RunMetrics | None:
         total_cache_tokens=sum(int_tag(c, "gen_ai.usage.cache_read.input_tokens") for c in chats),
         model=str(root.tags.get("gen_ai.request.model", "?")),
         cost=float_tag(root, "github.copilot.cost"),
+        fixture=trace.resource_tags.get("eval.fixture", ""),
     )
 
 

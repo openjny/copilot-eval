@@ -12,6 +12,7 @@ from typing import Any
 
 from eval.config import Config, Variant
 from eval.env_utils import write_sanitized_env_file
+from eval.naming import run_slug
 from eval.protocols import RunArtifacts, RunContext, status_from_exit_code
 
 _TRACE_FILE = Path(".traces") / "traces.jsonl"
@@ -54,7 +55,9 @@ class DockerCLIRunner:
         config = run_context.config
         work_dir = run_context.work_dir
 
-        log_file = run_context.run_dir / f"{task.name}_{variant.name}_epoch{run_context.epoch}.log"
+        log_file = run_context.run_dir / (
+            run_slug(task.name, variant.name, run_context.epoch, run_context.fixture_label) + ".log"
+        )
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
         output_dir = work_dir / "output"
@@ -73,6 +76,7 @@ class DockerCLIRunner:
                 f"eval.scenario={task.name}",
                 f"eval.variant={variant.name}",
                 f"eval.epoch={run_context.epoch}",
+                f"eval.fixture={run_context.fixture_label}",
                 f"eval.run_id={run_context.run_id}",
             ]
         )

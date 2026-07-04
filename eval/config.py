@@ -127,11 +127,38 @@ class Task:
     prompt: str
     enabled: bool = True
     fixture: str | None = None
+    # Multiple fixtures expand the eval matrix along an input-coverage axis:
+    # the task runs once per fixture (variant × fixture × epoch). Empty means
+    # "single fixture" and falls back to `fixture` / the task name.
+    fixtures: list[str] = field(default_factory=list)
     timeout_seconds: int | None = None
     health_check: str | None = None
     vars: dict[str, str] = field(default_factory=dict)
     hooks: Hooks = field(default_factory=Hooks)
     evaluators: list[Evaluator] = field(default_factory=list)
+
+    def fixture_names(self) -> list[str]:
+        """Effective list of fixture directory names this task runs against.
+
+        Falls back to the singular `fixture`, then to the task name, so a task
+        with no fixture declared behaves exactly as before (one run per
+        variant × epoch reading `fixtures/<task-name>/`).
+        """
+        if self.fixtures:
+            return list(self.fixtures)
+        if self.fixture:
+            return [self.fixture]
+        return [self.name]
+
+    @property
+    def is_multi_fixture(self) -> bool:
+        """True when the task spans more than one fixture (input-coverage axis)."""
+        return len(self.fixture_names()) > 1
+
+    def fixture_label(self, fixture: str) -> str:
+        """Reporting label for a run's fixture: empty for single-fixture tasks
+        (keeps legacy file names / report layout), the fixture name otherwise."""
+        return fixture if self.is_multi_fixture else ""
 
 
 @dataclass
@@ -593,17 +620,53 @@ def _parse_task(p: dict[str, Any], fallback_name: str = "") -> Task:
     if not hooks_raw and p.get("reset_script"):
         hooks_raw = {"before_run": p["reset_script"]}
 
+    fixtures = _parse_fixtures(p.get("fixtures"), name)
+
     return Task(
         name=name,
         prompt=prompt,
         enabled=p.get("enabled", True),
         fixture=p.get("fixture"),
+        fixtures=fixtures,
         timeout_seconds=p.get("timeout_seconds"),
         health_check=p.get("health_check"),
         vars={str(k): str(v) for k, v in (p.get("vars") or {}).items()},
         hooks=_parse_hooks(hooks_raw),
         evaluators=_parse_evaluators(evaluators_raw, context=f"task '{name}'"),
     )
+
+
+def _parse_fixtures(raw: Any, task_name: str) -> list[str]:
+    """Normalize the optional `fixtures` list into a list of fixture names.
+
+    Accepts a list of non-empty, unique strings. Returns [] when unset so the
+    task falls back to singular `fixture` / the task name.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ConfigError(
+            f"Task '{task_name}' has an invalid 'fixtures': expected a list, "
+            f"got {type(raw).__name__}."
+        )
+    fixtures: list[str] = []
+    seen: set[str] = set()
+    for i, f in enumerate(raw):
+        if not isinstance(f, str) or not f.strip():
+            raise ConfigError(
+                f"Task '{task_name}' fixtures[{i}] must be a non-empty string, got {f!r}."
+            )
+        f = f.strip()
+        if not _NAME_RE.match(f):
+            raise ConfigError(
+                f"Task '{task_name}' fixture name '{f}' is invalid. Use letters, digits, "
+                f"'.', '_' or '-' and start with a letter or digit."
+            )
+        if f in seen:
+            raise ConfigError(f"Task '{task_name}' has a duplicate fixture '{f}'.")
+        seen.add(f)
+        fixtures.append(f)
+    return fixtures
 
 
 def _parse_variant(v: dict[str, Any], fallback_name: str = "") -> Variant:

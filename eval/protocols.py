@@ -41,6 +41,11 @@ class RunContext:
     config: Config
     extra_env: dict[str, str] = field(default_factory=dict)
     work_dir: Path | None = None
+    # Concrete fixture directory this run mounts (defaults to the task's first
+    # effective fixture when empty). `fixture_label` is the reporting label
+    # ("" for single-fixture tasks; the fixture name for multi-fixture tasks).
+    fixture: str = ""
+    fixture_label: str = ""
 
 
 @dataclass

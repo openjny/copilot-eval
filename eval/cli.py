@@ -19,6 +19,7 @@ import requests
 from eval.collectors import create_collector
 from eval.config import Config, Task, Variant, load_config
 from eval.logging_config import LOG_FORMATS, LOG_LEVELS, configure_logging
+from eval.naming import run_slug
 from eval.protocols import RunContext, RunStatus
 from eval.report import build_report, format_json, format_markdown, format_table
 from eval.runner import RunResult, get_github_token, run_one
@@ -168,6 +169,7 @@ def _safe_run_one(
     run_dir: Path,
     github_token: str,
     order_index: int | None = None,
+    fixture: str | None = None,
 ) -> RunResult:
     """Run a single eval, guaranteeing the batch is never aborted by one run.
 
@@ -176,20 +178,41 @@ def _safe_run_one(
     take down the whole batch or prevent the manifest from being written) and
     turns it into a synthetic setup_failed result instead of re-raising.
     """
+    fixture_dir_name = fixture if fixture is not None else task.fixture_names()[0]
+    fixture_label = task.fixture_label(fixture_dir_name)
     try:
-        return run_one(task, variant, epoch, config, run_id, run_dir, github_token, order_index)
+        return run_one(
+            task,
+            variant,
+            epoch,
+            config,
+            run_id,
+            run_dir,
+            github_token,
+            order_index,
+            fixture=fixture_dir_name,
+        )
     except Exception as exc:  # noqa: BLE001 - isolate per-run failures from the batch
-        logger.error("[%s] epoch=%s variant=%s errored: %s", task.name, epoch, variant.name, exc)
+        suffix = f" fixture={fixture_label}" if fixture_label else ""
+        logger.error(
+            "[%s] epoch=%s variant=%s%s errored: %s",
+            task.name,
+            epoch,
+            variant.name,
+            suffix,
+            exc,
+        )
         return RunResult(
             task=task.name,
             variant=variant.name,
             epoch=epoch,
             test_id=uuid.uuid4().hex,
             run_id=run_id,
-            log_file=run_dir / f"{task.name}_{variant.name}_epoch{epoch}.log",
+            log_file=run_dir / (run_slug(task.name, variant.name, epoch, fixture_label) + ".log"),
             exit_code=-1,
             status=RunStatus.SETUP_FAILED,
             order_index=order_index,
+            fixture=fixture_label,
         )
 
 
@@ -258,8 +281,10 @@ def run(
     click.echo("=" * 50)
 
     if dry_run:
+        total = sum(len(p.fixture_names()) for p in tasks) * epochs * len(config.variants)
         click.echo(
-            f"[dry-run] Would run {epochs} epoch(s) × {len(config.variants)} variants for each task."
+            f"[dry-run] Would run {epochs} epoch(s) × {len(config.variants)} variants × "
+            f"fixtures for each task ({total} runs total)."
         )
         return
 
@@ -281,8 +306,9 @@ def run(
         # thread pool decides true concurrency. A per-(task, epoch) RNG keeps the
         # schedule reproducible under a seed without sharing RNG state.
         work = [
-            (t, v, e)
+            (t, v, e, f)
             for t in tasks
+            for f in t.fixture_names()
             for e in range(1, epochs + 1)
             for v in order_variants(config.variants, e, order, _ordering_rng(seed, t.name, e))
         ]
@@ -292,9 +318,9 @@ def run(
         with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
             futures = {
                 pool.submit(
-                    _safe_run_one, t, v, e, config, run_id, run_dir, github_token, i
+                    _safe_run_one, t, v, e, config, run_id, run_dir, github_token, i, f
                 ): f"{t.name}/{v.name}/e{e}"
-                for i, (t, v, e) in enumerate(work)
+                for i, (t, v, e, f) in enumerate(work)
             }
             for future in as_completed(futures):
                 results.append(future.result())
@@ -303,22 +329,31 @@ def run(
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         def _run_task_serial(task: Task) -> list[RunResult]:
-            """Run all epochs × variants for a single task sequentially."""
+            """Run all fixtures × epochs × variants for a single task sequentially."""
             task_results: list[RunResult] = []
             order_index = 0
-            for epoch in range(1, epochs + 1):
-                # Each worker thread uses its own RNG (random.Random is not
-                # thread-safe); derived from the seed for reproducibility.
-                ordered = order_variants(
-                    config.variants, epoch, order, _ordering_rng(seed, task.name, epoch)
-                )
-                for variant in ordered:
-                    task_results.append(
-                        _safe_run_one(
-                            task, variant, epoch, config, run_id, run_dir, github_token, order_index
-                        )
+            for fixture in task.fixture_names():
+                for epoch in range(1, epochs + 1):
+                    # Each worker thread uses its own RNG (random.Random is not
+                    # thread-safe); derived from the seed for reproducibility.
+                    ordered = order_variants(
+                        config.variants, epoch, order, _ordering_rng(seed, task.name, epoch)
                     )
-                    order_index += 1
+                    for variant in ordered:
+                        task_results.append(
+                            _safe_run_one(
+                                task,
+                                variant,
+                                epoch,
+                                config,
+                                run_id,
+                                run_dir,
+                                github_token,
+                                order_index,
+                                fixture,
+                            )
+                        )
+                        order_index += 1
             return task_results
 
         click.echo(f"Running {len(tasks)} tasks in parallel (variants serial within each task)")
@@ -333,15 +368,26 @@ def run(
             click.echo(f"\n>>> Task: {p.name}")
             click.echo(f">>> Prompt:  {prompt}\n")
 
-            for epoch in range(1, epochs + 1):
-                for variant in order_variants(
-                    config.variants, epoch, order, _ordering_rng(seed, p.name, epoch)
-                ):
-                    result = _safe_run_one(
-                        p, variant, epoch, config, run_id, run_dir, github_token, order_index
-                    )
-                    results.append(result)
-                    order_index += 1
+            for fixture in p.fixture_names():
+                if p.is_multi_fixture:
+                    click.echo(f">>> Fixture: {fixture}")
+                for epoch in range(1, epochs + 1):
+                    for variant in order_variants(
+                        config.variants, epoch, order, _ordering_rng(seed, p.name, epoch)
+                    ):
+                        result = _safe_run_one(
+                            p,
+                            variant,
+                            epoch,
+                            config,
+                            run_id,
+                            run_dir,
+                            github_token,
+                            order_index,
+                            fixture,
+                        )
+                        results.append(result)
+                        order_index += 1
 
     # Summary
     passed = sum(1 for r in results if r.passed)
@@ -547,7 +593,9 @@ def _report_run_coverage(manifest_runs: list[dict[str, Any]], traces: list[Trace
     missing: list[str] = []
     failed: list[str] = []
     for r in manifest_runs:
-        label = f"{r.get('task')}/{r.get('variant')}/e{r.get('epoch')}"
+        fx = r.get("fixture")
+        base = f"{r.get('task')}/{r.get('variant')}/e{r.get('epoch')}"
+        label = f"{r.get('task')}[{fx}]/{r.get('variant')}/e{r.get('epoch')}" if fx else base
         status = r.get("status", RunStatus.SUCCESS.value)
         has_trace = r.get("test_id") in trace_test_ids
         if status == RunStatus.TIMEOUT.value:
@@ -589,10 +637,11 @@ def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path
         scenario = trace.resource_tags.get("eval.scenario", "")
         variant = trace.resource_tags.get("eval.variant", "")
         epoch = trace.resource_tags.get("eval.epoch", "")
+        fixture = trace.resource_tags.get("eval.fixture", "")
         task = tasks_by_name.get(scenario)
         if not task or not any(ev.type == "judge" for ev in task.evaluators):
             continue
-        scores_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.scores.json"
+        scores_file = results_dir / f"{run_slug(scenario, variant, epoch, fixture)}.scores.json"
         if not scores_file.exists() or scores_file in seen_files:
             continue
         seen_files.add(scores_file)
@@ -600,6 +649,11 @@ def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path
             scores = json.loads(scores_file.read_text())
         except (json.JSONDecodeError, OSError):
             continue
+        label = (
+            f"{scenario}/{fixture}/{variant}/e{epoch}"
+            if fixture
+            else f"{scenario}/{variant}/e{epoch}"
+        )
         for s in scores:
             if s.get("type") != "judge":
                 continue
@@ -612,10 +666,10 @@ def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path
             if mm := meta.get("judge_version_mismatch"):
                 mismatches.add(f"expected {mm.get('expected')} got {mm.get('actual')}")
             if meta.get("truncation"):
-                truncated.append(f"{scenario}/{variant}/e{epoch}:{s.get('name')}")
+                truncated.append(f"{label}:{s.get('name')}")
             if s.get("score") is None:
                 reason = s.get("reason", "no score")
-                problems.append(f"{scenario}/{variant}/e{epoch}:{s.get('name')} ({reason})")
+                problems.append(f"{label}:{s.get('name')} ({reason})")
 
     if judge_total:
         breakdown = ", ".join(f"{k}={v}" for k, v in sorted(outcomes.items()))
@@ -737,6 +791,7 @@ def _run_judges(
         scenario = trace.resource_tags.get("eval.scenario", "")
         variant = trace.resource_tags.get("eval.variant", "")
         epoch = trace.resource_tags.get("eval.epoch", "")
+        fixture = trace.resource_tags.get("eval.fixture", "")
         task = tasks_by_name.get(scenario)
         if not task:
             continue
@@ -745,7 +800,8 @@ def _run_judges(
         if not judge_evaluators:
             continue
 
-        scores_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.scores.json"
+        slug = run_slug(scenario, variant, epoch, fixture)
+        scores_file = results_dir / f"{slug}.scores.json"
         key = str(scores_file)
         if key in contexts:
             continue  # already collected work for this scores file
@@ -773,7 +829,7 @@ def _run_judges(
 
         # Fall back to log file if OTel content not available
         if not conversation:
-            log_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.log"
+            log_file = results_dir / f"{slug}.log"
             if log_file.exists():
                 text = log_file.read_text()
                 conversation = (
@@ -783,7 +839,7 @@ def _run_judges(
         # Read output files from persisted outputs. The judge can score on output
         # files alone (e.g. file-writing tasks), so only skip when neither the
         # conversation nor any output file is available.
-        output_dir = results_dir / "outputs" / f"{scenario}_{variant}_epoch{epoch}"
+        output_dir = results_dir / "outputs" / slug
         output_files_text = read_files_from_dir(output_dir, max_chars=out_limit)
 
         truncation: dict[str, Any] = {}
@@ -799,6 +855,7 @@ def _run_judges(
             "scenario": scenario,
             "variant": variant,
             "epoch": epoch,
+            "fixture": fixture,
             "scores_file": scores_file,
             "existing_scores": existing_scores,
             "conversation": conversation,
@@ -840,8 +897,9 @@ def _run_judges(
     def _judge(key: str, evs: list[Any]) -> tuple[str, list[dict[str, Any]]]:
         ctx = contexts[key]
         label = ", ".join(ev.name for ev in evs)
+        fx = f"/{ctx['fixture']}" if ctx.get("fixture") else ""
         click.echo(
-            f"    [{ctx['scenario']}/{ctx['variant']}/e{ctx['epoch']}] Evaluating: {label} (judge)...",
+            f"    [{ctx['scenario']}{fx}/{ctx['variant']}/e{ctx['epoch']}] Evaluating: {label} (judge)...",
             err=True,
         )
         extra_meta = {"truncation": ctx["truncation"]} if ctx["truncation"] else None
@@ -926,6 +984,7 @@ def _run_metric_evaluators(config: Config, traces: list[Trace], results_dir: Pat
         scenario = trace.resource_tags.get("eval.scenario", "")
         variant = trace.resource_tags.get("eval.variant", "")
         epoch = trace.resource_tags.get("eval.epoch", "")
+        fixture = trace.resource_tags.get("eval.fixture", "")
         task = tasks_by_name.get(scenario)
         if not task:
             continue
@@ -934,10 +993,12 @@ def _run_metric_evaluators(config: Config, traces: list[Trace], results_dir: Pat
         if not metric_evaluators:
             continue
 
-        scores_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.scores.json"
+        scores_file = results_dir / f"{run_slug(scenario, variant, epoch, fixture)}.scores.json"
         if scores_file in seen:
             continue  # one trace per scores file is enough
         seen.add(scores_file)
+
+        fx = f"/{fixture}" if fixture else ""
 
         run_metrics = extract_metrics(trace)
         if run_metrics is None:
@@ -961,14 +1022,14 @@ def _run_metric_evaluators(config: Config, traces: list[Trace], results_dir: Pat
         for s in new_scores:
             status = "PASS" if s.passed else ("n/a" if s.score is None else "FAIL")
             click.echo(
-                f"    [{scenario}/{variant}/e{epoch}] {s.name} (metric): {status} — {s.reason}",
+                f"    [{scenario}{fx}/{variant}/e{epoch}] {s.name} (metric): {status} — {s.reason}",
                 err=True,
             )
             # A gate fails when it does not pass — this deliberately includes the
             # unavailable-value case (score is None), which must NOT silently pass.
             if not s.passed:
                 reason = s.reason.split(" → ", 1)[0]  # drop the trailing "→ FAIL"
-                failed_gates.append(f"{s.name} [{scenario}/{variant}/e{epoch}]: {reason}")
+                failed_gates.append(f"{s.name} [{scenario}{fx}/{variant}/e{epoch}]: {reason}")
 
     return failed_gates
 
