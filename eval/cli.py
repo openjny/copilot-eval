@@ -485,14 +485,6 @@ def _fetch_traces_for_run(
     return traces
 
 
-def _fetch_traces_from_files(
-    config: Config, run_id: str, results_dir: Path, manifest_runs: list[dict[str, Any]] | None
-) -> list[Trace]:
-    """Deprecated compatibility wrapper for file trace collection."""
-    del manifest_runs
-    return _collect_file_traces(config, run_id, results_dir)
-
-
 def _collect_file_traces(config: Config, run_id: str, results_dir: Path) -> list[Trace]:
     """Collect traces from file exporter output stored in results directory."""
     task = config.tasks[0] if config.tasks else Task(name="analyze", prompt="")
