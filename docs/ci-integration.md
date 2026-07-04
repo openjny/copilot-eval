@@ -1,9 +1,13 @@
-# CI Integration: PR Comments
+# CI Integration: PR Comments and Native Test Reports
 
 When copilot-eval gates a PR (a change to a skill, custom agent, instruction,
 hook, or MCP server), the result shouldn't be buried in CI logs. `analyze -o
 markdown --compact` renders a condensed, PR-comment-friendly report you can
-post directly with `gh pr comment` — no extra tooling required.
+post directly with `gh pr comment` — no extra tooling required. For deeper CI
+integration, `analyze -o junit`, `-o gha-summary`, and `-o html` give you a
+native test report, a GitHub Actions step summary, and a self-contained
+dashboard, respectively — all still driven by the same `analyze` command and
+its statistical gates (`--min-epochs`, metric evaluators).
 
 ## Compact vs. full markdown
 
@@ -58,3 +62,63 @@ own to gate) and doesn't require special `workflow`-scoped push permissions.
 `analyze`'s exit code already reflects the CI gates (metric evaluator
 thresholds, `--min-epochs`), so `fail-on-regression`-style behavior comes for
 free: just don't swallow the command's exit status in your workflow step.
+
+## JUnit XML (`-o junit`)
+
+`analyze -o junit` emits standard JUnit XML (`<testsuites><testsuite><testcase>`,
+via stdlib `xml.etree.ElementTree` — no `lxml`/`junit-xml` dependency) so any
+CI system with native test-report support (GitHub Actions, Azure Pipelines,
+Jenkins, GitLab CI, ...) can render copilot-eval results the same way it
+renders unit test results:
+
+- One `<testsuite>` per task.
+- One `<testcase>` per metric/judge-score/pass@k comparison (`classname` is
+  the task name, `name` is the metric).
+- A comparison whose bootstrap CI excludes zero (multiple-comparison
+  corrected) *and* moved in the unfavorable direction — metrics regress when
+  they go up (duration, cost, tokens, ...), judge scores and pass@k/pass^k
+  rates regress when they go down — renders as `<failure>`. Everything else
+  is `<system-out>` with the values/delta/CI for context.
+
+```bash
+uv run copilot-eval analyze --run-id "$RUN_ID" -o junit > report.xml
+```
+
+Feed `report.xml` to your CI's test-report action (e.g.
+[`dorny/test-reporter`](https://github.com/dorny/test-reporter) or GitHub's
+built-in JUnit annotations) to get inline pass/fail annotations per metric.
+
+## GitHub Actions step summary (`-o gha-summary`)
+
+`analyze -o gha-summary` renders the same compact markdown as `-o markdown
+--compact` and appends it to `$GITHUB_STEP_SUMMARY` when that env var is set
+(GitHub Actions sets it automatically in every job step) — no `tee`/heredoc
+plumbing required. Outside GitHub Actions (or if the env var is unset), it
+falls back to printing the markdown to stdout.
+
+```yaml
+- name: Analyze results
+  run: uv run copilot-eval analyze --run-id "${{ steps.run.outputs.run_id }}" -o gha-summary
+```
+
+## Self-contained HTML (`-o html`)
+
+`analyze -o html` emits a single HTML file with all CSS inlined (no external
+stylesheets, scripts, or fonts) — safe to upload as a build artifact or open
+directly in a browser. Metric/judge-score/pass@k tables color-code
+statistically significant deltas (green = improvement, red = regression) and
+include a CSS-only bar per value for an at-a-glance sense of relative
+magnitude.
+
+```bash
+uv run copilot-eval analyze --run-id "$RUN_ID" -o html > report.html
+```
+
+```yaml
+- name: Analyze results
+  run: uv run copilot-eval analyze --run-id "$RUN_ID" -o html > report.html
+- uses: actions/upload-artifact@v4
+  with:
+    name: eval-report
+    path: report.html
+```

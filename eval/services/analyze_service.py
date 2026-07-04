@@ -14,10 +14,14 @@ from eval.progress import create_reporter
 from eval.report import (
     Report,
     build_report,
+    format_gha_summary,
+    format_html,
     format_json,
+    format_junit,
     format_markdown,
     format_markdown_compact,
     format_table,
+    write_gha_summary,
 )
 from eval.services.judge_service import (
     _report_judge_reliability,
@@ -34,7 +38,14 @@ from eval.services.trace_service import (
 )
 from eval.trace import RunMetrics, Trace, extract_metrics
 
-_FORMATTERS = {"table": format_table, "json": format_json, "markdown": format_markdown}
+_FORMATTERS = {
+    "table": format_table,
+    "json": format_json,
+    "markdown": format_markdown,
+    "junit": format_junit,
+    "gha-summary": format_gha_summary,
+    "html": format_html,
+}
 
 
 def _gate_epochs(report: Report) -> int:
@@ -136,7 +147,11 @@ def run_analysis(
     formatter = (
         format_markdown_compact if (compact and output == "markdown") else _FORMATTERS[output]
     )
-    click.echo(formatter(reports))
+    content = formatter(reports)
+    if output == "gha-summary" and write_gha_summary(content):
+        click.echo("Report appended to $GITHUB_STEP_SUMMARY.", err=True)
+    else:
+        click.echo(content)
 
     gate_failures: list[str] = []
 
