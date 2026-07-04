@@ -81,7 +81,7 @@ Each variant has its own Dockerfile that extends `copilot-eval:base` with varian
 
 ## Issue Tracking
 
-See `docs/project-management.md` for full details. Key conventions:
+See `docs/contributing.md` for full details. Key conventions:
 
 - **Epics**: tracking issues (label `epic`) with task lists grouping related work
 - **Titles**: conventional commit style — `type(scope): description`
