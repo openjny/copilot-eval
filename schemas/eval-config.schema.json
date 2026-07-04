@@ -1,0 +1,938 @@
+{
+  "$id": "https://raw.githubusercontent.com/openjny/copilot-eval/main/schemas/eval-config.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Schema for eval-config.yaml, the config file for copilot-eval's environment-isolated A/B evaluation runs. Generated from eval/config.py by scripts/generate_schema.py -- do not edit by hand.",
+  "properties": {
+    "runner": {
+      "additionalProperties": false,
+      "description": "Global run behavior: epochs, timeouts, models, judge settings, parallelism, and trace collection.",
+      "properties": {
+        "capture_content": {
+          "default": true,
+          "description": "Capture prompt/response content in OTel spans (required by judge evaluators).",
+          "type": "boolean"
+        },
+        "collector": {
+          "default": "file",
+          "description": "Trace collection backend.",
+          "enum": [
+            "file",
+            "jaeger"
+          ],
+          "type": "string"
+        },
+        "container_image_base": {
+          "default": "copilot-eval",
+          "description": "Base name for built variant images.",
+          "type": "string"
+        },
+        "copilot_version": {
+          "default": "1.0.18",
+          "description": "Copilot CLI version pinned in the eval container.",
+          "type": "string"
+        },
+        "epochs": {
+          "default": 1,
+          "description": "Repetitions per task x variant.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "jaeger_url": {
+          "default": "http://localhost:16686",
+          "description": "Jaeger query UI/API endpoint (host side).",
+          "type": "string"
+        },
+        "judge_aggregate": {
+          "default": "median",
+          "description": "How to aggregate judge_samples > 1 scores.",
+          "enum": [
+            "median",
+            "mean",
+            "majority"
+          ],
+          "type": "string"
+        },
+        "judge_batch": {
+          "default": false,
+          "description": "Opt-in: score all of a task's judges in a single LLM call instead of one call per judge.",
+          "type": "boolean"
+        },
+        "judge_copilot_version": {
+          "default": null,
+          "description": "Expected host `copilot --version` for judge runs; analyze warns on mismatch.",
+          "type": "string"
+        },
+        "judge_max_conversation_chars": {
+          "default": 8000,
+          "description": "Max chars of conversation text passed to the judge prompt.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "judge_max_output_chars": {
+          "default": 8000,
+          "description": "Max chars of output-file text passed to the judge prompt.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "judge_model": {
+          "default": "gpt-4.1",
+          "description": "Model used for LLM-as-Judge evaluators (separate from the eval model).",
+          "type": "string"
+        },
+        "judge_samples": {
+          "default": 1,
+          "description": "Self-consistency: sample each judge this many times and aggregate.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "judge_timeout_seconds": {
+          "default": 60,
+          "description": "Per-judge Copilot timeout during analyze (seconds).",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_turns": {
+          "default": null,
+          "description": "Max autopilot turns.",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_workers": {
+          "default": 8,
+          "description": "Max concurrent runs (for parallel modes) and concurrent judge calls.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "model": {
+          "default": null,
+          "description": "Copilot model used for eval runs.",
+          "type": "string"
+        },
+        "otel_endpoint": {
+          "default": "http://host.docker.internal:4318",
+          "description": "OTLP collector endpoint reachable from inside the container.",
+          "type": "string"
+        },
+        "output_format": {
+          "default": "text",
+          "description": "analyze report output format.",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "type": "string"
+        },
+        "output_instruction": {
+          "default": "Save all output files under /workspace/output/.",
+          "description": "Appended to every prompt so generated files reach judges. Empty string (\"\") disables it; supports {var} interpolation.",
+          "type": "string"
+        },
+        "parallel": {
+          "default": "off",
+          "description": "Concurrency mode across the run matrix.",
+          "enum": [
+            "off",
+            "per_task",
+            "full"
+          ],
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "default": null,
+          "description": "Optional reasoning effort passed to Copilot (e.g. low, medium, high).",
+          "type": "string"
+        },
+        "seed": {
+          "default": null,
+          "description": "RNG seed for variant_order=random (reproducibility).",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeout_seconds": {
+          "default": 300,
+          "description": "Max seconds per Copilot run (overridable per task).",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "trace_fetch_limit": {
+          "default": 2000,
+          "description": "analyze: max traces to request from a remote collector.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "trace_fetch_retries": {
+          "default": 5,
+          "description": "analyze: attempts to wait for trace ingestion to catch up.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trace_fetch_retry_delay": {
+          "default": 2.0,
+          "description": "analyze: seconds between trace-ingestion retries.",
+          "minimum": 0,
+          "type": "number"
+        },
+        "variant_order": {
+          "default": "fixed",
+          "description": "Order variants run in per epoch.",
+          "enum": [
+            "fixed",
+            "counterbalance",
+            "random"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "tasks": {
+      "anyOf": [
+        {
+          "items": {
+            "additionalProperties": false,
+            "description": "A single eval scenario: a prompt run against every variant, scored by its evaluators.",
+            "properties": {
+              "enabled": {
+                "default": true,
+                "description": "Set to false to skip this task without deleting it.",
+                "type": "boolean"
+              },
+              "evaluators": {
+                "description": "Evaluation criteria applied to this task's runs.",
+                "items": {
+                  "additionalProperties": false,
+                  "allOf": [
+                    {
+                      "if": {
+                        "anyOf": [
+                          {
+                            "not": {
+                              "required": [
+                                "type"
+                              ]
+                            }
+                          },
+                          {
+                            "properties": {
+                              "type": {
+                                "const": "judge"
+                              }
+                            },
+                            "required": [
+                              "type"
+                            ]
+                          }
+                        ]
+                      },
+                      "then": {
+                        "anyOf": [
+                          {
+                            "required": [
+                              "prompt"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "criterion",
+                              "rubric"
+                            ]
+                          }
+                        ],
+                        "not": {
+                          "required": [
+                            "prompt",
+                            "rubric"
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "type": {
+                            "const": "script"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "script"
+                        ]
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "type": {
+                            "enum": [
+                              "contains",
+                              "regex"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "value"
+                        ]
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "type": {
+                            "const": "metric"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "metric",
+                          "op",
+                          "value"
+                        ]
+                      }
+                    }
+                  ],
+                  "description": "Evaluation criterion applied to a task's run.",
+                  "properties": {
+                    "criterion": {
+                      "description": "type=judge: a scoring axis, paired with 'rubric' to compose the prompt.",
+                      "type": "string"
+                    },
+                    "metric": {
+                      "description": "type=metric: RunMetrics field to assert on.",
+                      "enum": [
+                        "duration",
+                        "duration_seconds",
+                        "turn_count",
+                        "tool_count",
+                        "tool_duration",
+                        "total_input_tokens",
+                        "total_output_tokens",
+                        "total_cache_tokens",
+                        "total_tokens",
+                        "cost"
+                      ],
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "Unique evaluator identifier (unique within its task).",
+                      "minLength": 1,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
+                    "op": {
+                      "description": "type=metric: comparison operator.",
+                      "enum": [
+                        "<",
+                        "<=",
+                        ">",
+                        ">=",
+                        "==",
+                        "!="
+                      ],
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "type=judge: the judge prompt (freeform). Mutually exclusive with 'criterion'/'rubric'.",
+                      "type": "string"
+                    },
+                    "rubric": {
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "description": "type=judge: maps an integer score (as a YAML int or numeric-string key) to an anchor description. Requires 'criterion'.",
+                      "type": "object"
+                    },
+                    "script": {
+                      "description": "type=script: path to an executable that scores the run.",
+                      "type": "string"
+                    },
+                    "type": {
+                      "default": "judge",
+                      "description": "Evaluator strategy. Third-party plugins (issue #66) may register additional type strings not listed here.",
+                      "enum": [
+                        "judge",
+                        "script",
+                        "contains",
+                        "regex",
+                        "metric"
+                      ],
+                      "type": "string"
+                    },
+                    "value": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        }
+                      ],
+                      "description": "type=contains/regex: substring or regex pattern to match. type=metric: the numeric threshold to compare against (YAML key is still 'value')."
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "fixture": {
+                "description": "Directory under fixtures/ to mount at /workspace. Falls back to the task name when unset.",
+                "type": "string"
+              },
+              "fixtures": {
+                "description": "Run this task against multiple fixtures (input-coverage axis) instead of a single one.",
+                "items": {
+                  "description": "Fixture directory name.",
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                  "type": "string"
+                },
+                "type": "array",
+                "uniqueItems": true
+              },
+              "health_check": {
+                "description": "Script that must pass before running this task's Copilot invocation.",
+                "type": "string"
+              },
+              "hooks": {
+                "additionalProperties": false,
+                "description": "Setup/teardown scripts run around a task's Copilot invocation.",
+                "properties": {
+                  "after_run": {
+                    "description": "Script run after Copilot (e.g. cleanup).",
+                    "type": "string"
+                  },
+                  "before_run": {
+                    "description": "Script run before Copilot (e.g. environment reset).",
+                    "type": "string"
+                  },
+                  "on_failure": {
+                    "default": "fail",
+                    "description": "Failure policy for before_run: abort the run, or warn and continue. after_run failures always warn regardless of this setting.",
+                    "enum": [
+                      "fail",
+                      "warn"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "judges": {
+                "deprecated": true,
+                "description": "Deprecated alias for evaluators (type=judge only). Prefer 'evaluators'.",
+                "items": {
+                  "properties": {
+                    "name": {
+                      "description": "Judge name.",
+                      "minLength": 1,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "Judge prompt.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "prompt"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "metrics": {
+                "deprecated": true,
+                "description": "Deprecated alias; use 'evaluators' instead.",
+                "properties": {
+                  "judges": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              },
+              "name": {
+                "description": "Unique task identifier, used in result file names.",
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                "type": "string"
+              },
+              "prompt": {
+                "description": "Prompt sent to Copilot. Supports {var} interpolation from vars.",
+                "type": "string"
+              },
+              "reset_script": {
+                "deprecated": true,
+                "description": "Deprecated alias for hooks.before_run.",
+                "type": "string"
+              },
+              "timeout_seconds": {
+                "description": "Override runner.timeout_seconds for this task.",
+                "minimum": 1,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "vars": {
+                "additionalProperties": {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "description": "Task-level variable overrides (merged after global vars).",
+                "type": "object"
+              },
+              "verify": {
+                "deprecated": true,
+                "description": "Deprecated alias for an evaluators entry of type=script named 'verify'.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "prompt"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "description": "A single eval scenario: a prompt run against every variant, scored by its evaluators.",
+            "properties": {
+              "enabled": {
+                "default": true,
+                "description": "Set to false to skip this task without deleting it.",
+                "type": "boolean"
+              },
+              "evaluators": {
+                "description": "Evaluation criteria applied to this task's runs.",
+                "items": {
+                  "additionalProperties": false,
+                  "allOf": [
+                    {
+                      "if": {
+                        "anyOf": [
+                          {
+                            "not": {
+                              "required": [
+                                "type"
+                              ]
+                            }
+                          },
+                          {
+                            "properties": {
+                              "type": {
+                                "const": "judge"
+                              }
+                            },
+                            "required": [
+                              "type"
+                            ]
+                          }
+                        ]
+                      },
+                      "then": {
+                        "anyOf": [
+                          {
+                            "required": [
+                              "prompt"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "criterion",
+                              "rubric"
+                            ]
+                          }
+                        ],
+                        "not": {
+                          "required": [
+                            "prompt",
+                            "rubric"
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "type": {
+                            "const": "script"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "script"
+                        ]
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "type": {
+                            "enum": [
+                              "contains",
+                              "regex"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "value"
+                        ]
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "type": {
+                            "const": "metric"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "metric",
+                          "op",
+                          "value"
+                        ]
+                      }
+                    }
+                  ],
+                  "description": "Evaluation criterion applied to a task's run.",
+                  "properties": {
+                    "criterion": {
+                      "description": "type=judge: a scoring axis, paired with 'rubric' to compose the prompt.",
+                      "type": "string"
+                    },
+                    "metric": {
+                      "description": "type=metric: RunMetrics field to assert on.",
+                      "enum": [
+                        "duration",
+                        "duration_seconds",
+                        "turn_count",
+                        "tool_count",
+                        "tool_duration",
+                        "total_input_tokens",
+                        "total_output_tokens",
+                        "total_cache_tokens",
+                        "total_tokens",
+                        "cost"
+                      ],
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "Unique evaluator identifier (unique within its task).",
+                      "minLength": 1,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
+                    "op": {
+                      "description": "type=metric: comparison operator.",
+                      "enum": [
+                        "<",
+                        "<=",
+                        ">",
+                        ">=",
+                        "==",
+                        "!="
+                      ],
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "type=judge: the judge prompt (freeform). Mutually exclusive with 'criterion'/'rubric'.",
+                      "type": "string"
+                    },
+                    "rubric": {
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "description": "type=judge: maps an integer score (as a YAML int or numeric-string key) to an anchor description. Requires 'criterion'.",
+                      "type": "object"
+                    },
+                    "script": {
+                      "description": "type=script: path to an executable that scores the run.",
+                      "type": "string"
+                    },
+                    "type": {
+                      "default": "judge",
+                      "description": "Evaluator strategy. Third-party plugins (issue #66) may register additional type strings not listed here.",
+                      "enum": [
+                        "judge",
+                        "script",
+                        "contains",
+                        "regex",
+                        "metric"
+                      ],
+                      "type": "string"
+                    },
+                    "value": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        }
+                      ],
+                      "description": "type=contains/regex: substring or regex pattern to match. type=metric: the numeric threshold to compare against (YAML key is still 'value')."
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "fixture": {
+                "description": "Directory under fixtures/ to mount at /workspace. Falls back to the task name when unset.",
+                "type": "string"
+              },
+              "fixtures": {
+                "description": "Run this task against multiple fixtures (input-coverage axis) instead of a single one.",
+                "items": {
+                  "description": "Fixture directory name.",
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                  "type": "string"
+                },
+                "type": "array",
+                "uniqueItems": true
+              },
+              "health_check": {
+                "description": "Script that must pass before running this task's Copilot invocation.",
+                "type": "string"
+              },
+              "hooks": {
+                "additionalProperties": false,
+                "description": "Setup/teardown scripts run around a task's Copilot invocation.",
+                "properties": {
+                  "after_run": {
+                    "description": "Script run after Copilot (e.g. cleanup).",
+                    "type": "string"
+                  },
+                  "before_run": {
+                    "description": "Script run before Copilot (e.g. environment reset).",
+                    "type": "string"
+                  },
+                  "on_failure": {
+                    "default": "fail",
+                    "description": "Failure policy for before_run: abort the run, or warn and continue. after_run failures always warn regardless of this setting.",
+                    "enum": [
+                      "fail",
+                      "warn"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "judges": {
+                "deprecated": true,
+                "description": "Deprecated alias for evaluators (type=judge only). Prefer 'evaluators'.",
+                "items": {
+                  "properties": {
+                    "name": {
+                      "description": "Judge name.",
+                      "minLength": 1,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "Judge prompt.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "prompt"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "metrics": {
+                "deprecated": true,
+                "description": "Deprecated alias; use 'evaluators' instead.",
+                "properties": {
+                  "judges": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              },
+              "name": {
+                "description": "Unique task identifier, used in result file names.",
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                "type": "string"
+              },
+              "prompt": {
+                "description": "Prompt sent to Copilot. Supports {var} interpolation from vars.",
+                "type": "string"
+              },
+              "reset_script": {
+                "deprecated": true,
+                "description": "Deprecated alias for hooks.before_run.",
+                "type": "string"
+              },
+              "timeout_seconds": {
+                "description": "Override runner.timeout_seconds for this task.",
+                "minimum": 1,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "vars": {
+                "additionalProperties": {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "description": "Task-level variable overrides (merged after global vars).",
+                "type": "object"
+              },
+              "verify": {
+                "deprecated": true,
+                "description": "Deprecated alias for an evaluators entry of type=script named 'verify'.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "prompt"
+            ],
+            "type": "object"
+          },
+          "type": "object"
+        }
+      ],
+      "description": "Eval tasks, as a list (name required per item) or a mapping of task name to task body. Ignored when tasks/*.yaml files exist."
+    },
+    "variants": {
+      "description": "A/B environments. Defaults to a single 'baseline' variant when omitted and no variants/*.yaml files exist.",
+      "items": {
+        "additionalProperties": false,
+        "description": "An A/B environment: how its image is built and how its container is set up before Copilot runs.",
+        "properties": {
+          "build": {
+            "additionalProperties": false,
+            "description": "Image build settings.",
+            "properties": {
+              "dockerfile": {
+                "description": "Path to a custom Dockerfile (FROM the copilot-eval base image). Omit to use the base image unmodified.",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "description": {
+            "default": "",
+            "description": "Human-readable summary of this variant.",
+            "type": "string"
+          },
+          "model": {
+            "description": "Override runner.model for this variant only.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Unique variant identifier, used as the image tag.",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "type": "string"
+          },
+          "run": {
+            "additionalProperties": false,
+            "description": "Container setup.",
+            "properties": {
+              "script": {
+                "description": "Script sourced inside the container before Copilot runs (e.g. auth/login setup).",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "vars": {
+            "additionalProperties": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
+            "description": "Variant-level variable overrides (merged after task vars).",
+            "type": "object"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "vars": {
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number",
+          "boolean",
+          "null"
+        ]
+      },
+      "description": "Global variables available for {var} interpolation in prompts.",
+      "type": "object"
+    }
+  },
+  "title": "copilot-eval configuration",
+  "type": "object"
+}

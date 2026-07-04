@@ -1,0 +1,12 @@
+{
+  // Requires the "YAML" extension (redhat.vscode-yaml) for IntelliSense
+  // (autocomplete, hover docs, and red squiggles on typos) in eval-config.yaml
+  // files. The schema is generated from eval/config.py by
+  // scripts/generate_schema.py — see schemas/eval-config.schema.json.
+  "yaml.schemas": {
+    "./schemas/eval-config.schema.json": [
+      "eval-config.yaml",
+      "examples/*/eval-config.yaml"
+    ]
+  }
+}

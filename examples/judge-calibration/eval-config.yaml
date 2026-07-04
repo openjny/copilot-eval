@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../../schemas/eval-config.schema.json
 # Judge calibration eval set.
 #
 # Each task pins Copilot's output to a FIXED, known answer (the prompt tells it

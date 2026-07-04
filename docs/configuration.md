@@ -1,5 +1,42 @@
 # Configuration Guide
 
+## JSON Schema (IDE IntelliSense)
+
+`eval-config.yaml` has a generated JSON Schema at
+[`schemas/eval-config.schema.json`](../schemas/eval-config.schema.json),
+covering `runner`, `variants`, `tasks`, `evaluators`, `vars`, and `hooks`.
+Point your editor at it to get autocomplete, hover docs, and red squiggles on
+typos (e.g. `timeout_secods` or `judge_batch: "tru"`) as you type, instead of
+discovering them at run time.
+
+**VS Code**: install the [YAML extension](https://marketplace.visualstudio.com/items?itemName=redhat.vscode-yaml)
+— this repo's [`.vscode/settings.json`](../.vscode/settings.json) already maps
+it over `eval-config.yaml` and `examples/*/eval-config.yaml`.
+
+**Other editors** (or configs outside `examples/`): add a header comment
+pointing at the schema, relative to the YAML file:
+
+```yaml
+# yaml-language-server: $schema=../../schemas/eval-config.schema.json
+vars: {}
+...
+```
+
+The schema is generated from the `RunnerConfig`/`Variant`/`Task`/`Evaluator`
+dataclasses in `eval/config.py` — after changing one of those, regenerate it:
+
+```bash
+uv run python scripts/generate_schema.py
+```
+
+`tests/test_schema.py` fails if the committed schema drifts from the
+generator's output, or if any config under `examples/` (or the root
+`eval-config.yaml`) stops validating against it.
+
+> **Note**: the schema only covers the inline/top-level `eval-config.yaml`
+> shape. Configs that split tasks/variants into `tasks/*.yaml` /
+> `variants/*.yaml` files aren't schema-checked per-file (yet).
+
 ## Validation
 
 Before running an eval, catch config typos and missing references early with:
@@ -8,10 +45,11 @@ Before running an eval, catch config typos and missing references early with:
 uv run copilot-eval validate --config-dir <dir>
 ```
 
-This checks YAML syntax/schema validity, that every referenced fixture directory
-exists on disk, that variant/task script references (Dockerfiles, run scripts,
-hooks, health checks, script evaluators) point to real files, and that every
-`{var}` placeholder in a prompt or `output_instruction` resolves for each
+This checks YAML syntax/schema validity, that `eval-config.yaml` conforms to
+`schemas/eval-config.schema.json` (see above), that every referenced fixture
+directory exists on disk, that variant/task script references (Dockerfiles, run
+scripts, hooks, health checks, script evaluators) point to real files, and that
+every `{var}` placeholder in a prompt or `output_instruction` resolves for each
 variant. Every check result is either a pass (`✓`), a **blocking** failure
 (`✗`), or a non-blocking **warning** (`⚠`) — a missing fixture directory or an
 unresolved `{var}` placeholder is only a warning, since the runtime tolerates

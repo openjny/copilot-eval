@@ -2,7 +2,7 @@
 
 Two audiences share the same `CheckResult` shape:
 
-- **Static checks** (`check_config_schema`, `check_fixtures`,
+- **Static checks** (`check_config_schema`, `check_json_schema`, `check_fixtures`,
   `check_script_references`, `check_var_interpolation`) inspect the config on
   disk and are used by the `validate` CLI command.
 - **Readiness checks** (`check_docker_daemon`, `check_github_token`,
@@ -17,6 +17,7 @@ cryptic failure deep into a run.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -127,6 +128,71 @@ def check_config_schema(config_dir: Path | None) -> tuple[Config | None, CheckRe
             "Fix the YAML syntax (check indentation, quoting, and colons).",
         )
     return config, _ok("config_schema", "eval-config.yaml is valid")
+
+
+def check_json_schema(config_dir: Path | None) -> CheckResult:
+    """Validate the raw `eval-config.yaml` against `schemas/eval-config.schema.json`.
+
+    This is a *structural* check on the file as written (before the dataclass
+    coercion `check_config_schema` performs), so it catches typo'd keys and
+    wrong value types (e.g. `timeout_secods: 300`, `judge_batch: "tru"`) even
+    when they'd otherwise be silently accepted as unknown/default fields.
+    Non-blocking: a missing/unreadable schema file, missing `jsonschema`
+    dependency, or a config that only uses `tasks/*.yaml` / `variants/*.yaml`
+    external files (not covered by this top-level check) all degrade to a
+    warning rather than failing `validate`.
+    """
+    try:
+        import jsonschema
+    except ImportError:
+        return _warn(
+            "json_schema",
+            "Skipped: the 'jsonschema' package is not installed.",
+            "Install it (e.g. `uv sync`) to enable JSON Schema validation.",
+        )
+
+    schema_path = Path(__file__).resolve().parent.parent / "schemas" / "eval-config.schema.json"
+    try:
+        schema = json.loads(schema_path.read_text())
+    except OSError as exc:
+        return _warn(
+            "json_schema", f"Skipped: could not read schema file: {exc}", str(schema_path)
+        )
+
+    directory = config_dir if config_dir is not None else schema_path.parent.parent
+    config_path = directory / "eval-config.yaml"
+    if not config_path.exists():
+        return _warn(
+            "json_schema",
+            f"Skipped: no eval-config.yaml at {config_path}.",
+            "Only the inline eval-config.yaml is schema-checked (not tasks/*.yaml "
+            "or variants/*.yaml files).",
+        )
+
+    try:
+        raw = yaml.safe_load(config_path.read_text()) or {}
+    except yaml.YAMLError:
+        # check_config_schema already reports YAML syntax errors as blocking.
+        return _warn("json_schema", "Skipped: eval-config.yaml has a YAML syntax error.", "")
+
+    validator = jsonschema.Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(raw), key=lambda e: list(e.path))
+    if not errors:
+        return _ok("json_schema", "eval-config.yaml matches schemas/eval-config.schema.json")
+
+    lines = []
+    for e in errors[:10]:
+        where = ".".join(str(p) for p in e.path) or "<root>"
+        lines.append(f"{where}: {e.message}")
+    summary = "; ".join(lines)
+    if len(errors) > 10:
+        summary += f" (+{len(errors) - 10} more)"
+    return _fail(
+        "json_schema",
+        f"eval-config.yaml does not match the JSON Schema: {summary}",
+        "Fix the field(s) above, or see schemas/eval-config.schema.json / "
+        "docs/configuration.md for the expected shape.",
+    )
 
 
 def check_fixtures(config: Config, tasks: list[Task] | None = None) -> list[CheckResult]:
