@@ -53,3 +53,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["eval"]
+
+# `schemas/` lives at the repo root, outside the `eval` package, so it isn't
+# picked up by `packages = ["eval"]` above. Bundle it inside the installed
+# package too (eval/schemas/...) so `eval.cli.init_cmd` and
+# `eval.validation.check_json_schema` can still find it via
+# importlib.resources when copilot-eval is installed as a wheel rather than
+# run from a source checkout (see eval/cli/init_cmd.py).
+[tool.hatch.build.targets.wheel.force-include]
+"schemas" = "eval/schemas"
