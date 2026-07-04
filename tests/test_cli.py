@@ -1,11 +1,18 @@
 """Tests for CLI scheduling helpers (variant ordering for bias reduction)."""
 
+import json
 import random
 from pathlib import Path
 
 from click.testing import CliRunner
 
-from eval.cli import _collect_file_traces, _ordering_rng, main, order_variants
+from eval.cli import (
+    _collect_file_traces,
+    _ordering_rng,
+    _run_metric_evaluators,
+    main,
+    order_variants,
+)
 from eval.config import Config, RunnerConfig, Variant
 
 FIXTURE = Path(__file__).parent / "fixtures" / "file-exporter-sample.jsonl"
@@ -153,3 +160,296 @@ def test_invalid_log_format_env_var_yields_clean_error():
     assert result.exit_code == 2
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert "Invalid log format" in result.output
+
+
+# --- Metric evaluators at analyze time ---
+
+
+def _metric_config(project_dir: Path, config_dir: Path) -> Config:
+    from eval.config import Evaluator, Task
+
+    task = Task(
+        name="t",
+        prompt="p",
+        evaluators=[
+            Evaluator(name="latency", type="metric", metric="duration", op="<", threshold=60.0),
+            Evaluator(name="budget", type="metric", metric="cost", op="<", threshold=0.5),
+        ],
+    )
+    return Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[task],
+        variants=_variants("v"),
+        project_dir=project_dir,
+        config_dir=config_dir,
+    )
+
+
+def _metric_trace():
+    from eval.trace import Span, Trace
+
+    root = Span(
+        name="invoke_agent",
+        duration_s=42.0,
+        span_id="r",
+        parent_id=None,
+        tags={
+            "github.copilot.turn_count": 3,
+            "github.copilot.cost": "0.42",
+            "gen_ai.request.model": "m",
+        },
+    )
+    return Trace(
+        trace_id="tr",
+        spans=[root],
+        resource_tags={
+            "eval.scenario": "t",
+            "eval.variant": "v",
+            "eval.epoch": "0",
+            "eval.test_id": "abc",
+        },
+    )
+
+
+def test_run_metric_evaluators_writes_scores(tmp_path: Path):
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    config = _metric_config(tmp_path, tmp_path)
+
+    _run_metric_evaluators(config, [_metric_trace()], results_dir)
+
+    scores_file = results_dir / "t_v_epoch0.scores.json"
+    assert scores_file.exists()
+    scores = {s["name"]: s for s in json.loads(scores_file.read_text())}
+    assert scores["latency"]["type"] == "metric"
+    assert scores["latency"]["passed"] is True and scores["latency"]["score"] == 1
+    assert scores["budget"]["passed"] is True and scores["budget"]["score"] == 1
+
+
+def test_run_metric_evaluators_preserves_other_scores_and_is_idempotent(tmp_path: Path):
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    scores_file = results_dir / "t_v_epoch0.scores.json"
+    scores_file.write_text(
+        json.dumps(
+            [
+                {"name": "quality", "type": "judge", "score": 8, "reason": "r", "passed": True},
+                {
+                    "name": "latency",
+                    "type": "metric",
+                    "score": 0,
+                    "reason": "stale",
+                    "passed": False,
+                },
+            ]
+        )
+    )
+    config = _metric_config(tmp_path, tmp_path)
+
+    _run_metric_evaluators(config, [_metric_trace()], results_dir)
+    _run_metric_evaluators(config, [_metric_trace()], results_dir)  # idempotent
+
+    scores = json.loads(scores_file.read_text())
+    by_name = {s["name"]: s for s in scores}
+    # Judge score preserved, stale metric recomputed (now passing), no duplicates.
+    assert by_name["quality"]["type"] == "judge"
+    assert by_name["latency"]["passed"] is True
+    assert len([s for s in scores if s["name"] == "latency"]) == 1
+
+
+def test_run_metric_evaluators_returns_failed_gates(tmp_path: Path):
+    from eval.config import Evaluator, Task
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    task = Task(
+        name="t",
+        prompt="p",
+        evaluators=[
+            Evaluator(name="latency", type="metric", metric="duration", op="<", threshold=60.0),
+            Evaluator(name="budget", type="metric", metric="cost", op="<", threshold=0.3),
+        ],
+    )
+    config = Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[task],
+        variants=_variants("v"),
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+
+    failed = _run_metric_evaluators(config, [_metric_trace()], results_dir)
+
+    # latency passes (42 < 60); budget fails (0.42 not < 0.3).
+    assert len(failed) == 1
+    assert "budget" in failed[0]
+    assert "→" not in failed[0]  # arrow suffix stripped for the summary
+
+
+def test_run_metric_evaluators_unavailable_counts_as_failed(tmp_path: Path, monkeypatch):
+    from eval.config import Evaluator, Task
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    task = Task(
+        name="t",
+        prompt="p",
+        evaluators=[
+            Evaluator(name="budget", type="metric", metric="cost", op="<", threshold=0.5),
+        ],
+    )
+    config = Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[task],
+        variants=_variants("v"),
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+    # Simulate a metric that can't be derived from the trace (value is None):
+    # eval_metric must score it None/not-passing, and the gate must count as failed.
+    monkeypatch.setattr("eval.runner.metric_value", lambda *a, **k: None)
+
+    failed = _run_metric_evaluators(config, [_metric_trace()], results_dir)
+
+    assert len(failed) == 1
+    assert "budget" in failed[0]
+    assert "unavailable" in failed[0]
+
+
+def _metric_trace_no_root():
+    """A trace with resource tags but no `invoke_agent` span → extract_metrics None."""
+    from eval.trace import Trace
+
+    return Trace(
+        trace_id="tr",
+        spans=[],
+        resource_tags={
+            "eval.scenario": "t",
+            "eval.variant": "v",
+            "eval.epoch": "0",
+            "eval.test_id": "abc",
+        },
+    )
+
+
+def test_run_metric_evaluators_fails_closed_when_metrics_absent(tmp_path: Path):
+    from eval.config import Evaluator, Task
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    task = Task(
+        name="t",
+        prompt="p",
+        evaluators=[
+            Evaluator(name="budget", type="metric", metric="cost", op="<", threshold=0.5),
+        ],
+    )
+    config = Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[task],
+        variants=_variants("v"),
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+
+    # A trace that yields no metrics for a metric-gated task must fail CLOSED.
+    failed = _run_metric_evaluators(config, [_metric_trace_no_root()], results_dir)
+
+    assert len(failed) == 1
+    assert "budget" in failed[0]
+    assert "unavailable" in failed[0]
+
+    # A null (score=None, passed=False) score is persisted so the report reflects it.
+    scores = json.loads((results_dir / "t_v_epoch0.scores.json").read_text())
+    budget = next(s for s in scores if s["name"] == "budget")
+    assert budget["type"] == "metric"
+    assert budget["score"] is None
+    assert budget["passed"] is False
+
+
+# --- analyze exit code (CI gating) ---
+
+
+def _analyze_gate_config(tmp_path: Path, budget_threshold: float) -> Config:
+    """Build a Config (rooted at tmp_path) with a single cost-budget metric gate."""
+    from eval.config import Evaluator, Task
+
+    task = Task(
+        name="t",
+        prompt="p",
+        evaluators=[
+            Evaluator(
+                name="budget", type="metric", metric="cost", op="<", threshold=budget_threshold
+            )
+        ],
+    )
+    return Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[task],
+        variants=_variants("v"),
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+
+
+def _patch_analyze(
+    tmp_path: Path, monkeypatch, budget_threshold: float, create_results_dir: bool = True
+) -> str:
+    """Point analyze at a tmp-rooted config + results dir with a synthetic trace."""
+    from eval import cli
+
+    run_id = "run-1"
+    config = _analyze_gate_config(tmp_path, budget_threshold)
+    if create_results_dir:
+        (config.results_dir / run_id).mkdir(parents=True)
+    monkeypatch.setattr(cli, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr(cli, "_collect_file_traces", lambda *a, **k: [_metric_trace()])
+    return run_id
+
+
+def test_analyze_exits_nonzero_when_metric_gate_fails(tmp_path: Path, monkeypatch):
+    from click.testing import CliRunner
+
+    from eval import cli
+
+    run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.3)
+
+    result = CliRunner().invoke(cli.main, ["analyze", "--run-id", run_id, "--skip-eval"])
+
+    assert result.exit_code != 0
+    assert "Metric gate failed" in result.output
+    assert "budget" in result.output
+
+
+def test_analyze_exits_zero_when_metric_gate_passes(tmp_path: Path, monkeypatch):
+    from click.testing import CliRunner
+
+    from eval import cli
+
+    run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.5)
+
+    result = CliRunner().invoke(cli.main, ["analyze", "--run-id", run_id, "--skip-eval"])
+
+    assert result.exit_code == 0, result.output
+    assert "Metric gate failed" not in result.output
+
+
+def test_analyze_gate_runs_without_preexisting_results_dir(tmp_path: Path, monkeypatch):
+    from click.testing import CliRunner
+
+    from eval import cli
+
+    # results/<run_id> does NOT exist (e.g. `run` and `analyze` in separate CI jobs).
+    # Metric gating must still run and fail the command, not silently exit 0.
+    run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.3, create_results_dir=False)
+
+    result = CliRunner().invoke(cli.main, ["analyze", "--run-id", run_id, "--skip-eval"])
+
+    assert result.exit_code != 0
+    assert "Metric gate failed" in result.output
+    assert "budget" in result.output

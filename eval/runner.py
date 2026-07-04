@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import operator
 import os
 import re
 import shutil
@@ -12,6 +13,7 @@ import tempfile
 import time
 import uuid
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from logging import getLogger
@@ -40,6 +42,7 @@ from eval.protocols import (
     status_from_exit_code as _status_from_exit_code,
 )
 from eval.runners.docker_cli_runner import DockerCLIRunner
+from eval.trace import RunMetrics, metric_value
 
 logger = getLogger(__name__)
 
@@ -746,6 +749,46 @@ def _eval_regex(ev: Evaluator, log_file: Path) -> EvalScore | None:
         score=1 if match else 0,
         reason=f"{'matched' if match else 'no match'}",
         passed=match,
+    )
+
+
+_METRIC_OP_FUNCS: dict[str, Callable[[float, float], bool]] = {
+    "<": operator.lt,
+    "<=": operator.le,
+    ">": operator.gt,
+    ">=": operator.ge,
+    "==": operator.eq,
+    "!=": operator.ne,
+}
+
+
+def eval_metric(ev: Evaluator, metrics: RunMetrics) -> EvalScore:
+    """Score a type=metric evaluator by thresholding a RunMetrics field.
+
+    Deterministic pass/fail (1/0), evaluated from parsed telemetry at ``analyze``
+    time. Returns ``score=None`` (and ``passed=False``) when the metric value
+    can't be derived from the trace (e.g. a non-numeric field), mirroring how
+    judges surface an unusable score rather than silently passing. Note that an
+    absent ``github.copilot.cost`` tag currently parses to ``0.0`` (a real float),
+    so cost does not reach this None path from real telemetry today.
+    """
+    metric_name = ev.metric or ""
+    value = metric_value(metrics, metric_name)
+    if value is None:
+        return EvalScore(
+            name=ev.name,
+            type="metric",
+            score=None,
+            reason=f"metric '{metric_name}' unavailable in trace",
+            passed=False,
+        )
+    op = ev.op or ""
+    threshold = ev.threshold if ev.threshold is not None else 0.0
+    op_func = _METRIC_OP_FUNCS[op]
+    passed = op_func(value, threshold)
+    reason = f"{metric_name}={value:g} {op} {threshold:g} → {'PASS' if passed else 'FAIL'}"
+    return EvalScore(
+        name=ev.name, type="metric", score=1 if passed else 0, reason=reason, passed=passed
     )
 
 
