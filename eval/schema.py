@@ -39,9 +39,16 @@ def _collector_types() -> tuple[str, ...]:
     """Local import: `eval.collectors` is a small, dependency-free registry,
     but importing it at module scope would add an import-order constraint for
     no benefit."""
-    from eval.collectors import COLLECTOR_TYPES
+    from eval.collectors import COLLECTOR_REGISTRY
 
-    return tuple(sorted(COLLECTOR_TYPES))
+    return tuple(sorted(COLLECTOR_REGISTRY))
+
+
+def _runner_backends() -> tuple[str, ...]:
+    """Local import, same rationale as `_collector_types` (see issue #66)."""
+    from eval.runners import RUNNER_REGISTRY
+
+    return tuple(sorted(RUNNER_REGISTRY))
 
 
 def _metric_fields() -> tuple[str, ...]:
@@ -202,6 +209,14 @@ def _runner_schema() -> dict[str, Any]:
                 "default": "file",
                 "description": "Trace collection backend.",
             },
+            "backend": {
+                "type": "string",
+                "enum": list(_runner_backends()),
+                "default": "docker",
+                "description": "Agent execution backend. Third-party backends (issue #66) "
+                "may register additional values not listed here via the "
+                "`copilot_eval.runners` entry-point group.",
+            },
             "trace_fetch_limit": {
                 "type": "integer",
                 "minimum": 1,
@@ -314,7 +329,9 @@ def _evaluator_schema() -> dict[str, Any]:
                 "additionalProperties": {"type": "string"},
             },
             "script": _string(
-                description="type=script: path to an executable that scores the run."
+                description="type=script: path to an executable that scores the run. "
+                "type=python: 'module:func' reference to a callable, called in-process "
+                "with EvalContext and returning EvalScore | None."
             ),
             "value": {
                 "description": "type=contains/regex: substring or regex pattern to match. "
@@ -349,6 +366,13 @@ def _evaluator_schema() -> dict[str, Any]:
             {
                 "if": {"properties": {"type": {"const": "script"}}, "required": ["type"]},
                 "then": {"required": ["script"]},
+            },
+            {
+                "if": {"properties": {"type": {"const": "python"}}, "required": ["type"]},
+                "then": {
+                    "required": ["script"],
+                    "properties": {"script": {"pattern": ".+:.+"}},
+                },
             },
             {
                 "if": {

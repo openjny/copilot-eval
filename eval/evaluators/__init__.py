@@ -1,7 +1,7 @@
 """Evaluator strategy classes + registry.
 
 Provides the concrete implementations of ``eval.protocols.Evaluator`` for each
-built-in evaluator ``type`` (judge/script/contains/regex/metric), plus a
+built-in evaluator ``type`` (judge/script/contains/regex/metric/python), plus a
 name -> class registry so evaluator dispatch (``eval.runner._run_evaluators``
 for inline types, ``eval.cli._run_judges``/``_run_metric_evaluators`` for
 judge/metric) is a lookup instead of an if/elif chain.
@@ -24,6 +24,7 @@ from logging import getLogger
 from eval.evaluators.contains import ContainsEvaluator
 from eval.evaluators.judge import JudgeEvaluator
 from eval.evaluators.metric import MetricEvaluator
+from eval.evaluators.python_eval import PythonEvaluator
 from eval.evaluators.regex import RegexEvaluator
 from eval.evaluators.script import ScriptEvaluator
 from eval.protocols import Evaluator
@@ -38,6 +39,7 @@ EVALUATOR_REGISTRY: dict[str, type[Evaluator]] = {
     "contains": ContainsEvaluator,
     "regex": RegexEvaluator,
     "metric": MetricEvaluator,
+    "python": PythonEvaluator,
 }
 
 # Entry-point group third-party packages can use to register additional
@@ -88,6 +90,7 @@ __all__ = [
     "ContainsEvaluator",
     "JudgeEvaluator",
     "MetricEvaluator",
+    "PythonEvaluator",
     "RegexEvaluator",
     "ScriptEvaluator",
     "get_evaluator_class",

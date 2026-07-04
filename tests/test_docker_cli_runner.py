@@ -55,8 +55,8 @@ def test_docker_cli_runner_health_check_failure(monkeypatch):
         DockerCLIRunner("token").health_check()
 
 
-def test_create_runner_cli():
-    runner = create_runner("cli", github_token="tok")
+def test_create_runner_docker():
+    runner = create_runner("docker", github_token="tok")
 
     assert isinstance(runner, DockerCLIRunner)
 

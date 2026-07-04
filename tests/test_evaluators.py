@@ -35,7 +35,7 @@ def _config(tmp_path: Path) -> Config:
 
 
 def test_registry_has_all_built_in_types():
-    assert set(EVALUATOR_REGISTRY) == {"judge", "script", "contains", "regex", "metric"}
+    assert set(EVALUATOR_REGISTRY) == {"judge", "script", "contains", "regex", "metric", "python"}
 
 
 # --- Third-party evaluator type: registry dispatch end-to-end ---

@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import click
 
+from eval.collectors import load_collector_plugins
 from eval.evaluators import load_evaluator_plugins
 from eval.logging_config import LOG_FORMATS, LOG_LEVELS, configure_logging
+from eval.runners import load_runner_plugins
 
 
 @click.group()
@@ -28,10 +30,14 @@ from eval.logging_config import LOG_FORMATS, LOG_LEVELS, configure_logging
 )
 def main(log_level: str | None, log_format: str | None) -> None:
     """Copilot CLI A/B evaluation framework."""
-    # Discover third-party evaluator types (entry-point group
-    # "copilot_eval.evaluators", see issue #66) before any command loads a
-    # config, so plugin-defined `type:` strings validate and dispatch.
+    # Discover third-party evaluator types, runner backends, and collectors
+    # (entry-point groups "copilot_eval.evaluators"/"copilot_eval.runners"/
+    # "copilot_eval.collectors", see issue #66) before any command loads a
+    # config, so plugin-defined `type:`/`backend:`/`collector:` strings
+    # validate and dispatch.
     load_evaluator_plugins()
+    load_runner_plugins()
+    load_collector_plugins()
     try:
         configure_logging(log_level, log_format)
     except ValueError as exc:

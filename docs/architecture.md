@@ -25,8 +25,9 @@ eval/
 ├── judge_executor.py  JudgeExecutor: judge prompt construction, CLI call, parsing, self-consistency sampling
 ├── validation.py Pre-flight readiness + config validation checks
 ├── protocols.py  AgentRunner / TraceCollector / Evaluator protocol interfaces (dual abstraction)
-├── evaluators/   Evaluator protocol implementations + EVALUATOR_REGISTRY (judge/script/contains/regex/metric)
-├── collectors/   TraceCollector implementations: file_collector.py (default), jaeger_collector.py
+├── evaluators/   Evaluator protocol implementations + EVALUATOR_REGISTRY (judge/script/contains/regex/metric/python)
+├── runners/      AgentRunner protocol implementations + RUNNER_REGISTRY (docker; pluggable via entry points)
+├── collectors/   TraceCollector implementations + COLLECTOR_REGISTRY: file_collector.py (default), jaeger_collector.py
 ├── trace.py      Jaeger API: fetch + parse OTel traces
 └── report.py     A/B comparison: build_report() → format_table/json/markdown
 
@@ -156,6 +157,26 @@ interactively, which the file collector doesn't provide. It requires a running
 Jaeger instance (`docker-compose.yml`); spans are exported over OTLP to
 `otel_endpoint`, and `analyze` fetches them back from Jaeger's HTTP API
 (`jaeger_url`), retrying while ingestion catches up.
+
+### Extensibility (entry points)
+
+`Evaluator`/`AgentRunner`/`TraceCollector` implementations are all resolved
+through a registry (`EVALUATOR_REGISTRY` / `RUNNER_REGISTRY` /
+`COLLECTOR_REGISTRY`, in `eval/evaluators/`, `eval/runners/`, `eval/collectors/`
+respectively) instead of a hardcoded `if/elif` chain. Each registry can be
+extended at load time via a Python entry-point group — `copilot_eval.evaluators`,
+`copilot_eval.runners`, `copilot_eval.collectors` — discovered by
+`load_evaluator_plugins()` / `load_runner_plugins()` / `load_collector_plugins()`,
+called once at CLI startup (`eval.cli.main`). A third-party package registers a
+class implementing the relevant protocol under one of those groups in its own
+`pyproject.toml`; once installed, its `type:`/`backend:`/`collector:` value
+validates and dispatches exactly like a built-in one, with no change to
+`eval.config` or `eval.runner`. `docker` (`DockerCLIRunner`) is the only
+built-in `runner.backend` today — one registered implementation, not a
+hardcoded assumption — and contract tests (`tests/test_protocol_contracts.py`)
+verify every registered class actually satisfies its protocol. See
+[Configuration: Extensibility](configuration.md#extensibility) for the
+end-user-facing entry-point recipe.
 
 ## OTel Tracing
 
