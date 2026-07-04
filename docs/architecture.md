@@ -18,10 +18,12 @@ eval-config.yaml
 eval/
 ├── __init__.py   Package marker
 ├── __main__.py   `python -m eval` entry
-├── cli.py        Click CLI: list, build, run, analyze
+├── cli/          Click CLI, routing only: __init__.py (group), list_cmd, build_cmd, run_cmd, analyze_cmd, validate_cmd
+├── services/     Business logic: orchestrator (scheduling), build_service, judge_service, analyze_service, trace_service, metrics_service, manifest, check_report
 ├── config.py     YAML config → dataclasses (Config, Task, Variant, Evaluator, Hooks)
 ├── runner.py     Single eval run: hooks → Docker container → evaluators
 ├── judge_executor.py  JudgeExecutor: judge prompt construction, CLI call, parsing, self-consistency sampling
+├── validation.py Pre-flight readiness + config validation checks
 ├── protocols.py  AgentRunner / TraceCollector / Evaluator protocol interfaces (dual abstraction)
 ├── evaluators/   Evaluator protocol implementations + EVALUATOR_REGISTRY (judge/script/contains/regex/metric)
 ├── collectors/   TraceCollector implementations: file_collector.py (default), jaeger_collector.py
