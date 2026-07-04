@@ -84,7 +84,7 @@ Each variant has its own Dockerfile that extends `copilot-eval:base` with varian
 When creating or renaming files, follow established conventions:
 
 - **Root-level community files**: use standard uppercase names (`CONTRIBUTING.md`, `CHANGELOG.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`)
-- **docs/**: use lowercase kebab-case for internal docs (e.g., `docs/architecture.md`, `docs/configuration.md`, `docs/contributing.md`)
+- **docs/**: use lowercase kebab-case for internal docs (e.g., `docs/architecture.md`, `docs/configuration.md`, `docs/issue-guidelines.md`)
 - **Python**: follow existing package layout (`eval/` package, `tests/` directory, `pyproject.toml`)
 - **Docker**: `docker/Dockerfile` for base, `docker/Dockerfile.<variant>` for variant images
 - **Examples**: `examples/<eval-set-name>/` with `eval-config.yaml` as entry point
@@ -94,7 +94,7 @@ Always check existing file naming patterns before creating new files. Prefer wid
 
 ## Issue Tracking
 
-See `docs/contributing.md` for full details. Key conventions:
+See `docs/issue-guidelines.md` for full details. Key conventions:
 
 - **Epics**: tracking issues (label `epic`) with task lists grouping related work
 - **Titles**: conventional commit style — `type(scope): description`
