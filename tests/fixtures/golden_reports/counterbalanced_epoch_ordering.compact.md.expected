@@ -1,0 +1,16 @@
+## 📊 copilot-eval: counterbalance_task
+
+| Metric | base | new | Δ |
+|--------|--------:|--------:|------:|
+| Duration (s) | 10.0 | 9.0 | **-10.0%** ✅ |
+| Turn count | 3.0 | 3.0 | +0.0% |
+| Total spans | 10.0 | 9.0 | **-10.0%** ✅ |
+| Tool calls | 1.0 | 1.0 | +0.0% |
+| Input tokens | 750.0 | 700.0 | **-6.7%** ✅ |
+| Output tokens | 220.0 | 200.0 | **-9.1%** ✅ |
+| Cache tokens | 42.0 | 40.0 | **-4.8%** ✅ |
+| Tool duration (s) | 1.1 | 1.0 | **-9.1%** ✅ |
+| Cost ($) | 0.0120 | 0.0110 | **-8.3%** ✅ |
+
+> 95% CI excludes zero for Duration (s), Total spans, Input tokens, Output tokens, Cache tokens, Tool duration (s), Cost ($). N=5 paired epochs.
+> Multiple-comparison correction: Holm-Bonferroni across 9 test(s).

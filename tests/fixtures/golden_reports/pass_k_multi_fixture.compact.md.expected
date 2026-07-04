@@ -1,0 +1,19 @@
+## 📊 copilot-eval: code_review
+
+| Metric | baseline | experimental | Δ |
+|--------|--------:|--------:|------:|
+| Duration (s) | 10.0 | 9.0 | **-10.0%** ✅ |
+| Turn count | 3.0 | 3.0 | +0.0% |
+| Total spans | 15.0 | 15.0 | +0.0% |
+| Tool calls | 2.0 | 2.0 | +0.0% |
+| Input tokens | 800.0 | 800.0 | +0.0% |
+| Output tokens | 250.0 | 250.0 | +0.0% |
+| Cache tokens | 50.0 | 50.0 | +0.0% |
+| Tool duration (s) | 1.5 | 1.5 | +0.0% |
+| Cost ($) | 0.0120 | 0.0120 | +0.0% |
+| thoroughness | 8.0 ±1.7 | 8.0 | +0.0% |
+| pass@3 (thoroughness) | 100% | 100% | +0% |
+| pass^3 (thoroughness) | 67% ±58% | 100% | +33% |
+
+> 95% CI excludes zero for Duration (s). N=9 paired epochs.
+> Multiple-comparison correction: Holm-Bonferroni across 10 test(s).

@@ -646,3 +646,60 @@ def test_analyze_no_mc_correction_flag_disables_correction(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["mc_correction"] == "none"
+
+
+# --- analyze --compact (PR comment markdown) ---
+
+
+def test_analyze_compact_flag_defaults_to_false(monkeypatch):
+    from click.testing import CliRunner
+
+    from eval.cli import analyze_cmd
+
+    captured = {}
+    monkeypatch.setattr(
+        analyze_cmd, "run_analysis", lambda **kwargs: captured.update(kwargs) or None
+    )
+
+    result = CliRunner().invoke(analyze_cmd.analyze, ["--run-id", "run-1"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["compact"] is False
+
+
+def test_analyze_compact_flag_passed_through(monkeypatch):
+    from click.testing import CliRunner
+
+    from eval.cli import analyze_cmd
+
+    captured = {}
+    monkeypatch.setattr(
+        analyze_cmd, "run_analysis", lambda **kwargs: captured.update(kwargs) or None
+    )
+
+    result = CliRunner().invoke(
+        analyze_cmd.analyze, ["--run-id", "run-1", "-o", "markdown", "--compact"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["compact"] is True
+    assert captured["output"] == "markdown"
+
+
+def test_analyze_compact_selects_compact_formatter(tmp_path: Path, monkeypatch):
+    """`analyze -o markdown --compact` must render via format_markdown_compact,
+    not the full format_markdown (which includes per-run/tool-usage detail)."""
+    from click.testing import CliRunner
+
+    from eval import cli
+
+    run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.5)
+
+    result = CliRunner().invoke(
+        cli.main, ["analyze", "--run-id", run_id, "--skip-eval", "-o", "markdown", "--compact"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "📊 copilot-eval:" in result.output
+    assert "### Per-Run Details" not in result.output
+    assert "### Tool Usage" not in result.output

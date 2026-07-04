@@ -1,0 +1,16 @@
+## 📊 copilot-eval: code_review
+
+| Metric | baseline | candidate | Δ |
+|--------|--------:|--------:|------:|
+| Duration (s) | 10.0 ±0.4 | 8.0 ±0.2 | **-20.0%** ✅ |
+| Turn count | 4.0 ±0.4 | 3.0 | -25.0% |
+| Total spans | 20.0 ±1.5 | 16.0 ±0.7 | **-20.0%** ✅ |
+| Tool calls | 3.0 ±0.4 | 3.0 ±0.4 | +0.0% |
+| Input tokens | 1200.0 ±56.6 | 900.0 ±15.2 | **-25.0%** ✅ |
+| Output tokens | 400.0 ±14.8 | 300.0 ±7.5 | **-25.5%** ✅ |
+| Cache tokens | 100.0 ±4.5 | 80.0 ±2.2 | **-20.0%** ✅ |
+| Tool duration (s) | 3.0 ±0.3 | 2.0 ±0.1 | **-33.3%** ✅ |
+| Cost ($) | 0.0210 ±0.0012 | 0.0150 ±0.0004 | **-28.6%** ✅ |
+
+> 95% CI excludes zero for Duration (s), Total spans, Input tokens, Output tokens, Cache tokens, Tool duration (s), Cost ($). N=5 paired epochs.
+> Multiple-comparison correction: Holm-Bonferroni across 9 test(s).

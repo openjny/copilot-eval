@@ -10,7 +10,14 @@ from pathlib import Path
 import click
 
 from eval.config import load_config
-from eval.report import Report, build_report, format_json, format_markdown, format_table
+from eval.report import (
+    Report,
+    build_report,
+    format_json,
+    format_markdown,
+    format_markdown_compact,
+    format_table,
+)
 from eval.services.judge_service import (
     _report_judge_reliability,
     _run_judges,
@@ -52,6 +59,7 @@ def run_analysis(
     re_eval: bool,
     min_epochs: int | None = None,
     mc_correction: str = "holm",
+    compact: bool = False,
 ) -> None:
     """Analyze traces from a previous eval run and print the A/B report."""
     config = load_config(Path(config_dir) if config_dir else None)
@@ -122,7 +130,10 @@ def run_analysis(
         click.echo("No reports generated.", err=True)
         return
 
-    click.echo(_FORMATTERS[output](reports))
+    formatter = (
+        format_markdown_compact if (compact and output == "markdown") else _FORMATTERS[output]
+    )
+    click.echo(formatter(reports))
 
     gate_failures: list[str] = []
 

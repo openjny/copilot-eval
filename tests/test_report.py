@@ -1017,3 +1017,150 @@ def test_build_report_pass_k_missing_passed_defaults_to_score_truthiness(tmp_pat
     assert all_k.values["a"] == 0.0  # epoch 2 failed -> not all-passing
     at_k = next(r for r in reports[0].pass_k if r.metric == "pass@3 (lint)")
     assert at_k.values["a"] == 100.0  # epochs 1 and 3 passed
+
+
+# --- Compact markdown (PR comment) ---
+
+
+def _paired_results(scenario: str, n: int, base: float, delta_per_epoch: float) -> list:
+    """n paired epochs of tight-variance metrics so the paired delta is CI-significant."""
+    results = []
+    for i in range(1, n + 1):
+        jitter = (i % 3) * 0.01
+        results.append(make_metrics(scenario, "baseline", str(i), duration=base + jitter))
+        results.append(
+            make_metrics(scenario, "candidate", str(i), duration=base + delta_per_epoch + jitter)
+        )
+    return results
+
+
+def test_format_markdown_compact_header_and_table():
+    from eval.report import format_markdown_compact
+
+    results = _paired_results("code_review", 10, base=20.0, delta_per_epoch=-3.0)
+    reports = build_report(results, variant_order=["baseline", "candidate"], aggregate="paired")
+
+    out = format_markdown_compact(reports)
+    assert out.startswith("## 📊 copilot-eval: code_review")
+    assert "| Metric | baseline | candidate | Δ |" in out
+    assert "Reliability" not in out  # per-run/reliability detail dropped in compact mode
+    assert "Per-Run Details" not in out
+
+
+def test_format_markdown_compact_marks_improvement_and_regression():
+    from eval.report import format_markdown_compact
+
+    # Duration DOWN is an improvement (lower-is-better metric) -> ✅.
+    improved = build_report(
+        _paired_results("t_improve", 10, base=20.0, delta_per_epoch=-5.0),
+        variant_order=["baseline", "candidate"],
+        aggregate="paired",
+    )
+    out_improved = format_markdown_compact(improved)
+    row = next(ln for ln in out_improved.splitlines() if ln.startswith("| Duration"))
+    assert "✅" in row and "**-" in row
+
+    # Duration UP is a regression (lower-is-better metric) -> ❌.
+    regressed = build_report(
+        _paired_results("t_regress", 10, base=20.0, delta_per_epoch=5.0),
+        variant_order=["baseline", "candidate"],
+        aggregate="paired",
+    )
+    out_regressed = format_markdown_compact(regressed)
+    row = next(ln for ln in out_regressed.splitlines() if ln.startswith("| Duration"))
+    assert "❌" in row and "**+" in row
+
+
+def test_format_markdown_compact_no_marker_when_not_significant():
+    from eval.report import format_markdown_compact
+
+    # n=3 paired epochs is below MIN_RELIABLE_N -> never asserted significant.
+    results = _paired_results("t_lown", 3, base=20.0, delta_per_epoch=-5.0)
+    reports = build_report(results, variant_order=["baseline", "candidate"], aggregate="paired")
+
+    out = format_markdown_compact(reports)
+    row = next(ln for ln in out.splitlines() if ln.startswith("| Duration"))
+    assert "✅" not in row and "❌" not in row and "**" not in row
+
+
+def test_format_markdown_compact_ci_summary_line():
+    from eval.report import format_markdown_compact
+
+    reports = build_report(
+        _paired_results("t_ci", 10, base=20.0, delta_per_epoch=-5.0),
+        variant_order=["baseline", "candidate"],
+        aggregate="paired",
+    )
+    out = format_markdown_compact(reports)
+    assert "95% CI excludes zero for Duration (s)" in out
+    assert "N=10 paired epochs" in out
+
+
+def test_format_markdown_compact_no_significant_metrics_still_summarizes():
+    from eval.report import format_markdown_compact
+
+    results = [make_metrics("t_flat", "baseline", str(i), duration=20.0) for i in range(1, 6)] + [
+        make_metrics("t_flat", "candidate", str(i), duration=20.0) for i in range(1, 6)
+    ]
+    reports = build_report(results, variant_order=["baseline", "candidate"], aggregate="paired")
+
+    out = format_markdown_compact(reports)
+    assert "No metric's 95% CI excludes zero" in out
+
+
+def test_format_markdown_compact_single_variant_has_no_delta_column():
+    from eval.report import format_markdown_compact
+
+    results = [make_metrics("t_solo", "only", str(i), duration=5.0) for i in range(1, 4)]
+    reports = build_report(results, variant_order=["only"], aggregate="median")
+
+    out = format_markdown_compact(reports)
+    assert "Δ" not in out
+
+
+def test_format_markdown_compact_omits_per_run_and_tool_usage_sections():
+    from eval.report import format_markdown, format_markdown_compact
+
+    results = _paired_results("t_size", 5, base=20.0, delta_per_epoch=-3.0)
+    reports = build_report(results, variant_order=["baseline", "candidate"], aggregate="paired")
+
+    full = format_markdown(reports)
+    compact = format_markdown_compact(reports)
+    assert "### Tool Usage" in full and "### Tool Usage" not in compact
+    assert "### Per-Run Details" in full and "### Per-Run Details" not in compact
+    assert len(compact) < len(full)
+
+
+def test_truncate_for_pr_comment_under_limit_is_unchanged():
+    from eval.report import _truncate_for_pr_comment
+
+    text = "short report"
+    assert _truncate_for_pr_comment(text, limit=1000) == text
+
+
+def test_truncate_for_pr_comment_enforces_char_limit():
+    from eval.report import _truncate_for_pr_comment
+
+    text = "\n".join(f"line {i} of a very long report" for i in range(10_000))
+    assert len(text) > 5000
+
+    out = _truncate_for_pr_comment(text, limit=5000)
+    assert len(out) <= 5000
+    assert "truncated" in out.lower()
+    assert out.startswith("line 0 of a very long report")
+
+
+def test_format_markdown_compact_stays_within_github_comment_limit():
+    from eval.report import PR_COMMENT_CHAR_LIMIT, format_markdown_compact
+
+    # Many tasks in one run, each with paired judge scores -- the kind of
+    # config that would blow past 65KB in the full (non-compact) format.
+    many_reports = []
+    for t in range(60):
+        results = _paired_results(f"task_{t}", 8, base=20.0, delta_per_epoch=-1.0)
+        many_reports.extend(
+            build_report(results, variant_order=["baseline", "candidate"], aggregate="paired")
+        )
+
+    out = format_markdown_compact(many_reports)
+    assert len(out) <= PR_COMMENT_CHAR_LIMIT

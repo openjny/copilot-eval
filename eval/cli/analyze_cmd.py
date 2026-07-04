@@ -48,6 +48,15 @@ from eval.services.analyze_service import run_analysis
         "uncorrected per-metric significance check."
     ),
 )
+@click.option(
+    "--compact",
+    is_flag=True,
+    help=(
+        "With '-o markdown': condensed, PR-comment-friendly output (headline "
+        "table + CI summary + warnings, no per-run detail). Fits GitHub's "
+        "65KB comment limit -- pipe straight into `gh pr comment --body`."
+    ),
+)
 def analyze(
     run_id: str,
     output: str,
@@ -58,6 +67,7 @@ def analyze(
     re_eval: bool,
     min_epochs: int | None,
     no_mc_correction: bool,
+    compact: bool,
 ) -> None:
     """Analyze traces from a previous eval run."""
     run_analysis(
@@ -70,4 +80,5 @@ def analyze(
         re_eval=re_eval,
         min_epochs=min_epochs,
         mc_correction="none" if no_mc_correction else "holm",
+        compact=compact,
     )

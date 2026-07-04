@@ -28,7 +28,14 @@ from typing import Any
 
 import pytest
 
-from eval.report import Report, build_report, format_json, format_markdown, format_table
+from eval.report import (
+    Report,
+    build_report,
+    format_json,
+    format_markdown,
+    format_markdown_compact,
+    format_table,
+)
 from eval.trace import RunMetrics
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "golden_reports"
@@ -92,6 +99,7 @@ def test_golden_report(name: str, tmp_path: Path, update_golden: bool) -> None:
         "table": format_table(reports),
         "json": format_json(reports),
         "md": format_markdown(reports),
+        "compact.md": format_markdown_compact(reports),
     }
     for ext, content in outputs.items():
         _assert_or_update(FIXTURES_DIR / f"{name}.{ext}.expected", content, update_golden)
