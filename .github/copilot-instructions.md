@@ -81,15 +81,14 @@ Each variant has its own Dockerfile that extends `copilot-eval:base` with varian
 
 ## Naming & Structure Conventions
 
-When creating or renaming files, follow established conventions:
+Prefer widely-recognized names over custom ones. When creating or renaming files, follow established conventions. For example:
 
 - **Root-level community files**: use standard uppercase names (e.g., `CONTRIBUTING.md`, `CHANGELOG.md`)
 - **docs/**: use lowercase kebab-case (e.g., `docs/architecture.md`)
-Always check existing file naming patterns before creating new files. Prefer widely-recognized names (e.g., `CONTRIBUTING.md`, `CHANGELOG.md`) over custom ones.
 
 ## Issue Tracking
 
-See `docs/issue-guidelines.md` for full details. Key conventions:
+See `docs/issue-guidelines.md` for details. Key conventions:
 
 - **Epics**: tracking issues (label `epic`) with task lists grouping related work
 - **Titles**: conventional commit style — `type(scope): description`
