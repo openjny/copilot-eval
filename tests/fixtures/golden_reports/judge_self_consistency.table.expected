@@ -1,0 +1,47 @@
+
+================================================================================
+TASK: consistency_task
+================================================================================
+
+Samples: a=5, b=5; paired epochs=5
+
+Reliability
+Metric                                    a                 b
+------------------------------------------------------------
+Runs (traces)                             5                 5
+Success/failure rates     n/a (no manifest) n/a (no manifest)
+
+Variant            Epoch  Dur(s) Turns Spans Tools   In Tok  Out Tok    Cache TDur(s)   Cost($)  quality
+---------------------------------------------------------------------------------------------------
+a                      1     5.0     3    11     1      550      160       30     0.6    0.0090        7
+a                      2     5.1     3    11     1      555      162       30     0.6    0.0091        7
+a                      3     4.9     3    11     1      545      158       29     0.6    0.0089        8
+a                      4     5.0     3    11     1      552      161       30     0.6    0.0090        7
+a                      5     5.0     3    11     1      548      159       29     0.6    0.0089        7
+b                      1     5.0     3    11     1      550      160       30     0.6    0.0090        6
+b                      2     5.1     3    11     1      555      162       30     0.6    0.0091        8
+b                      3     4.9     3    11     1      545      158       29     0.6    0.0089        7
+b                      4     5.0     3    11     1      552      161       30     0.6    0.0090        9
+b                      5     5.0     3    11     1      548      159       29     0.6    0.0089        5
+
+Metrics (paired)
+Metric                                        a                     b                      Delta
+----------------------------------------------------------------------------------------------
+Duration (s)                           5.0 ±0.1              5.0 ±0.1 +0.0% [CI +0.0,+0.0 abs] ns
+Turn count                                  3.0                   3.0 +0.0% [CI +0.0,+0.0 abs] ns
+Total spans                                11.0                  11.0 +0.0% [CI +0.0,+0.0 abs] ns
+Tool calls                                  1.0                   1.0 +0.0% [CI +0.0,+0.0 abs] ns
+Input tokens                         550.0 ±3.8            550.0 ±3.8 +0.0% [CI +0.0,+0.0 abs] ns
+Output tokens                        160.0 ±1.6            160.0 ±1.6 +0.0% [CI +0.0,+0.0 abs] ns
+Cache tokens                          30.0 ±0.5             30.0 ±0.5 +0.0% [CI +0.0,+0.0 abs] ns
+Tool duration (s)                      0.6 ±0.0              0.6 ±0.0 +0.0% [CI +0.0,+0.0 abs] ns
+Cost ($)                         0.0090 ±0.0001        0.0090 ±0.0001 +0.0% [CI +0.0000,+0.0000 abs] ns
+
+Judge                                         a                     b                      Delta
+----------------------------------------------------------------------------------------------
+quality                                7.0 ±0.4              7.0 ±1.6 -14.3% [CI -2.0,+2.0 abs] ns
+
+Judge runtime
+  Outcomes (10): ok=10
+
+Legend: value ±stddev; Delta is a percentage, [CI low,high abs] is a bootstrap interval of the paired delta in absolute metric units; * = CI excludes 0 (statistically supported), ns = not supported (observed only), low-n = fewer than 5 paired samples (significance not assessed). No multiple-comparison correction applied.

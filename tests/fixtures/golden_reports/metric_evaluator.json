@@ -1,0 +1,59 @@
+{
+  "description": "Metric evaluator pass/fail flowing through the judge-score table: `lint_pass` is a 0/1 'metric' evaluator (not a judge), alongside a genuine 'quality' judge score, for both variants across N=5.",
+  "aggregate": "paired",
+  "variant_order": ["base", "new"],
+  "results": [
+    {"scenario": "lint_check", "variant": "base", "epoch": "1", "test_id": "base1", "total_spans": 10, "duration": 4.0, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.5, "total_input_tokens": 500, "total_output_tokens": 150, "total_cache_tokens": 30, "model": "gpt-4o", "cost": 0.008},
+    {"scenario": "lint_check", "variant": "base", "epoch": "2", "test_id": "base2", "total_spans": 10, "duration": 4.1, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.5, "total_input_tokens": 505, "total_output_tokens": 152, "total_cache_tokens": 30, "model": "gpt-4o", "cost": 0.0081},
+    {"scenario": "lint_check", "variant": "base", "epoch": "3", "test_id": "base3", "total_spans": 10, "duration": 3.9, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.48, "total_input_tokens": 498, "total_output_tokens": 148, "total_cache_tokens": 29, "model": "gpt-4o", "cost": 0.0079},
+    {"scenario": "lint_check", "variant": "base", "epoch": "4", "test_id": "base4", "total_spans": 10, "duration": 4.05, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.5, "total_input_tokens": 502, "total_output_tokens": 151, "total_cache_tokens": 30, "model": "gpt-4o", "cost": 0.008},
+    {"scenario": "lint_check", "variant": "base", "epoch": "5", "test_id": "base5", "total_spans": 10, "duration": 3.95, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.49, "total_input_tokens": 499, "total_output_tokens": 149, "total_cache_tokens": 29, "model": "gpt-4o", "cost": 0.0079},
+    {"scenario": "lint_check", "variant": "new", "epoch": "1", "test_id": "new1", "total_spans": 9, "duration": 3.8, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.45, "total_input_tokens": 470, "total_output_tokens": 140, "total_cache_tokens": 28, "model": "gpt-4o", "cost": 0.0075},
+    {"scenario": "lint_check", "variant": "new", "epoch": "2", "test_id": "new2", "total_spans": 9, "duration": 3.85, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.46, "total_input_tokens": 472, "total_output_tokens": 141, "total_cache_tokens": 28, "model": "gpt-4o", "cost": 0.0076},
+    {"scenario": "lint_check", "variant": "new", "epoch": "3", "test_id": "new3", "total_spans": 9, "duration": 3.9, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.47, "total_input_tokens": 475, "total_output_tokens": 142, "total_cache_tokens": 28, "model": "gpt-4o", "cost": 0.0077},
+    {"scenario": "lint_check", "variant": "new", "epoch": "4", "test_id": "new4", "total_spans": 9, "duration": 3.75, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.44, "total_input_tokens": 468, "total_output_tokens": 139, "total_cache_tokens": 27, "model": "gpt-4o", "cost": 0.0074},
+    {"scenario": "lint_check", "variant": "new", "epoch": "5", "test_id": "new5", "total_spans": 9, "duration": 3.88, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.46, "total_input_tokens": 473, "total_output_tokens": 141, "total_cache_tokens": 28, "model": "gpt-4o", "cost": 0.0076}
+  ],
+  "scores": {
+    "lint_check_base_epoch1": [
+      {"name": "quality", "type": "judge", "score": 7, "reason": "clean diff"},
+      {"name": "lint_pass", "type": "metric", "score": 1, "reason": "0 lint errors"}
+    ],
+    "lint_check_base_epoch2": [
+      {"name": "quality", "type": "judge", "score": 7, "reason": "clean diff"},
+      {"name": "lint_pass", "type": "metric", "score": 1, "reason": "0 lint errors"}
+    ],
+    "lint_check_base_epoch3": [
+      {"name": "quality", "type": "judge", "score": 6, "reason": "minor nit"},
+      {"name": "lint_pass", "type": "metric", "score": 1, "reason": "0 lint errors"}
+    ],
+    "lint_check_base_epoch4": [
+      {"name": "quality", "type": "judge", "score": 7, "reason": "clean diff"},
+      {"name": "lint_pass", "type": "metric", "score": 1, "reason": "0 lint errors"}
+    ],
+    "lint_check_base_epoch5": [
+      {"name": "quality", "type": "judge", "score": 7, "reason": "clean diff"},
+      {"name": "lint_pass", "type": "metric", "score": 1, "reason": "0 lint errors"}
+    ],
+    "lint_check_new_epoch1": [
+      {"name": "quality", "type": "judge", "score": 8, "reason": "concise diff"},
+      {"name": "lint_pass", "type": "metric", "score": 1, "reason": "0 lint errors"}
+    ],
+    "lint_check_new_epoch2": [
+      {"name": "quality", "type": "judge", "score": 8, "reason": "concise diff"},
+      {"name": "lint_pass", "type": "metric", "score": 1, "reason": "0 lint errors"}
+    ],
+    "lint_check_new_epoch3": [
+      {"name": "quality", "type": "judge", "score": 9, "reason": "concise diff"},
+      {"name": "lint_pass", "type": "metric", "score": 0, "reason": "2 lint errors: unused import"}
+    ],
+    "lint_check_new_epoch4": [
+      {"name": "quality", "type": "judge", "score": 8, "reason": "concise diff"},
+      {"name": "lint_pass", "type": "metric", "score": 1, "reason": "0 lint errors"}
+    ],
+    "lint_check_new_epoch5": [
+      {"name": "quality", "type": "judge", "score": 8, "reason": "concise diff"},
+      {"name": "lint_pass", "type": "metric", "score": 0, "reason": "1 lint error: line too long"}
+    ]
+  }
+}

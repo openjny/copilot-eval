@@ -123,6 +123,16 @@ Run the unit tests (pure logic: config parsing/validation, report aggregation, t
 uv run --group dev pytest
 ```
 
+`eval/report.py`'s statistics (bootstrap CI, paired deltas, aggregation) and all three
+output formats are additionally pinned down with golden-file tests
+(`tests/test_report_golden.py`, fixtures in `tests/fixtures/golden_reports/`), so any
+unintentional change to the numbers fails CI. After an intentional change, regenerate
+the expected files and review the diff before committing:
+
+```bash
+uv run pytest tests/test_report_golden.py --update-golden
+```
+
 Lint and type-check (the same gates run in CI):
 
 ```bash
