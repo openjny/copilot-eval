@@ -21,14 +21,22 @@ MANIFEST_NAME = "results.json"
 
 
 def write_manifest(
-    run_dir: Path, run_id: str, results: list[RunResult], schedule: dict[str, Any] | None = None
+    run_dir: Path,
+    run_id: str,
+    results: list[RunResult],
+    schedule: dict[str, Any] | None = None,
+    cost_estimate: dict[str, Any] | None = None,
 ) -> None:
     """Persist the full set of runs so `analyze` can detect missing/failed ones."""
-    write_manifest_dicts(run_dir, run_id, [r.to_dict() for r in results], schedule)
+    write_manifest_dicts(run_dir, run_id, [r.to_dict() for r in results], schedule, cost_estimate)
 
 
 def write_manifest_dicts(
-    run_dir: Path, run_id: str, runs: list[dict[str, Any]], schedule: dict[str, Any] | None = None
+    run_dir: Path,
+    run_id: str,
+    runs: list[dict[str, Any]],
+    schedule: dict[str, Any] | None = None,
+    cost_estimate: dict[str, Any] | None = None,
 ) -> None:
     """Same as :func:`write_manifest`, but takes already-serialized run dicts.
 
@@ -37,16 +45,41 @@ def write_manifest_dicts(
     from the prior manifest -- there's no single ``list[RunResult]`` to hand
     ``write_manifest`` in that case.
     """
+    judge_tokens_in, judge_tokens_out = _aggregate_judge_tokens(runs)
     manifest = {
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "schedule": schedule or {},
+        # Cost governance (issue #70): the pre-flight estimate computed before
+        # this run started, plus the judge token usage actually observed
+        # across this run's scores (see eval.judge_executor).
+        "cost": {
+            "estimate": cost_estimate,
+            "judge_tokens_in": judge_tokens_in,
+            "judge_tokens_out": judge_tokens_out,
+        },
         "runs": runs,
     }
     try:
         (run_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
     except OSError as e:
         click.echo(f"WARNING: failed to write run manifest: {e}", err=True)
+
+
+def _aggregate_judge_tokens(runs: list[dict[str, Any]]) -> tuple[int, int]:
+    """Sum ``judge_tokens_in``/``judge_tokens_out`` across every judge score's
+    ``meta`` in the manifest's serialized runs (see ``eval.judge_executor``,
+    which records per-evaluator judge token usage)."""
+    tokens_in = 0
+    tokens_out = 0
+    for run in runs:
+        for score in run.get("scores") or []:
+            if not isinstance(score, dict) or score.get("type") != "judge":
+                continue
+            meta = score.get("meta") or {}
+            tokens_in += meta.get("judge_tokens_in") or 0
+            tokens_out += meta.get("judge_tokens_out") or 0
+    return tokens_in, tokens_out
 
 
 def load_manifest(results_dir: Path) -> list[dict[str, Any]] | None:

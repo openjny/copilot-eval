@@ -121,6 +121,45 @@ def _aggregate_scores(samples: list[int], method: str) -> int:
     return _round_half_up(median(samples))  # default: median
 
 
+# Rough token estimate when the CLI doesn't report actual usage (issue #70,
+# judge cost tracking). ~4 chars/token is a widely-used approximation for
+# English text and code; this is a pre-flight/reporting heuristic, never used
+# for billing.
+_CHARS_PER_TOKEN_ESTIMATE = 4
+
+
+def _estimate_tokens(text: str | None) -> int:
+    if not text:
+        return 0
+    return max(1, round(len(text) / _CHARS_PER_TOKEN_ESTIMATE))
+
+
+def _extract_judge_usage(
+    data: dict[str, Any] | None, prompt: str, stdout: str
+) -> tuple[int, int, bool]:
+    """Best-effort judge token usage for one Copilot invocation.
+
+    Prefers a ``usage``/``token_usage`` object in the parsed judge JSON
+    response, if the CLI ever reports one (``input_tokens``/``output_tokens``
+    or ``prompt_tokens``/``completion_tokens``). Falls back to a rough
+    chars/4 estimate from the prompt/response text -- Copilot's `-p` mode
+    doesn't currently print token usage, so this is the common case today.
+    The third element of the tuple is True when the values are a fallback
+    estimate rather than CLI-reported usage.
+    """
+    usage = None
+    if isinstance(data, dict):
+        raw_usage = data.get("usage") or data.get("token_usage")
+        if isinstance(raw_usage, dict):
+            usage = raw_usage
+    if usage is not None:
+        tokens_in = usage.get("input_tokens", usage.get("prompt_tokens"))
+        tokens_out = usage.get("output_tokens", usage.get("completion_tokens"))
+        if isinstance(tokens_in, (int, float)) and isinstance(tokens_out, (int, float)):
+            return int(tokens_in), int(tokens_out), False
+    return _estimate_tokens(prompt), _estimate_tokens(stdout), True
+
+
 @dataclass
 class JudgeContext:
     """Evidence + ambient info needed to score a run against judge evaluators.
@@ -221,16 +260,30 @@ class JudgeExecutor:
             )
         except subprocess.TimeoutExpired:
             timeout_s = self.config.runner.judge_timeout_seconds
+            # No response received: only the prompt was "sent" (cost-wise).
+            sample_meta["judge_tokens_in"] = _estimate_tokens(prompt)
+            sample_meta["judge_tokens_out"] = 0
+            sample_meta["judge_tokens_estimated"] = True
             return None, f"timeout after {timeout_s}s", "timeout", sample_meta
         except FileNotFoundError:
+            sample_meta["judge_tokens_in"] = 0
+            sample_meta["judge_tokens_out"] = 0
+            sample_meta["judge_tokens_estimated"] = True
             return None, "copilot CLI not found on host", "not_found", sample_meta
         except OSError as exc:
+            sample_meta["judge_tokens_in"] = 0
+            sample_meta["judge_tokens_out"] = 0
+            sample_meta["judge_tokens_estimated"] = True
             return None, f"error: {exc}", "error", sample_meta
         sample_meta["returncode"] = proc.returncode
         stderr = mask_secrets((proc.stderr or "").strip(), secrets) or ""
         if stderr:
             sample_meta["stderr"] = stderr[:_STDERR_SNIPPET_CHARS]
         data = _parse_json(proc.stdout, require_keys=("score",))
+        tokens_in, tokens_out, estimated = _extract_judge_usage(data, prompt, proc.stdout or "")
+        sample_meta["judge_tokens_in"] = tokens_in
+        sample_meta["judge_tokens_out"] = tokens_out
+        sample_meta["judge_tokens_estimated"] = estimated
         if data is not None:
             try:
                 score = int(data.get("score", 0))
@@ -275,10 +328,19 @@ class JudgeExecutor:
             )
         except subprocess.TimeoutExpired:
             timeout_s = self.config.runner.judge_timeout_seconds
+            sample_meta["judge_tokens_in"] = _estimate_tokens(prompt)
+            sample_meta["judge_tokens_out"] = 0
+            sample_meta["judge_tokens_estimated"] = True
             return _all("timeout", f"timeout after {timeout_s}s")
         except FileNotFoundError:
+            sample_meta["judge_tokens_in"] = 0
+            sample_meta["judge_tokens_out"] = 0
+            sample_meta["judge_tokens_estimated"] = True
             return _all("not_found", "copilot CLI not found on host")
         except OSError as exc:
+            sample_meta["judge_tokens_in"] = 0
+            sample_meta["judge_tokens_out"] = 0
+            sample_meta["judge_tokens_estimated"] = True
             return _all("error", f"error: {exc}")
 
         sample_meta["returncode"] = proc.returncode
@@ -287,6 +349,10 @@ class JudgeExecutor:
             sample_meta["stderr"] = stderr[:_STDERR_SNIPPET_CHARS]
 
         data = _parse_json(proc.stdout)
+        tokens_in, tokens_out, estimated = _extract_judge_usage(data, prompt, proc.stdout or "")
+        sample_meta["judge_tokens_in"] = tokens_in
+        sample_meta["judge_tokens_out"] = tokens_out
+        sample_meta["judge_tokens_estimated"] = estimated
         if data is None:
             if proc.returncode != 0:
                 detail = f" — {stderr[:200]}" if stderr else ""
@@ -341,12 +407,24 @@ class JudgeExecutor:
         Shared by :meth:`execute_single` and :meth:`execute_batch` so both
         produce identical score shapes.
         """
+        # Judge cost tracking (issue #70): total token usage across every
+        # sample call made for this evaluator, regardless of outcome (a
+        # timed-out or unparseable call still consumed tokens).
+        tokens_in = sum(t[3].get("judge_tokens_in") or 0 for t in per_sample)
+        tokens_out = sum(t[3].get("judge_tokens_out") or 0 for t in per_sample)
+        tokens_estimated = any(t[3].get("judge_tokens_estimated") for t in per_sample)
+        token_meta = {
+            "judge_tokens_in": tokens_in,
+            "judge_tokens_out": tokens_out,
+            "judge_tokens_estimated": tokens_estimated,
+        }
+
         if not samples:
             # No usable score across all samples; surface the dominant failure
             # mode along with its representative reason and runtime meta.
             dominant = max(outcomes, key=lambda o: outcomes[o])
             idx = next(i for i, t in enumerate(per_sample) if t[2] == dominant)
-            meta = {**base_meta, **per_sample[idx][3], "outcome": dominant}
+            meta = {**base_meta, **per_sample[idx][3], **token_meta, "outcome": dominant}
             reason = per_sample[idx][1] if n == 1 else dominant
             return EvalScore(
                 name=evaluator.name,
@@ -372,7 +450,7 @@ class JudgeExecutor:
         if n > 1:
             agg_method = self.config.runner.judge_aggregate
             reason = f"[{agg_method} of {len(samples)}/{n}, σ={stddev:.2f}] {reason}"
-        meta = {**base_meta, **rep[3], "outcome": rep[2]}
+        meta = {**base_meta, **rep[3], **token_meta, "outcome": rep[2]}
         return EvalScore(
             name=evaluator.name,
             type="judge",
@@ -460,11 +538,19 @@ class JudgeExecutor:
         outcomes: dict[str, dict[str, int]] = {name: {} for name in names}
         for _ in range(n):
             results, smeta = self._invoke_batch(prompt, names, context.token, secrets)
+            # One call's tokens are shared across every criterion it scored;
+            # split evenly per evaluator so a run's total judge token usage
+            # (summed across evaluators) isn't inflated by the batch fan-out.
+            share = 1.0 / len(names)
+            name_meta = dict(smeta)
+            for key in ("judge_tokens_in", "judge_tokens_out"):
+                if key in name_meta:
+                    name_meta[key] = round(name_meta[key] * share)
             for name in names:
                 score, reason, outcome = results[name]
                 outcomes[name][outcome] = outcomes[name].get(outcome, 0) + 1
                 per_sample[name].append(
-                    (score, mask_secrets(reason, secrets) or reason, outcome, smeta)
+                    (score, mask_secrets(reason, secrets) or reason, outcome, name_meta)
                 )
                 if score is not None:
                     samples[name].append(score)
