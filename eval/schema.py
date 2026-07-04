@@ -284,6 +284,15 @@ def _runner_schema() -> dict[str, Any]:
                     },
                 },
             },
+            "budget_limit": {
+                "type": ["number", "null"],
+                "minimum": 0,
+                "default": None,
+                "description": "Maximum estimated USD cost for a `run` invocation "
+                "(see eval.services.cost_service). null (default) means unlimited. "
+                "`run` aborts before any Docker/agent work if the pre-flight estimate "
+                "exceeds this value. Overridable per-invocation with `run --budget-limit`.",
+            },
         },
     }
 

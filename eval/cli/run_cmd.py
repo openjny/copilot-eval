@@ -41,6 +41,23 @@ from eval.services.orchestrator import run_command
     default=None,
     help="Existing run id to resume (with --resume); new results merge into its directory",
 )
+@click.option(
+    "--estimate",
+    is_flag=True,
+    help="Show a pre-flight cost estimate and confirm before running (see runner.budget_limit)",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip the --estimate confirmation prompt",
+)
+@click.option(
+    "--budget-limit",
+    default=None,
+    type=float,
+    help="Abort if the pre-flight cost estimate (USD) exceeds this value (overrides runner.budget_limit)",
+)
 @click.option("--config-dir", default=None, type=click.Path(exists=True), help="Project directory")
 def run(
     task: str | None,
@@ -51,6 +68,9 @@ def run(
     no_progress: bool,
     resume: bool,
     run_id: str | None,
+    estimate: bool,
+    yes: bool,
+    budget_limit: float | None,
     config_dir: str | None,
 ) -> None:
     """Run A/B eval for one or more tasks."""
@@ -66,4 +86,7 @@ def run(
         no_progress=no_progress,
         resume=resume,
         run_id=run_id,
+        estimate=estimate,
+        yes=yes,
+        budget_limit=budget_limit,
     )

@@ -16,6 +16,15 @@
           ],
           "type": "string"
         },
+        "budget_limit": {
+          "default": null,
+          "description": "Maximum estimated USD cost for a `run` invocation (see eval.services.cost_service). null (default) means unlimited. `run` aborts before any Docker/agent work if the pre-flight estimate exceeds this value. Overridable per-invocation with `run --budget-limit`.",
+          "minimum": 0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "capture_content": {
           "default": true,
           "description": "Capture prompt/response content in OTel spans (required by judge evaluators).",

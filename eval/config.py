@@ -107,6 +107,12 @@ class RunnerConfig:
     # Container resource limits (issue #72). Unset fields mean "no limit",
     # matching the behavior before this option existed.
     resources: ResourceLimits = field(default_factory=ResourceLimits)
+    # Cost governance (issue #70): maximum estimated USD cost for a `run`
+    # invocation (see eval.services.cost_service). None (default) means
+    # unlimited -- no pre-flight budget gate is applied. When set, `run`
+    # aborts before doing any Docker/agent work if the pre-flight estimate
+    # exceeds this value. CLI `--budget-limit` overrides this per-invocation.
+    budget_limit: float | None = None
 
 
 @dataclass
@@ -350,6 +356,7 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
     retries = _require_int(runner_raw, "retries", 0, minimum=0)
     retry_delay = _require_number(runner_raw, "retry_delay", 5.0, minimum=0)
     resources = _build_resources(runner_raw.get("resources"))
+    budget_limit = _optional_number(runner_raw, "budget_limit", minimum=0)
 
     return RunnerConfig(
         epochs=epochs,
@@ -384,6 +391,7 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         retries=retries,
         retry_delay=retry_delay,
         resources=resources,
+        budget_limit=budget_limit,
     )
 
 
@@ -439,6 +447,18 @@ def _require_number(
 ) -> float:
     if key not in raw or raw[key] is None:
         return default
+    value = raw[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"runner.{key} must be a number, got {value!r}.")
+    if minimum is not None and value < minimum:
+        raise ConfigError(f"runner.{key} must be >= {minimum}, got {value}.")
+    return float(value)
+
+
+def _optional_number(raw: dict[str, Any], key: str, minimum: float | None = None) -> float | None:
+    """Like :func:`_require_number` but the field is optional (default None)."""
+    if key not in raw or raw[key] is None:
+        return None
     value = raw[key]
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"runner.{key} must be a number, got {value!r}.")

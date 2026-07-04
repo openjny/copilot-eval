@@ -168,6 +168,7 @@ runner:
   timeout_seconds: 300           # Max seconds per Copilot run
   retries: 0                     # Retry a run this many times on transient failure (DockerError/timeout); 0 disables
   retry_delay: 5.0               # Base seconds between retries; doubles per attempt (exponential backoff), capped at 60s
+  budget_limit: null             # Max estimated USD cost for a `run` invocation; null = unlimited. See "Cost governance" below.
   model: claude-sonnet-4         # Copilot model
   judge_model: claude-sonnet-4.6 # Model for LLM-as-Judge (separate from eval model)
   judge_samples: 1               # Self-consistency: sample each judge N times, aggregate
@@ -626,6 +627,54 @@ Each retry waits `retry_delay * 2**attempt` seconds (exponential backoff), cappe
 runner:
   retries: 2       # up to 2 retries (3 attempts total) on DockerError/timeout
   retry_delay: 5.0 # 5s, then 10s between retries
+```
+
+## Cost governance
+
+`run` and its LLM-as-judge evaluators both burn tokens/compute. `eval.services.cost_service` gives a **pre-flight, order-of-magnitude estimate** — not a bill (see `docs/vision.md`'s non-goals: no FinOps/billing platform) — plus an optional hard budget cap.
+
+**Pre-flight estimate** (`run --estimate`): before doing any Docker/agent work, prints a cost breakdown (cells, judge calls, estimated tokens, estimated USD cost) and asks for confirmation, unless `--yes` is passed:
+
+```
+$ uv run copilot-eval run --estimate
+==================================================
+ Cost Estimate (pre-flight)
+==================================================
+ Cells:        6
+ Judge calls:  12
+ Agent tokens: 48,000 in / 12,000 out
+ Judge tokens: 36,000 in / 2,400 out
+ Basis:        default estimate (no historical run data found)
+ Agent cost:   $0.8400
+ Judge cost:   $0.4320
+ Total cost:   $1.2720
+==================================================
+Proceed with this run? [Y/n]:
+```
+
+Token/cell estimates come from `eval.services.cost_service.load_historical_costs`, which averages token usage from the most recent past runs' persisted file-collector traces (`results/*/.traces/*.jsonl`) when available, falling back to conservative hardcoded defaults on a project's first run.
+
+**Budget cap** (`runner.budget_limit`, or `run --budget-limit`): a maximum estimated USD cost. This gate is always applied (independent of `--estimate`) — `run` aborts with an error before any Docker/agent work if the estimate exceeds it:
+
+```yaml
+runner:
+  budget_limit: 10.0   # abort if the pre-flight estimate exceeds $10
+```
+
+```
+uv run copilot-eval run --budget-limit 5.0   # per-invocation override
+```
+
+**Judge cost tracking**: each judge `EvalScore.meta` records `judge_tokens_in`/`judge_tokens_out` (best-effort — parsed from the judge CLI response when it reports usage, else estimated from prompt/response length via a chars/4 heuristic, flagged `judge_tokens_estimated: true`). These are summed across a run's scores and printed in the run summary, and persisted under a top-level `cost` key in the run's `results.json` manifest alongside the pre-flight estimate:
+
+```json
+{
+  "cost": {
+    "estimate": { "cells": 6, "judge_calls": 12, "cost_total": 1.272, "...": "..." },
+    "judge_tokens_in": 33800,
+    "judge_tokens_out": 2210
+  }
+}
 ```
 
 ## Health Check

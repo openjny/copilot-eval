@@ -28,6 +28,7 @@ from eval.protocols import RunStatus
 from eval.runner import RunResult, get_github_token, run_one
 from eval.services.build_service import _ensure_images
 from eval.services.check_report import print_check_results
+from eval.services.cost_service import estimate_run_cost, format_cost_report
 from eval.services.manifest import write_manifest, write_manifest_dicts
 from eval.services.resume_service import (
     CellKey,
@@ -418,6 +419,17 @@ def _print_summary(
     click.echo(f" Results: {passed} passed, {failed} failed")
     if timed_out or errored:
         click.echo(f"   (of which {timed_out} timed out, {errored} errored)")
+    judge_tokens_in = sum(
+        (s.meta.get("judge_tokens_in") or 0) for r in results for s in r.scores if s.type == "judge"
+    )
+    judge_tokens_out = sum(
+        (s.meta.get("judge_tokens_out") or 0)
+        for r in results
+        for s in r.scores
+        if s.type == "judge"
+    )
+    if judge_tokens_in or judge_tokens_out:
+        click.echo(f" Judge tokens: {judge_tokens_in:,} in / {judge_tokens_out:,} out")
     if config.runner.collector == "jaeger":
         click.echo(f" Jaeger:  {config.runner.jaeger_url}")
     else:
@@ -441,6 +453,9 @@ def run_command(
     no_progress: bool = False,
     resume: bool = False,
     run_id: str | None = None,
+    estimate: bool = False,
+    yes: bool = False,
+    budget_limit: float | None = None,
 ) -> None:
     """Business logic for the `run` CLI command: select tasks, print the plan,
     pre-flight, build/ensure images, schedule runs, and persist the manifest.
@@ -450,6 +465,12 @@ def run_command(
     the remaining (failed/missing) cells are executed, and the new results are
     merged back into that same run directory instead of starting a fresh
     run-id.
+
+    Cost governance (issue #70): a pre-flight :class:`CostEstimate` is always
+    computed. ``budget_limit`` (falling back to ``config.runner.budget_limit``)
+    aborts the run before any Docker/agent work if the estimate exceeds it.
+    ``estimate=True`` additionally prints the full cost breakdown and, unless
+    ``yes`` is set, asks for interactive confirmation before proceeding.
     """
     resolved_epochs = epochs or config.runner.epochs
 
@@ -465,6 +486,29 @@ def run_command(
 
     if not tasks:
         click.echo("No tasks to run. Use --task NAME or enable tasks in config.")
+        return
+
+    effective_budget_limit = (
+        budget_limit if budget_limit is not None else config.runner.budget_limit
+    )
+    cost_estimate = estimate_run_cost(config, tasks, config.variants, resolved_epochs)
+    if estimate:
+        click.echo(format_cost_report(cost_estimate, effective_budget_limit))
+    if cost_estimate.over_budget(effective_budget_limit):
+        if not estimate:
+            click.echo(format_cost_report(cost_estimate, effective_budget_limit), err=True)
+        raise click.ClickException(
+            f"Estimated cost ${cost_estimate.cost_total:.4f} exceeds budget limit "
+            f"${effective_budget_limit:.4f}. Adjust runner.budget_limit / --budget-limit, "
+            "or reduce the run's scope (tasks/epochs/variants)."
+        )
+    if (
+        estimate
+        and not dry_run
+        and not yes
+        and not click.confirm("Proceed with this run?", default=True)
+    ):
+        click.echo("Aborted (cost estimate not confirmed).")
         return
 
     existing_index: dict[CellKey, dict[str, Any]] = {}
@@ -557,13 +601,13 @@ def run_command(
     }
     if resume:
         merged_runs = merge_manifest_runs(existing_index, results)
-        write_manifest_dicts(run_dir, run_id, merged_runs, schedule)
+        write_manifest_dicts(run_dir, run_id, merged_runs, schedule, cost_estimate.to_dict())
         passed = sum(1 for r in merged_runs if r.get("passed"))
         click.echo(
             f" Resume merged: {passed}/{len(merged_runs)} cell(s) passing overall "
             f"({len(results)} re-executed this run)"
         )
     else:
-        write_manifest(run_dir, run_id, results, schedule)
+        write_manifest(run_dir, run_id, results, schedule, cost_estimate.to_dict())
 
     _print_summary(config, run_id, results, config_dir)
