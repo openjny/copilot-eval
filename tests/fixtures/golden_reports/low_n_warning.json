@@ -1,0 +1,12 @@
+{
+  "description": "Asymmetric low-N: variant a has n=3, variant b has n=2 (paired epochs={1,2}); both trigger the small-sample and low-paired-n warnings.",
+  "aggregate": "paired",
+  "variant_order": ["a", "b"],
+  "results": [
+    {"scenario": "quick_task", "variant": "a", "epoch": "1", "test_id": "a1", "total_spans": 8, "duration": 5.0, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 1.0, "total_input_tokens": 400, "total_output_tokens": 120, "total_cache_tokens": 20, "model": "gpt-4o-mini", "cost": 0.004},
+    {"scenario": "quick_task", "variant": "a", "epoch": "2", "test_id": "a2", "total_spans": 9, "duration": 5.2, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 1.1, "total_input_tokens": 410, "total_output_tokens": 125, "total_cache_tokens": 20, "model": "gpt-4o-mini", "cost": 0.0042},
+    {"scenario": "quick_task", "variant": "a", "epoch": "3", "test_id": "a3", "total_spans": 8, "duration": 4.8, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.9, "total_input_tokens": 395, "total_output_tokens": 118, "total_cache_tokens": 18, "model": "gpt-4o-mini", "cost": 0.0039},
+    {"scenario": "quick_task", "variant": "b", "epoch": "1", "test_id": "b1", "total_spans": 7, "duration": 4.0, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.8, "total_input_tokens": 350, "total_output_tokens": 100, "total_cache_tokens": 15, "model": "gpt-4o-mini", "cost": 0.0033},
+    {"scenario": "quick_task", "variant": "b", "epoch": "2", "test_id": "b2", "total_spans": 7, "duration": 4.1, "turn_count": 2, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.82, "total_input_tokens": 355, "total_output_tokens": 102, "total_cache_tokens": 15, "model": "gpt-4o-mini", "cost": 0.0034}
+  ]
+}

@@ -1,0 +1,54 @@
+## perf_task
+
+**Samples:** base=8, new=8; paired epochs=8
+
+### Reliability
+
+| Metric | base | new |
+|--------|--------:|--------:|
+| Runs (traces) | 8 | 8 |
+| Success/failure rates | n/a (no manifest) | n/a (no manifest) |
+
+### Metrics (paired)
+
+| Metric | base | new | Delta |
+|--------|--------:|--------:|------:|
+| Duration (s) | 20.1 ±0.6 | 17.0 ±0.5 | -15.0% [CI -3.3,-3.0 abs]* |
+| Turn count | 5.0 ±0.5 | 4.0 | -20.0% [CI -1.0,+0.0 abs] ns |
+| Total spans | 14.0 ±0.5 | 12.0 ±0.5 | -14.3% [CI -2.0,-2.0 abs]* |
+| Tool calls | 2.0 | 2.0 ±0.5 | +0.0% [CI -0.5,+0.0 abs] ns |
+| Input tokens | 2002.5 ±29.3 | 1602.0 ±23.5 | -20.0% [CI -404.0,-396.0 abs]* |
+| Output tokens | 600.5 ±6.1 | 480.5 ±4.9 | -20.0% [CI -121.0,-119.0 abs]* |
+| Cache tokens | 150.0 ±1.8 | 120.0 ±1.5 | -20.0% [CI -30.0,-30.0 abs]* |
+| Tool duration (s) | 4.0 ±0.1 | 3.2 ±0.1 | -20.0% [CI -0.8,-0.8 abs]* |
+| Cost ($) | 0.0301 ±0.0006 | 0.0241 ±0.0005 | -20.0% [CI -0.0061,-0.0059 abs]* |
+
+### Tool Usage
+
+**base**: `read_file`(8), `bash`(8)
+**new**: `read_file`(8), `grep`(6)
+
+### Per-Run Details
+
+| Variant | Epoch | Dur(s) | Turns | Spans | Tools | In Tok | Out Tok | Cache | TDur(s) | Cost($) |
+|---------|------:|-------:|------:|------:|------:|-------:|--------:|------:|--------:|--------:|
+| base | 1 | 20.0 | 5 | 14 | 2 | 2000 | 600 | 150 | 4.0 | 0.0300 |
+| base | 2 | 21.0 | 5 | 15 | 2 | 2050 | 610 | 150 | 4.1 | 0.0310 |
+| base | 3 | 19.0 | 4 | 13 | 2 | 1950 | 590 | 145 | 3.9 | 0.0290 |
+| base | 4 | 20.5 | 5 | 14 | 2 | 2020 | 605 | 150 | 4.0 | 0.0305 |
+| base | 5 | 19.5 | 5 | 14 | 2 | 1980 | 595 | 148 | 4.0 | 0.0295 |
+| base | 6 | 20.2 | 5 | 14 | 2 | 2010 | 602 | 150 | 4.0 | 0.0302 |
+| base | 7 | 19.8 | 4 | 14 | 2 | 1990 | 598 | 149 | 4.0 | 0.0298 |
+| base | 8 | 20.1 | 5 | 14 | 2 | 2005 | 601 | 150 | 4.0 | 0.0301 |
+| new | 1 | 17.0 | 4 | 12 | 2 | 1600 | 480 | 120 | 3.2 | 0.0240 |
+| new | 2 | 17.5 | 4 | 13 | 2 | 1640 | 488 | 120 | 3.3 | 0.0248 |
+| new | 3 | 16.0 | 4 | 11 | 1 | 1560 | 472 | 116 | 3.1 | 0.0232 |
+| new | 4 | 17.2 | 4 | 12 | 2 | 1616 | 484 | 120 | 3.2 | 0.0244 |
+| new | 5 | 16.5 | 4 | 12 | 2 | 1584 | 476 | 118 | 3.2 | 0.0236 |
+| new | 6 | 17.0 | 4 | 12 | 2 | 1608 | 482 | 120 | 3.2 | 0.0242 |
+| new | 7 | 16.8 | 4 | 12 | 1 | 1592 | 478 | 119 | 3.2 | 0.0238 |
+| new | 8 | 17.1 | 4 | 12 | 2 | 1604 | 481 | 120 | 3.2 | 0.0241 |
+
+---
+
+_Legend: value ±stddev; Delta is a percentage, `[CI low,high abs]` is a bootstrap interval of the paired delta in **absolute metric units**; `*` = CI excludes 0 (statistically supported), `ns` = observed only (not supported), `low-n` = fewer than 5 paired samples (significance not assessed). No multiple-comparison correction applied._

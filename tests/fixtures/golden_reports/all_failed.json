@@ -1,0 +1,13 @@
+{
+  "description": "Survivorship-bias guard: every run failed/timed out, so `results` is empty. The report must still be produced from the manifest with 0% success rates, instead of silently vanishing.",
+  "aggregate": "paired",
+  "variant_order": ["a", "b"],
+  "results": [],
+  "manifest_runs": [
+    {"task": "flaky_task", "variant": "a", "epoch": 1, "status": "failed", "test_id": "a1"},
+    {"task": "flaky_task", "variant": "a", "epoch": 2, "status": "timeout", "test_id": "a2"},
+    {"task": "flaky_task", "variant": "b", "epoch": 1, "status": "failed", "test_id": "b1"},
+    {"task": "flaky_task", "variant": "b", "epoch": 2, "status": "failed", "test_id": "b2"}
+  ],
+  "trace_test_ids": []
+}

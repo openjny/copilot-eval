@@ -1,0 +1,319 @@
+{
+  "tasks": [
+    {
+      "task": "flaky_task",
+      "aggregate": "paired",
+      "variants": [
+        "a",
+        "b"
+      ],
+      "variant_n": {
+        "a": 0,
+        "b": 0
+      },
+      "paired_n": 0,
+      "warnings": [
+        "Small sample size (n<5): a=0, b=0. Treat deltas as observed, not statistically supported.",
+        "No shared epochs between variants; paired delta unavailable."
+      ],
+      "reliability": [
+        {
+          "metric": "Runs (attempted)",
+          "values": {
+            "a": "2",
+            "b": "2"
+          }
+        },
+        {
+          "metric": "Success rate",
+          "values": {
+            "a": "0.0%",
+            "b": "0.0%"
+          }
+        },
+        {
+          "metric": "Timeout rate",
+          "values": {
+            "a": "50.0%",
+            "b": "0.0%"
+          }
+        },
+        {
+          "metric": "Failed rate",
+          "values": {
+            "a": "50.0%",
+            "b": "100.0%"
+          }
+        },
+        {
+          "metric": "Missing-trace rate",
+          "values": {
+            "a": "0.0%",
+            "b": "0.0%"
+          }
+        }
+      ],
+      "runs": [],
+      "summary": [
+        {
+          "metric": "Duration (s)",
+          "values": {
+            "a": 0,
+            "b": 0
+          },
+          "delta": "",
+          "n": {
+            "a": 0,
+            "b": 0
+          },
+          "stddev": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "min": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "max": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "paired_n": 0,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        },
+        {
+          "metric": "Turn count",
+          "values": {
+            "a": 0,
+            "b": 0
+          },
+          "delta": "",
+          "n": {
+            "a": 0,
+            "b": 0
+          },
+          "stddev": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "min": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "max": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "paired_n": 0,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        },
+        {
+          "metric": "Total spans",
+          "values": {
+            "a": 0,
+            "b": 0
+          },
+          "delta": "",
+          "n": {
+            "a": 0,
+            "b": 0
+          },
+          "stddev": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "min": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "max": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "paired_n": 0,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        },
+        {
+          "metric": "Tool calls",
+          "values": {
+            "a": 0,
+            "b": 0
+          },
+          "delta": "",
+          "n": {
+            "a": 0,
+            "b": 0
+          },
+          "stddev": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "min": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "max": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "paired_n": 0,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        },
+        {
+          "metric": "Input tokens",
+          "values": {
+            "a": 0,
+            "b": 0
+          },
+          "delta": "",
+          "n": {
+            "a": 0,
+            "b": 0
+          },
+          "stddev": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "min": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "max": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "paired_n": 0,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        },
+        {
+          "metric": "Output tokens",
+          "values": {
+            "a": 0,
+            "b": 0
+          },
+          "delta": "",
+          "n": {
+            "a": 0,
+            "b": 0
+          },
+          "stddev": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "min": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "max": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "paired_n": 0,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        },
+        {
+          "metric": "Cache tokens",
+          "values": {
+            "a": 0,
+            "b": 0
+          },
+          "delta": "",
+          "n": {
+            "a": 0,
+            "b": 0
+          },
+          "stddev": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "min": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "max": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "paired_n": 0,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        },
+        {
+          "metric": "Tool duration (s)",
+          "values": {
+            "a": 0,
+            "b": 0
+          },
+          "delta": "",
+          "n": {
+            "a": 0,
+            "b": 0
+          },
+          "stddev": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "min": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "max": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "paired_n": 0,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        },
+        {
+          "metric": "Cost ($)",
+          "values": {
+            "a": 0,
+            "b": 0
+          },
+          "delta": "",
+          "n": {
+            "a": 0,
+            "b": 0
+          },
+          "stddev": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "min": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "max": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "paired_n": 0,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        }
+      ],
+      "tool_patterns": {
+        "a": {},
+        "b": {}
+      },
+      "judge_scores": [],
+      "judge_runtime": {}
+    }
+  ]
+}

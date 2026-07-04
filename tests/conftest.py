@@ -4,10 +4,29 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from eval.config import load_config
 from eval.trace import RunMetrics, Span, Trace
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--update-golden",
+        action="store_true",
+        default=False,
+        help=(
+            "Regenerate golden fixture files in tests/fixtures/golden_reports/ "
+            "instead of asserting against them (test_report_golden.py)."
+        ),
+    )
+
+
+@pytest.fixture
+def update_golden(request: pytest.FixtureRequest) -> bool:
+    """Whether --update-golden was passed; golden tests write instead of assert."""
+    return bool(request.config.getoption("--update-golden"))
 
 
 def make_metrics(

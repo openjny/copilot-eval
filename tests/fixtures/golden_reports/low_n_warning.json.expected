@@ -1,0 +1,398 @@
+{
+  "tasks": [
+    {
+      "task": "quick_task",
+      "aggregate": "paired",
+      "variants": [
+        "a",
+        "b"
+      ],
+      "variant_n": {
+        "a": 3,
+        "b": 2
+      },
+      "paired_n": 2,
+      "warnings": [
+        "Small sample size (n<5): a=3, b=2. Treat deltas as observed, not statistically supported.",
+        "Only 2 paired epoch(s) (<5); paired deltas and confidence intervals are low-confidence."
+      ],
+      "reliability": [
+        {
+          "metric": "Runs (traces)",
+          "values": {
+            "a": "3",
+            "b": "2"
+          }
+        },
+        {
+          "metric": "Success/failure rates",
+          "values": {
+            "a": "n/a (no manifest)",
+            "b": "n/a (no manifest)"
+          }
+        }
+      ],
+      "runs": [
+        {
+          "variant": "a",
+          "epoch": "1",
+          "duration": 5.0,
+          "turn_count": 2,
+          "total_spans": 8,
+          "tool_count": 1,
+          "input_tokens": 400,
+          "output_tokens": 120,
+          "cache_tokens": 20,
+          "tool_duration": 1.0,
+          "tool_names": [
+            "read_file"
+          ],
+          "model": "gpt-4o-mini",
+          "cost": 0.004,
+          "judges": {},
+          "judge_stddevs": {}
+        },
+        {
+          "variant": "a",
+          "epoch": "2",
+          "duration": 5.2,
+          "turn_count": 2,
+          "total_spans": 9,
+          "tool_count": 1,
+          "input_tokens": 410,
+          "output_tokens": 125,
+          "cache_tokens": 20,
+          "tool_duration": 1.1,
+          "tool_names": [
+            "read_file"
+          ],
+          "model": "gpt-4o-mini",
+          "cost": 0.0042,
+          "judges": {},
+          "judge_stddevs": {}
+        },
+        {
+          "variant": "a",
+          "epoch": "3",
+          "duration": 4.8,
+          "turn_count": 2,
+          "total_spans": 8,
+          "tool_count": 1,
+          "input_tokens": 395,
+          "output_tokens": 118,
+          "cache_tokens": 18,
+          "tool_duration": 0.9,
+          "tool_names": [
+            "read_file"
+          ],
+          "model": "gpt-4o-mini",
+          "cost": 0.0039,
+          "judges": {},
+          "judge_stddevs": {}
+        },
+        {
+          "variant": "b",
+          "epoch": "1",
+          "duration": 4.0,
+          "turn_count": 2,
+          "total_spans": 7,
+          "tool_count": 1,
+          "input_tokens": 350,
+          "output_tokens": 100,
+          "cache_tokens": 15,
+          "tool_duration": 0.8,
+          "tool_names": [
+            "read_file"
+          ],
+          "model": "gpt-4o-mini",
+          "cost": 0.0033,
+          "judges": {},
+          "judge_stddevs": {}
+        },
+        {
+          "variant": "b",
+          "epoch": "2",
+          "duration": 4.1,
+          "turn_count": 2,
+          "total_spans": 7,
+          "tool_count": 1,
+          "input_tokens": 355,
+          "output_tokens": 102,
+          "cache_tokens": 15,
+          "tool_duration": 0.82,
+          "tool_names": [
+            "read_file"
+          ],
+          "model": "gpt-4o-mini",
+          "cost": 0.0034,
+          "judges": {},
+          "judge_stddevs": {}
+        }
+      ],
+      "summary": [
+        {
+          "metric": "Duration (s)",
+          "values": {
+            "a": 5.0,
+            "b": 4.05
+          },
+          "delta": "-20.6%",
+          "n": {
+            "a": 3,
+            "b": 2
+          },
+          "stddev": {
+            "a": 0.20000000000000018,
+            "b": 0.0707106781186545
+          },
+          "min": {
+            "a": 4.8,
+            "b": 4.0
+          },
+          "max": {
+            "a": 5.2,
+            "b": 4.1
+          },
+          "paired_n": 2,
+          "ci_low": -1.1000000000000005,
+          "ci_high": -1.0,
+          "significant": null
+        },
+        {
+          "metric": "Turn count",
+          "values": {
+            "a": 2.0,
+            "b": 2.0
+          },
+          "delta": "+0.0%",
+          "n": {
+            "a": 3,
+            "b": 2
+          },
+          "stddev": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "min": {
+            "a": 2.0,
+            "b": 2.0
+          },
+          "max": {
+            "a": 2.0,
+            "b": 2.0
+          },
+          "paired_n": 2,
+          "ci_low": 0.0,
+          "ci_high": 0.0,
+          "significant": null
+        },
+        {
+          "metric": "Total spans",
+          "values": {
+            "a": 8.0,
+            "b": 7.0
+          },
+          "delta": "-17.6%",
+          "n": {
+            "a": 3,
+            "b": 2
+          },
+          "stddev": {
+            "a": 0.5773502691896257,
+            "b": 0.0
+          },
+          "min": {
+            "a": 8.0,
+            "b": 7.0
+          },
+          "max": {
+            "a": 9.0,
+            "b": 7.0
+          },
+          "paired_n": 2,
+          "ci_low": -2.0,
+          "ci_high": -1.0,
+          "significant": null
+        },
+        {
+          "metric": "Tool calls",
+          "values": {
+            "a": 1.0,
+            "b": 1.0
+          },
+          "delta": "+0.0%",
+          "n": {
+            "a": 3,
+            "b": 2
+          },
+          "stddev": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "min": {
+            "a": 1.0,
+            "b": 1.0
+          },
+          "max": {
+            "a": 1.0,
+            "b": 1.0
+          },
+          "paired_n": 2,
+          "ci_low": 0.0,
+          "ci_high": 0.0,
+          "significant": null
+        },
+        {
+          "metric": "Input tokens",
+          "values": {
+            "a": 400.0,
+            "b": 352.5
+          },
+          "delta": "-13.0%",
+          "n": {
+            "a": 3,
+            "b": 2
+          },
+          "stddev": {
+            "a": 7.637626158259733,
+            "b": 3.5355339059327378
+          },
+          "min": {
+            "a": 395.0,
+            "b": 350.0
+          },
+          "max": {
+            "a": 410.0,
+            "b": 355.0
+          },
+          "paired_n": 2,
+          "ci_low": -55.0,
+          "ci_high": -50.0,
+          "significant": null
+        },
+        {
+          "metric": "Output tokens",
+          "values": {
+            "a": 120.0,
+            "b": 101.0
+          },
+          "delta": "-17.6%",
+          "n": {
+            "a": 3,
+            "b": 2
+          },
+          "stddev": {
+            "a": 3.605551275463989,
+            "b": 1.4142135623730951
+          },
+          "min": {
+            "a": 118.0,
+            "b": 100.0
+          },
+          "max": {
+            "a": 125.0,
+            "b": 102.0
+          },
+          "paired_n": 2,
+          "ci_low": -23.0,
+          "ci_high": -20.0,
+          "significant": null
+        },
+        {
+          "metric": "Cache tokens",
+          "values": {
+            "a": 20.0,
+            "b": 15.0
+          },
+          "delta": "-25.0%",
+          "n": {
+            "a": 3,
+            "b": 2
+          },
+          "stddev": {
+            "a": 1.1547005383792515,
+            "b": 0.0
+          },
+          "min": {
+            "a": 18.0,
+            "b": 15.0
+          },
+          "max": {
+            "a": 20.0,
+            "b": 15.0
+          },
+          "paired_n": 2,
+          "ci_low": -5.0,
+          "ci_high": -5.0,
+          "significant": null
+        },
+        {
+          "metric": "Tool duration (s)",
+          "values": {
+            "a": 1.0,
+            "b": 0.81
+          },
+          "delta": "-22.9%",
+          "n": {
+            "a": 3,
+            "b": 2
+          },
+          "stddev": {
+            "a": 0.10000000000000003,
+            "b": 0.014142135623730885
+          },
+          "min": {
+            "a": 0.9,
+            "b": 0.8
+          },
+          "max": {
+            "a": 1.1,
+            "b": 0.82
+          },
+          "paired_n": 2,
+          "ci_low": -0.28000000000000014,
+          "ci_high": -0.19999999999999996,
+          "significant": null
+        },
+        {
+          "metric": "Cost ($)",
+          "values": {
+            "a": 0.004,
+            "b": 0.0033499999999999997
+          },
+          "delta": "-18.3%",
+          "n": {
+            "a": 3,
+            "b": 2
+          },
+          "stddev": {
+            "a": 0.0001527525231651946,
+            "b": 7.071067811865463e-05
+          },
+          "min": {
+            "a": 0.0039,
+            "b": 0.0033
+          },
+          "max": {
+            "a": 0.0042,
+            "b": 0.0034
+          },
+          "paired_n": 2,
+          "ci_low": -0.0007999999999999999,
+          "ci_high": -0.0007000000000000001,
+          "significant": null
+        }
+      ],
+      "tool_patterns": {
+        "a": {
+          "read_file": 3
+        },
+        "b": {
+          "read_file": 2
+        }
+      },
+      "judge_scores": [],
+      "judge_runtime": {}
+    }
+  ]
+}

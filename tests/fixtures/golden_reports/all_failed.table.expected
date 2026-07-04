@@ -1,0 +1,33 @@
+
+================================================================================
+TASK: flaky_task
+================================================================================
+
+Samples: a=0, b=0; paired epochs=0
+  ! Small sample size (n<5): a=0, b=0. Treat deltas as observed, not statistically supported.
+  ! No shared epochs between variants; paired delta unavailable.
+
+Reliability
+Metric                                    a                 b
+------------------------------------------------------------
+Runs (attempted)                          2                 2
+Success rate                           0.0%              0.0%
+Timeout rate                          50.0%              0.0%
+Failed rate                           50.0%            100.0%
+Missing-trace rate                     0.0%              0.0%
+
+Variant            Epoch  Dur(s) Turns Spans Tools   In Tok  Out Tok    Cache TDur(s)   Cost($)
+------------------------------------------------------------------------------------------
+
+Metrics (paired)
+Metric                                        a                     b                      Delta
+----------------------------------------------------------------------------------------------
+Duration (s)                                  —                     —                           
+Turn count                                    —                     —                           
+Total spans                                   —                     —                           
+Tool calls                                    —                     —                           
+Input tokens                                  —                     —                           
+Output tokens                                 —                     —                           
+Cache tokens                                  —                     —                           
+Tool duration (s)                             —                     —                           
+Cost ($)                                      —                     —                           

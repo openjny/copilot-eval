@@ -1,0 +1,47 @@
+## quick_task
+
+**Samples:** a=3, b=2; paired epochs=2
+
+> ⚠️ Small sample size (n<5): a=3, b=2. Treat deltas as observed, not statistically supported.
+
+> ⚠️ Only 2 paired epoch(s) (<5); paired deltas and confidence intervals are low-confidence.
+
+### Reliability
+
+| Metric | a | b |
+|--------|--------:|--------:|
+| Runs (traces) | 3 | 2 |
+| Success/failure rates | n/a (no manifest) | n/a (no manifest) |
+
+### Metrics (paired)
+
+| Metric | a | b | Delta |
+|--------|--------:|--------:|------:|
+| Duration (s) | 5.0 ±0.2 | 4.0 ±0.1 | -20.6% [CI -1.1,-1.0 abs] low-n |
+| Turn count | 2.0 | 2.0 | +0.0% [CI +0.0,+0.0 abs] low-n |
+| Total spans | 8.0 ±0.6 | 7.0 | -17.6% [CI -2.0,-1.0 abs] low-n |
+| Tool calls | 1.0 | 1.0 | +0.0% [CI +0.0,+0.0 abs] low-n |
+| Input tokens | 400.0 ±7.6 | 352.5 ±3.5 | -13.0% [CI -55.0,-50.0 abs] low-n |
+| Output tokens | 120.0 ±3.6 | 101.0 ±1.4 | -17.6% [CI -23.0,-20.0 abs] low-n |
+| Cache tokens | 20.0 ±1.2 | 15.0 | -25.0% [CI -5.0,-5.0 abs] low-n |
+| Tool duration (s) | 1.0 ±0.1 | 0.8 ±0.0 | -22.9% [CI -0.3,-0.2 abs] low-n |
+| Cost ($) | 0.0040 ±0.0002 | 0.0033 ±0.0001 | -18.3% [CI -0.0008,-0.0007 abs] low-n |
+
+### Tool Usage
+
+**a**: `read_file`(3)
+**b**: `read_file`(2)
+
+### Per-Run Details
+
+| Variant | Epoch | Dur(s) | Turns | Spans | Tools | In Tok | Out Tok | Cache | TDur(s) | Cost($) |
+|---------|------:|-------:|------:|------:|------:|-------:|--------:|------:|--------:|--------:|
+| a | 1 | 5.0 | 2 | 8 | 1 | 400 | 120 | 20 | 1.0 | 0.0040 |
+| a | 2 | 5.2 | 2 | 9 | 1 | 410 | 125 | 20 | 1.1 | 0.0042 |
+| a | 3 | 4.8 | 2 | 8 | 1 | 395 | 118 | 18 | 0.9 | 0.0039 |
+| b | 1 | 4.0 | 2 | 7 | 1 | 350 | 100 | 15 | 0.8 | 0.0033 |
+| b | 2 | 4.1 | 2 | 7 | 1 | 355 | 102 | 15 | 0.8 | 0.0034 |
+
+---
+
+_Legend: value ±stddev; Delta is a percentage, `[CI low,high abs]` is a bootstrap interval of the paired delta in **absolute metric units**; `*` = CI excludes 0 (statistically supported), `ns` = observed only (not supported), `low-n` = fewer than 5 paired samples (significance not assessed). No multiple-comparison correction applied._

@@ -1,0 +1,29 @@
+{
+  "description": "Judge self-consistency: 'quality' judge score with score_stddev spread across resampled judge calls. Variant 'a' is consistently scored (low stddev); variant 'b' has higher score variance despite a similar mean.",
+  "aggregate": "paired",
+  "variant_order": ["a", "b"],
+  "results": [
+    {"scenario": "consistency_task", "variant": "a", "epoch": "1", "test_id": "a1", "total_spans": 11, "duration": 5.0, "turn_count": 3, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.6, "total_input_tokens": 550, "total_output_tokens": 160, "total_cache_tokens": 30, "model": "gpt-4o", "cost": 0.009},
+    {"scenario": "consistency_task", "variant": "a", "epoch": "2", "test_id": "a2", "total_spans": 11, "duration": 5.1, "turn_count": 3, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.6, "total_input_tokens": 555, "total_output_tokens": 162, "total_cache_tokens": 30, "model": "gpt-4o", "cost": 0.0091},
+    {"scenario": "consistency_task", "variant": "a", "epoch": "3", "test_id": "a3", "total_spans": 11, "duration": 4.9, "turn_count": 3, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.58, "total_input_tokens": 545, "total_output_tokens": 158, "total_cache_tokens": 29, "model": "gpt-4o", "cost": 0.0089},
+    {"scenario": "consistency_task", "variant": "a", "epoch": "4", "test_id": "a4", "total_spans": 11, "duration": 5.05, "turn_count": 3, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.6, "total_input_tokens": 552, "total_output_tokens": 161, "total_cache_tokens": 30, "model": "gpt-4o", "cost": 0.009},
+    {"scenario": "consistency_task", "variant": "a", "epoch": "5", "test_id": "a5", "total_spans": 11, "duration": 4.95, "turn_count": 3, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.59, "total_input_tokens": 548, "total_output_tokens": 159, "total_cache_tokens": 29, "model": "gpt-4o", "cost": 0.0089},
+    {"scenario": "consistency_task", "variant": "b", "epoch": "1", "test_id": "b1", "total_spans": 11, "duration": 5.0, "turn_count": 3, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.6, "total_input_tokens": 550, "total_output_tokens": 160, "total_cache_tokens": 30, "model": "gpt-4o", "cost": 0.009},
+    {"scenario": "consistency_task", "variant": "b", "epoch": "2", "test_id": "b2", "total_spans": 11, "duration": 5.1, "turn_count": 3, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.6, "total_input_tokens": 555, "total_output_tokens": 162, "total_cache_tokens": 30, "model": "gpt-4o", "cost": 0.0091},
+    {"scenario": "consistency_task", "variant": "b", "epoch": "3", "test_id": "b3", "total_spans": 11, "duration": 4.9, "turn_count": 3, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.58, "total_input_tokens": 545, "total_output_tokens": 158, "total_cache_tokens": 29, "model": "gpt-4o", "cost": 0.0089},
+    {"scenario": "consistency_task", "variant": "b", "epoch": "4", "test_id": "b4", "total_spans": 11, "duration": 5.05, "turn_count": 3, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.6, "total_input_tokens": 552, "total_output_tokens": 161, "total_cache_tokens": 30, "model": "gpt-4o", "cost": 0.009},
+    {"scenario": "consistency_task", "variant": "b", "epoch": "5", "test_id": "b5", "total_spans": 11, "duration": 4.95, "turn_count": 3, "tool_count": 1, "tool_names": ["read_file"], "tool_duration": 0.59, "total_input_tokens": 548, "total_output_tokens": 159, "total_cache_tokens": 29, "model": "gpt-4o", "cost": 0.0089}
+  ],
+  "scores": {
+    "consistency_task_a_epoch1": [{"name": "quality", "type": "judge", "score": 7, "reason": "stable", "score_stddev": 0.2}],
+    "consistency_task_a_epoch2": [{"name": "quality", "type": "judge", "score": 7, "reason": "stable", "score_stddev": 0.15}],
+    "consistency_task_a_epoch3": [{"name": "quality", "type": "judge", "score": 8, "reason": "stable", "score_stddev": 0.25}],
+    "consistency_task_a_epoch4": [{"name": "quality", "type": "judge", "score": 7, "reason": "stable", "score_stddev": 0.2}],
+    "consistency_task_a_epoch5": [{"name": "quality", "type": "judge", "score": 7, "reason": "stable", "score_stddev": 0.18}],
+    "consistency_task_b_epoch1": [{"name": "quality", "type": "judge", "score": 6, "reason": "mixed samples", "score_stddev": 2.1}],
+    "consistency_task_b_epoch2": [{"name": "quality", "type": "judge", "score": 8, "reason": "mixed samples", "score_stddev": 1.8}],
+    "consistency_task_b_epoch3": [{"name": "quality", "type": "judge", "score": 7, "reason": "mixed samples", "score_stddev": 2.3}],
+    "consistency_task_b_epoch4": [{"name": "quality", "type": "judge", "score": 9, "reason": "mixed samples", "score_stddev": 1.9}],
+    "consistency_task_b_epoch5": [{"name": "quality", "type": "judge", "score": 5, "reason": "mixed samples", "score_stddev": 2.0}]
+  }
+}
