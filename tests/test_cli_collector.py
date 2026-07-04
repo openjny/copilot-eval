@@ -111,7 +111,7 @@ class TestAnalyzeCollectorRouting:
             patch("eval.cli._ensure_jaeger") as mock_ensure,
             patch("eval.cli._fetch_traces_for_run") as mock_jaeger_fetch,
         ):
-            result = runner.invoke(
+            runner.invoke(
                 main,
                 ["analyze", "--run-id", "test-run-123", "--config-dir", str(config_dir)],
             )
@@ -136,7 +136,7 @@ class TestAnalyzeCollectorRouting:
             patch("eval.cli._ensure_jaeger") as mock_ensure,
             patch("eval.cli._fetch_traces_for_run", return_value=[]) as mock_jaeger_fetch,
         ):
-            result = runner.invoke(
+            runner.invoke(
                 main,
                 ["analyze", "--run-id", "test-run-456", "--config-dir", str(config_dir)],
             )
@@ -161,7 +161,7 @@ class TestAnalyzeCollectorRouting:
             patch("eval.cli._ensure_jaeger") as mock_ensure,
             patch("eval.cli._fetch_traces_for_run", return_value=[]) as mock_jaeger_fetch,
         ):
-            result = runner.invoke(
+            runner.invoke(
                 main,
                 [
                     "analyze",

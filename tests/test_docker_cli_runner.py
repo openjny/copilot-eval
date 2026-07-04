@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from eval.config import Config, Hooks, RunnerConfig, Task, Variant
+from eval.config import Config, RunnerConfig, Task, Variant
 from eval.protocols import RunContext, RunStatus
 from eval.runners import DockerCLIRunner, create_runner
 from eval.runners import docker_cli_runner as docker_runner_mod

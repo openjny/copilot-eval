@@ -10,17 +10,15 @@ Run with:
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
 from eval.collectors import FileCollector, JaegerCollector, create_collector
-from eval.collectors.file_collector import TRACE_FILE, parse_file_traces
+from eval.collectors.file_collector import TRACE_FILE
 from eval.config import Config, Hooks, RunnerConfig, Task, Variant
 from eval.protocols import RunContext, RunStatus
 from eval.runners import DockerCLIRunner, create_runner
@@ -581,7 +579,7 @@ class TestFullPipelineIntegration:
         # Override the image to use alpine instead of copilot-eval
         config.runner.container_image_base = "alpine"
 
-        run_context = _make_run_context(tmp_path, config=config, task=task, variant=variant)
+        _make_run_context(tmp_path, config=config, task=task, variant=variant)
 
         # Use real subprocess.run but with a simple alpine echo command
         # We override the runner's run by constructing a minimal docker call
