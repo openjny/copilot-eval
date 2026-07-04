@@ -12,15 +12,22 @@ This checks YAML syntax/schema validity, that every referenced fixture directory
 exists on disk, that variant/task script references (Dockerfiles, run scripts,
 hooks, health checks, script evaluators) point to real files, and that every
 `{var}` placeholder in a prompt or `output_instruction` resolves for each
-variant. Every failure includes a remediation hint; the command exits `0` when
-all checks pass and `1` otherwise.
+variant. Every check result is either a pass (`✓`), a **blocking** failure
+(`✗`), or a non-blocking **warning** (`⚠`) — a missing fixture directory or an
+unresolved `{var}` placeholder is only a warning, since the runtime tolerates
+both (a missing fixture is simply not copied; an unresolved placeholder is
+left as literal text, e.g. `"Emit JSON like {status}"`). Every failure and
+warning includes a remediation hint. The command exits `0` unless there is at
+least one blocking failure.
 
 `copilot-eval run` also performs its own pre-flight readiness checks (Docker
 daemon reachable, `GITHUB_TOKEN`/`COPILOT_GITHUB_TOKEN` set or `gh auth`
 available, fixture directories present, sufficient disk space, and — unless
 `--no-build` is passed — that the base Docker image exists) before doing any
 Docker work, so a `run` fails fast with an actionable message instead of
-20+ minutes in.
+20+ minutes in. As with `validate`, only blocking failures abort the run;
+warnings are printed but the run proceeds. Pass `--skip-preflight` to bypass
+these checks entirely (e.g. in CI environments where they may be noisy).
 
 ## eval-config.yaml
 
