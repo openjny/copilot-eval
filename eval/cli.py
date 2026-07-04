@@ -18,9 +18,10 @@ import requests
 
 from eval.collectors import create_collector
 from eval.config import Config, Task, Variant, load_config
+from eval.evaluators import load_evaluator_plugins
 from eval.logging_config import LOG_FORMATS, LOG_LEVELS, configure_logging
 from eval.naming import run_slug
-from eval.protocols import RunContext, RunStatus
+from eval.protocols import EvalContext, RunContext, RunStatus
 from eval.report import build_report, format_json, format_markdown, format_table
 from eval.runner import RunResult, get_github_token, run_one
 from eval.trace import (
@@ -151,6 +152,10 @@ def _load_manifest(results_dir: Path) -> list[dict[str, Any]] | None:
 )
 def main(log_level: str | None, log_format: str | None) -> None:
     """Copilot CLI A/B evaluation framework."""
+    # Discover third-party evaluator types (entry-point group
+    # "copilot_eval.evaluators", see issue #66) before any command loads a
+    # config, so plugin-defined `type:` strings validate and dispatch.
+    load_evaluator_plugins()
     try:
         configure_logging(log_level, log_format)
     except ValueError as exc:
@@ -773,7 +778,8 @@ def _run_judges(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from eval.runner import read_files_from_dir, run_judge, run_judges_batch, score_to_dict
+    from eval.evaluators import JudgeEvaluator
+    from eval.runner import read_files_from_dir, run_judges_batch, score_to_dict
 
     github_token = get_github_token()
     tasks_by_name = {t.name: t for t in config.tasks}
@@ -913,16 +919,21 @@ def _run_judges(
                 extra_meta=extra_meta,
             )
         else:
-            scored = [
-                run_judge(
-                    evs[0],
-                    ctx["conversation"],
-                    config,
-                    github_token,
-                    ctx["output_files_text"],
+            score = JudgeEvaluator.from_config(evs[0]).evaluate(
+                EvalContext(
+                    evaluator=evs[0],
+                    config=config,
+                    token=github_token,
+                    conversation=ctx["conversation"],
+                    output_files_text=ctx["output_files_text"],
                     extra_meta=extra_meta,
                 )
-            ]
+            )
+            # JudgeEvaluator only returns None when both conversation and
+            # output_files_text are empty; the collection phase above already
+            # guarantees at least one is present for every context here.
+            assert score is not None
+            scored = [score]
         for s in scored:
             if s.score is not None:
                 click.echo(f"    ✓ {s.name}: {s.score} — {s.reason[:60]}", err=True)
@@ -974,7 +985,8 @@ def _run_metric_evaluators(config: Config, traces: list[Trace], results_dir: Pat
     pass — including gates whose value was unavailable (``score is None``), which
     count as failures — so ``analyze`` can exit non-zero for CI gating.
     """
-    from eval.runner import EvalScore, eval_metric
+    from eval.evaluators import MetricEvaluator
+    from eval.runner import EvalScore
 
     tasks_by_name = {t.name: t for t in config.tasks}
     seen: set[Path] = set()
@@ -1016,7 +1028,15 @@ def _run_metric_evaluators(config: Config, traces: list[Trace], results_dir: Pat
                 for ev in metric_evaluators
             ]
         else:
-            new_scores = [eval_metric(ev, run_metrics) for ev in metric_evaluators]
+            new_scores = []
+            for ev in metric_evaluators:
+                score = MetricEvaluator.from_config(ev).evaluate(
+                    EvalContext(evaluator=ev, config=config, metrics=run_metrics)
+                )
+                # MetricEvaluator only returns None when metrics is None, which
+                # is excluded by the branch above (run_metrics is not None here).
+                assert score is not None
+                new_scores.append(score)
 
         _merge_scores_file(scores_file, new_scores, replace_type="metric")
         for s in new_scores:

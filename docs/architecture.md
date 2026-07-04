@@ -21,7 +21,8 @@ eval/
 ├── cli.py        Click CLI: list, build, run, analyze
 ├── config.py     YAML config → dataclasses (Config, Task, Variant, Evaluator, Hooks)
 ├── runner.py     Single eval run: hooks → Docker container → evaluators
-├── protocols.py  AgentRunner / TraceCollector protocol interfaces (dual abstraction)
+├── protocols.py  AgentRunner / TraceCollector / Evaluator protocol interfaces (dual abstraction)
+├── evaluators/   Evaluator protocol implementations + EVALUATOR_REGISTRY (judge/script/contains/regex/metric)
 ├── collectors/   TraceCollector implementations: file_collector.py (default), jaeger_collector.py
 ├── trace.py      Jaeger API: fetch + parse OTel traces
 └── report.py     A/B comparison: build_report() → format_table/json/markdown

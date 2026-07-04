@@ -35,9 +35,16 @@ from eval.env_utils import (
 )
 from eval.naming import run_slug
 from eval.protocols import (
+    EvalContext,
     RunArtifacts,
     RunContext,
     RunStatus,
+)
+from eval.protocols import (
+    EvalScore as EvalScore,
+)
+from eval.protocols import (
+    score_to_dict as score_to_dict,
 )
 from eval.protocols import (
     status_from_exit_code as _status_from_exit_code,
@@ -48,29 +55,9 @@ from eval.trace import RunMetrics, metric_value
 logger = getLogger(__name__)
 
 status_from_exit_code = _status_from_exit_code
-
-
-@dataclass
-class EvalScore:
-    name: str
-    type: str
-    score: int | None
-    reason: str = ""
-    passed: bool = True
-    # Self-consistency metadata (judge evaluators only). ``samples`` holds the
-    # successful per-call scores; ``n_samples`` is the number of calls requested
-    # (== sum of ``outcomes``), which may exceed len(samples) when some fail.
-    samples: list[int] = field(default_factory=list)
-    score_stddev: float | None = None
-    n_samples: int = 0
-    outcomes: dict[str, int] = field(default_factory=dict)
-    judge_model: str | None = None
-    judge_version: str | None = None
-    # Free-form judge runtime/context metadata (judge runtime, truncation, etc.).
-    meta: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return score_to_dict(self)
+# EvalScore/score_to_dict now live in eval.protocols (alongside the Evaluator
+# protocol + EvalContext); re-exported here for backward compatibility since
+# most callers import them from eval.runner.
 
 
 @dataclass
@@ -116,36 +103,6 @@ class RunResult:
             "duration_seconds": self.duration_seconds,
             "scores": [score_to_dict(s) for s in self.scores],
         }
-
-
-def score_to_dict(s: EvalScore) -> dict[str, Any]:
-    """Serialize an EvalScore to the *.scores.json schema.
-
-    Base keys mirror the legacy shape; judge self-consistency metadata
-    (samples, stddev, outcomes, model/version) is added only for judge scores
-    so non-judge serialization stays byte-identical.
-    """
-    d: dict[str, Any] = {
-        "name": s.name,
-        "type": s.type,
-        "score": s.score,
-        "reason": s.reason,
-        "passed": s.passed,
-    }
-    if s.meta:
-        d["meta"] = s.meta
-    if s.type == "judge" and s.n_samples:
-        d.update(
-            {
-                "samples": s.samples,
-                "score_stddev": s.score_stddev,
-                "n_samples": s.n_samples,
-                "outcomes": s.outcomes,
-                "judge_model": s.judge_model,
-                "judge_version": s.judge_version,
-            }
-        )
-    return d
 
 
 def get_github_token() -> str:
@@ -495,6 +452,17 @@ def _persist_trace_file(
     shutil.copy2(trace_src, trace_dest)
 
 
+# Evaluator types scored later, during `analyze`, instead of inline here:
+# judge needs the captured trace/log text assembled from OTel data, and metric
+# needs telemetry parsed from the exported trace — neither is available yet at
+# this point in `run_one` (see eval.cli._run_judges / _run_metric_evaluators).
+# Every *other* registered type — including script/contains/regex and any
+# third-party type registered via entry points (see issue #66) — is assumed to
+# be inline-capable (scoreable from just the log file right after the run), so
+# it's picked up here automatically without this function needing changes.
+_DEFERRED_EVALUATOR_TYPES = ("judge", "metric")
+
+
 def _run_evaluators(
     task: Task,
     variant: Variant,
@@ -503,18 +471,35 @@ def _run_evaluators(
     token: str,
     work_dir: Path | None = None,
 ) -> list[EvalScore]:
-    """Run non-judge evaluators (script, contains, regex). Judge runs in analyze."""
+    """Run inline evaluators (script, contains, regex, ...) via the Evaluator registry.
+
+    Dispatch is a registry lookup (`eval.evaluators.EVALUATOR_REGISTRY`)
+    keyed by `ev.type`, rather than an if/elif chain, so new evaluator types
+    — including third-party ones registered via entry points — don't require
+    touching this function (see issue #78/#66).
+    """
+    # Local import: eval.evaluators' judge/metric classes call back into this
+    # module's run_judge/eval_metric helpers, so importing it at module scope
+    # here would create an eval.runner <-> eval.evaluators import cycle.
+    from eval.evaluators import EVALUATOR_REGISTRY
+
     scores: list[EvalScore] = []
     for ev in task.evaluators:
-        s = None
-        if ev.type == "judge":
-            continue  # Judge evaluators run in `analyze` command
-        elif ev.type == "script":
-            s = _eval_script(ev, config, task, variant, log_file)
-        elif ev.type == "contains":
-            s = _eval_contains(ev, log_file)
-        elif ev.type == "regex":
-            s = _eval_regex(ev, log_file)
+        if ev.type in _DEFERRED_EVALUATOR_TYPES:
+            continue  # judge/metric evaluators run in `analyze`
+        evaluator_cls = EVALUATOR_REGISTRY.get(ev.type)
+        if evaluator_cls is None:
+            continue
+        context = EvalContext(
+            evaluator=ev,
+            config=config,
+            task=task,
+            variant=variant,
+            log_file=log_file,
+            work_dir=work_dir,
+            token=token,
+        )
+        s = evaluator_cls.from_config(ev).evaluate(context)
         if s:
             scores.append(s)
     if scores:
@@ -903,63 +888,6 @@ def run_judges_batch(
         )
         for ev in evaluators
     ]
-
-
-def _eval_script(
-    ev: Evaluator, config: Config, task: Task, variant: Variant, log_file: Path
-) -> EvalScore | None:
-    if not ev.script:
-        return None
-    resolved = (config.config_dir / ev.script).resolve()
-    if not resolved.exists():
-        resolved = (config.project_dir / ev.script).resolve()
-    if not resolved.exists():
-        return None
-    logger.info("Evaluating: %s (script)...", ev.name)
-    merged_vars = config.resolve_vars(task, variant)
-    env = {
-        **os.environ,
-        **_load_env_file(config.env_file),
-        **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()},
-    }
-    with open(log_file, "a") as lf:
-        proc = subprocess.run([str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)
-    passed = proc.returncode == 0
-    return EvalScore(
-        name=ev.name,
-        type="script",
-        score=1 if passed else 0,
-        reason="PASS" if passed else "FAIL",
-        passed=passed,
-    )
-
-
-def _eval_contains(ev: Evaluator, log_file: Path) -> EvalScore | None:
-    if not ev.value:
-        return None
-    output = _read_log(log_file)
-    found = ev.value in (output or "")
-    return EvalScore(
-        name=ev.name,
-        type="contains",
-        score=1 if found else 0,
-        reason=f"{'found' if found else 'not found'}",
-        passed=found,
-    )
-
-
-def _eval_regex(ev: Evaluator, log_file: Path) -> EvalScore | None:
-    if not ev.value:
-        return None
-    output = _read_log(log_file)
-    match = bool(re.search(ev.value, output or ""))
-    return EvalScore(
-        name=ev.name,
-        type="regex",
-        score=1 if match else 0,
-        reason=f"{'matched' if match else 'no match'}",
-        passed=match,
-    )
 
 
 _METRIC_OP_FUNCS: dict[str, Callable[[float, float], bool]] = {
