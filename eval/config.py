@@ -387,6 +387,23 @@ def _check_duplicate_names(items: list[Any], label: str) -> None:
 # --- Internal parsers ---
 
 
+def _known_evaluator_types() -> tuple[str, ...]:
+    """Return the currently registered evaluator type strings.
+
+    Built-in types always come from ``EVALUATOR_TYPES``; additional types
+    registered via entry points (see ``eval.evaluators.load_evaluator_plugins``,
+    issue #66) are picked up too, so a plugin-defined ``type:`` validates
+    without any change here. This is a local import — ``eval.evaluators``
+    transitively imports ``eval.runner``, which imports this module, so
+    importing it at module scope would create a circular import.
+    """
+    try:
+        from eval.evaluators import EVALUATOR_REGISTRY
+    except ImportError:  # pragma: no cover - defensive, should not happen normally
+        return EVALUATOR_TYPES
+    return tuple(dict.fromkeys((*EVALUATOR_TYPES, *EVALUATOR_REGISTRY.keys())))
+
+
 def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Evaluator]:
     if not raw_list:
         return []
@@ -412,10 +429,11 @@ def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Eva
         seen.add(name)
 
         etype = e.get("type", "judge")
-        if etype not in EVALUATOR_TYPES:
+        known_types = _known_evaluator_types()
+        if etype not in known_types:
             raise ConfigError(
                 f"Evaluator '{name}'{where} has invalid type '{etype}'. "
-                f"Must be one of: {', '.join(EVALUATOR_TYPES)}."
+                f"Must be one of: {', '.join(known_types)}."
             )
         prompt, script, value = e.get("prompt"), e.get("script"), e.get("value")
         criterion, rubric = None, None

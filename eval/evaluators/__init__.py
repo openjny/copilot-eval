@@ -2,11 +2,18 @@
 
 Provides the concrete implementations of ``eval.protocols.Evaluator`` for each
 built-in evaluator ``type`` (judge/script/contains/regex/metric), plus a
-name -> class registry so evaluator dispatch (in ``eval.runner._run_evaluators``
-and, potentially, third-party callers) is a lookup instead of an if/elif
-chain. This directly unblocks pluggable evaluator types registered via entry
-points (see issue #66) since new types only need to land in
-``EVALUATOR_REGISTRY`` — no changes to ``eval.runner`` required.
+name -> class registry so evaluator dispatch (``eval.runner._run_evaluators``
+for inline types, ``eval.cli._run_judges``/``_run_metric_evaluators`` for
+judge/metric) is a lookup instead of an if/elif chain.
+
+Third-party evaluator types can be added without touching ``eval.runner`` or
+``eval.config`` (enabling issue #66): register a class implementing
+``eval.protocols.Evaluator`` under the ``copilot_eval.evaluators`` entry-point
+group, and it is loaded into ``EVALUATOR_REGISTRY`` by
+``load_evaluator_plugins()`` — called once at CLI startup (``eval.cli.main``)
+— after which ``eval.config`` accepts the new ``type:`` string and
+``eval.runner._run_evaluators`` dispatches to it inline like script/contains/
+regex (any type other than judge/metric is treated as inline-capable).
 """
 
 from __future__ import annotations

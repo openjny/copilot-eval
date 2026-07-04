@@ -452,12 +452,15 @@ def _persist_trace_file(
     shutil.copy2(trace_src, trace_dest)
 
 
-# Evaluator types scored synchronously here, inline during `run_one`. Judge
-# and metric evaluators are scored later in `analyze` instead: judge needs the
-# captured trace/log text assembled from OTel data, and metric needs telemetry
-# parsed from the exported trace — neither is available yet at this point in
-# `run_one` (see eval.cli._run_judges / _run_metric_evaluators).
-_INLINE_EVALUATOR_TYPES = ("script", "contains", "regex")
+# Evaluator types scored later, during `analyze`, instead of inline here:
+# judge needs the captured trace/log text assembled from OTel data, and metric
+# needs telemetry parsed from the exported trace — neither is available yet at
+# this point in `run_one` (see eval.cli._run_judges / _run_metric_evaluators).
+# Every *other* registered type — including script/contains/regex and any
+# third-party type registered via entry points (see issue #66) — is assumed to
+# be inline-capable (scoreable from just the log file right after the run), so
+# it's picked up here automatically without this function needing changes.
+_DEFERRED_EVALUATOR_TYPES = ("judge", "metric")
 
 
 def _run_evaluators(
@@ -468,7 +471,7 @@ def _run_evaluators(
     token: str,
     work_dir: Path | None = None,
 ) -> list[EvalScore]:
-    """Run inline evaluators (script, contains, regex) via the Evaluator registry.
+    """Run inline evaluators (script, contains, regex, ...) via the Evaluator registry.
 
     Dispatch is a registry lookup (`eval.evaluators.EVALUATOR_REGISTRY`)
     keyed by `ev.type`, rather than an if/elif chain, so new evaluator types
@@ -482,7 +485,7 @@ def _run_evaluators(
 
     scores: list[EvalScore] = []
     for ev in task.evaluators:
-        if ev.type not in _INLINE_EVALUATOR_TYPES:
+        if ev.type in _DEFERRED_EVALUATOR_TYPES:
             continue  # judge/metric evaluators run in `analyze`
         evaluator_cls = EVALUATOR_REGISTRY.get(ev.type)
         if evaluator_cls is None:
