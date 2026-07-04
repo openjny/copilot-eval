@@ -448,6 +448,33 @@ def test_run_one_setup_exception_returns_setup_failed(tmp_path, monkeypatch):
     assert "docker binary missing" in result.log_file.read_text()
 
 
+def test_run_one_unsupported_collector_raises_config_error(tmp_path, monkeypatch):
+    """A collector the runner does not support must fail fast with a ConfigError."""
+    from eval import runner as runner_mod
+    from eval.config import ConfigError, Task
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    config = _config(tmp_path)
+    config.runner.collector = "unsupported"
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+
+    with pytest.raises(ConfigError) as excinfo:
+        runner_mod.run_one(
+            Task(name="t", prompt="p"),
+            Variant(name="v"),
+            epoch=1,
+            config=config,
+            run_id="r",
+            run_dir=run_dir,
+            github_token="tok",
+        )
+
+    message = str(excinfo.value)
+    assert "unsupported" in message
+    assert "file" in message and "jaeger" in message
+
+
 def test_run_one_before_run_fail_aborts(tmp_path, monkeypatch):
     """before_run hook returning non-zero with on_failure=fail -> setup_failed."""
     from eval import runner as runner_mod

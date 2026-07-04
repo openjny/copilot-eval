@@ -20,7 +20,7 @@ from typing import Any
 
 from eval.collectors import create_collector
 from eval.collectors.file_collector import TRACE_FILE
-from eval.config import Config, Evaluator, Task, Variant
+from eval.config import Config, ConfigError, Evaluator, Task, Variant
 from eval.env_utils import (
     _SECRET_PLACEHOLDER,
     collect_secrets,
@@ -175,6 +175,17 @@ def run_one(
             "duration_seconds": round(time.monotonic() - started_monotonic, 3),
         }
 
+    # Fail fast on invalid runner/collector combinations before doing any setup
+    # work, so a misconfiguration surfaces as a clear ConfigError instead of a
+    # confusing runtime failure later in the run.
+    runner = DockerCLIRunner(github_token, run_command=subprocess.run)
+    if config.runner.collector not in runner.supported_collectors:
+        supported = ", ".join(runner.supported_collectors)
+        raise ConfigError(
+            f"Runner '{type(runner).__name__}' does not support collector "
+            f"'{config.runner.collector}'. Supported collectors: {supported}."
+        )
+
     # Tracked across the run so the outer `finally` can always clean up and
     # redact secrets, even on early returns (e.g. setup_failed) or exceptions.
     work_dir: Path | None = None
@@ -261,7 +272,6 @@ def run_one(
         )
 
         print("    Running copilot in container...")
-        runner = DockerCLIRunner(github_token, run_command=subprocess.run)
         artifacts = runner.run(run_context)
         container_run_completed = True
         _print_summary(log_file)
