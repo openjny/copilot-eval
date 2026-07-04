@@ -12,6 +12,7 @@ from typing import Any
 
 from eval.config import Config, Variant
 from eval.env_utils import write_sanitized_env_file
+from eval.exceptions import DockerError
 from eval.naming import run_slug
 from eval.protocols import RunArtifacts, RunContext, status_from_exit_code
 
@@ -41,9 +42,15 @@ class DockerCLIRunner:
 
     def health_check(self) -> None:
         """Check Docker daemon is available."""
-        result = subprocess.run(["docker", "info"], capture_output=True, timeout=10)
+        cmd = ["docker", "info"]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=10)
+        except subprocess.TimeoutExpired as exc:
+            raise DockerError(f"'{' '.join(cmd)}' timed out: {exc}") from exc
+        except OSError as exc:
+            raise DockerError(f"'{' '.join(cmd)}' failed to start: {exc}") from exc
         if result.returncode != 0:
-            raise RuntimeError("Docker daemon is not available")
+            raise DockerError("Docker daemon is not available")
 
     def run(self, run_context: RunContext) -> RunArtifacts:
         """Execute Copilot in a Docker container."""
@@ -138,7 +145,15 @@ class DockerCLIRunner:
             run_env = {**os.environ, "GITHUB_TOKEN": self.github_token}
             with open(log_file, "a", encoding="utf-8") as lf:
                 run_command = self._run_command or subprocess.run
-                proc = run_command(cmd, stdout=lf, stderr=subprocess.STDOUT, env=run_env)
+                try:
+                    proc = run_command(cmd, stdout=lf, stderr=subprocess.STDOUT, env=run_env)
+                except subprocess.TimeoutExpired:
+                    # Let the caller decide how to record a timeout; it isn't a
+                    # Docker failure per se (the container itself times out via
+                    # the `timeout {n}s` wrapper baked into `cmd`).
+                    raise
+                except OSError as exc:
+                    raise DockerError(f"'{' '.join(cmd[:2])}' failed to start: {exc}") from exc
         finally:
             env_file_arg.unlink(missing_ok=True)
 

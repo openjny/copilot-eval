@@ -20,6 +20,7 @@ import click
 import requests
 
 from eval.config import Config, Task, Variant
+from eval.exceptions import EvalError
 from eval.naming import run_slug
 from eval.protocols import RunStatus
 from eval.runner import RunResult, get_github_token, run_one
@@ -113,33 +114,26 @@ def _safe_run_one(
 ) -> RunResult:
     """Run a single eval, guaranteeing the batch is never aborted by one run.
 
-    `run_one` already converts internal errors into a setup_failed RunResult, but
-    this boundary catches any truly unexpected exception (so one bad run cannot
-    take down the whole batch or prevent the manifest from being written) and
-    turns it into a synthetic setup_failed result instead of re-raising.
+    `run_one` already converts its own typed errors (see `eval.exceptions`)
+    into a setup_failed RunResult internally, so nothing from that expected
+    domain should reach here. This boundary is a last-resort safety net for
+    anything that still escapes (e.g. a genuine bug, or a future call path
+    that doesn't go through run_one's own handling) -- it isolates that
+    failure to this one run instead of aborting the whole batch or preventing
+    the manifest from being written.
     """
     fixture_dir_name = fixture if fixture is not None else task.fixture_names()[0]
     fixture_label = task.fixture_label(fixture_dir_name)
-    try:
-        return run_one(
-            task,
-            variant,
-            epoch,
-            config,
-            run_id,
-            run_dir,
-            github_token,
-            order_index,
-            fixture=fixture_dir_name,
-        )
-    except Exception as exc:  # noqa: BLE001 - isolate per-run failures from the batch
+
+    def _errored_result(exc: Exception, description: str) -> RunResult:
         suffix = f" fixture={fixture_label}" if fixture_label else ""
         logger.error(
-            "[%s] epoch=%s variant=%s%s errored: %s",
+            "[%s] epoch=%s variant=%s%s %s: %s",
             task.name,
             epoch,
             variant.name,
             suffix,
+            description,
             exc,
         )
         return RunResult(
@@ -154,6 +148,23 @@ def _safe_run_one(
             order_index=order_index,
             fixture=fixture_label,
         )
+
+    try:
+        return run_one(
+            task,
+            variant,
+            epoch,
+            config,
+            run_id,
+            run_dir,
+            github_token,
+            order_index,
+            fixture=fixture_dir_name,
+        )
+    except EvalError as exc:
+        return _errored_result(exc, "eval error")
+    except Exception as exc:  # noqa: BLE001 - last-resort isolation for unexpected bugs
+        return _errored_result(exc, "errored")
 
 
 def _print_plan(config: Config, tasks: list[Task], epochs: int, run_id: str) -> None:

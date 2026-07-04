@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from eval.config import Config, RunnerConfig, Task, Variant
+from eval.exceptions import DockerError
 from eval.protocols import RunContext, RunStatus
 from eval.runners import DockerCLIRunner, create_runner
 from eval.runners import docker_cli_runner as docker_runner_mod
@@ -50,7 +51,7 @@ def test_docker_cli_runner_health_check_failure(monkeypatch):
 
     monkeypatch.setattr(docker_runner_mod.subprocess, "run", fake_run)
 
-    with pytest.raises(RuntimeError, match="Docker daemon is not available"):
+    with pytest.raises(DockerError, match="Docker daemon is not available"):
         DockerCLIRunner("token").health_check()
 
 
@@ -114,33 +115,35 @@ class TestDockerDaemonUnavailable:
     @pytest.mark.parametrize(
         "exception,match",
         [
-            (subprocess.TimeoutExpired(cmd=["docker", "info"], timeout=10), "Docker daemon"),
+            (subprocess.TimeoutExpired(cmd=["docker", "info"], timeout=10), "timed out"),
             (FileNotFoundError("docker not found"), "docker not found"),
             (OSError("Connection refused"), "Connection refused"),
         ],
         ids=["timeout", "not-installed", "connection-refused"],
     )
     def test_health_check_exceptions(self, monkeypatch, exception, match):
-        """health_check should propagate exceptions when Docker is unreachable."""
+        """health_check wraps low-level failures into a typed DockerError when
+        Docker is unreachable, preserving the original failure detail in the
+        message."""
 
         def fake_run(cmd, capture_output, timeout):
             raise exception
 
         monkeypatch.setattr(docker_runner_mod.subprocess, "run", fake_run)
 
-        with pytest.raises((RuntimeError, subprocess.TimeoutExpired, FileNotFoundError, OSError)):
+        with pytest.raises(DockerError, match=match):
             DockerCLIRunner("token").health_check()
 
     @pytest.mark.parametrize("returncode", [1, 125, 127])
     def test_health_check_non_zero_exit(self, monkeypatch, returncode):
-        """health_check raises RuntimeError for any non-zero exit code."""
+        """health_check raises DockerError for any non-zero exit code."""
 
         def fake_run(cmd, capture_output, timeout):
             return SimpleNamespace(returncode=returncode)
 
         monkeypatch.setattr(docker_runner_mod.subprocess, "run", fake_run)
 
-        with pytest.raises(RuntimeError, match="Docker daemon is not available"):
+        with pytest.raises(DockerError, match="Docker daemon is not available"):
             DockerCLIRunner("token").health_check()
 
 
