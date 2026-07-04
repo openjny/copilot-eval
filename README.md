@@ -33,7 +33,7 @@ uv run copilot-eval analyze --run-id <RUN_ID> --config-dir examples/prompt-langu
 
 ```bash
 uv run copilot-eval init --config-dir my-eval
-cp my-eval/.env.example my-eval/.env   # then add COPILOT_GITHUB_TOKEN
+export COPILOT_GITHUB_TOKEN=...   # or: gh auth login — see my-eval/.env.example
 uv run copilot-eval validate --config-dir my-eval
 uv run copilot-eval run --config-dir my-eval --dry-run
 ```
