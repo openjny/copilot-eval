@@ -29,6 +29,10 @@ from eval.config import (
 # Same pattern as `eval.config._NAME_RE`, inlined here to avoid depending on a
 # private symbol; keep in sync if that pattern ever changes.
 _NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+# Same patterns as `eval.config._CPUS_RE` / `_MEMORY_RE`, inlined for the same
+# reason; keep in sync if those patterns ever change.
+_CPUS_PATTERN = r"^\d+(\.\d+)?$"
+_MEMORY_PATTERN = r"^\d+(\.\d+)?[bkmgBKMG]?$"
 
 SCHEMA_ID = (
     "https://raw.githubusercontent.com/openjny/copilot-eval/main/schemas/eval-config.schema.json"
@@ -249,6 +253,36 @@ def _runner_schema() -> dict[str, Any]:
                 "default": 5.0,
                 "description": "run_one: base seconds between retries, doubling "
                 "per attempt (exponential backoff) up to a 60s cap.",
+            },
+            "resources": {
+                "type": "object",
+                "description": "Docker container resource limits, to reduce metric noise "
+                "from containers competing for host CPU/memory/process resources. "
+                "All fields optional; unset means no limit.",
+                "additionalProperties": False,
+                "properties": {
+                    "cpus": {
+                        "type": ["string", "null"],
+                        "pattern": _CPUS_PATTERN,
+                        "default": None,
+                        "description": "Number of CPUs available to the container "
+                        "(`docker run --cpus`), e.g. '2.0'.",
+                    },
+                    "memory": {
+                        "type": ["string", "null"],
+                        "pattern": _MEMORY_PATTERN,
+                        "default": None,
+                        "description": "Memory limit (`docker run --memory`), e.g. "
+                        "'512m', '2g', or a raw byte count.",
+                    },
+                    "pids_limit": {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "default": None,
+                        "description": "Max number of processes in the container "
+                        "(`docker run --pids-limit`).",
+                    },
+                },
             },
         },
     }

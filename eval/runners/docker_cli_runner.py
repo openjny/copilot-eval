@@ -117,6 +117,14 @@ class DockerCLIRunner:
 
             cmd.extend(["-v", f"{work_dir}:/workspace"])
 
+            resources = config.runner.resources
+            if resources.cpus:
+                cmd.extend(["--cpus", resources.cpus])
+            if resources.memory:
+                cmd.extend(["--memory", resources.memory])
+            if resources.pids_limit:
+                cmd.extend(["--pids-limit", str(resources.pids_limit)])
+
             if variant.run_script:
                 run_script_path = (config.project_dir / variant.run_script).resolve()
                 if run_script_path.exists():

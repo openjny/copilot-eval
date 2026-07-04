@@ -154,6 +154,40 @@
           "description": "Optional reasoning effort passed to Copilot (e.g. low, medium, high).",
           "type": "string"
         },
+        "resources": {
+          "additionalProperties": false,
+          "description": "Docker container resource limits, to reduce metric noise from containers competing for host CPU/memory/process resources. All fields optional; unset means no limit.",
+          "properties": {
+            "cpus": {
+              "default": null,
+              "description": "Number of CPUs available to the container (`docker run --cpus`), e.g. '2.0'.",
+              "pattern": "^\\d+(\\.\\d+)?$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory": {
+              "default": null,
+              "description": "Memory limit (`docker run --memory`), e.g. '512m', '2g', or a raw byte count.",
+              "pattern": "^\\d+(\\.\\d+)?[bkmgBKMG]?$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pids_limit": {
+              "default": null,
+              "description": "Max number of processes in the container (`docker run --pids-limit`).",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "retries": {
           "default": 0,
           "description": "run_one: retry attempts for transient failures (DockerError, container timeout). 0 disables retries. Deterministic failures (auth/hook/fixture errors) are never retried.",

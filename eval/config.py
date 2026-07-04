@@ -28,6 +28,22 @@ OUTPUT_FORMATS = ("text", "json")
 JUDGE_AGGREGATE_MODES = ("median", "mean", "majority")
 DEFAULT_OUTPUT_INSTRUCTION = "Save all output files under /workspace/output/."
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# `docker run --cpus`: a positive (optionally fractional) number of CPUs.
+_CPUS_RE = re.compile(r"^\d+(\.\d+)?$")
+# `docker run --memory`: a positive integer optionally suffixed with a byte
+# unit (b|k|m|g, case-insensitive). e.g. "512m", "2g", "1073741824".
+_MEMORY_RE = re.compile(r"^\d+(\.\d+)?[bkmgBKMG]?$")
+
+
+@dataclass
+class ResourceLimits:
+    """Docker container resource limits (issue #72), used to reduce metric
+    noise from containers competing for host CPU/memory/process resources.
+    All fields are optional; `None` means "no limit" (current behavior)."""
+
+    cpus: str | None = None  # --cpus, e.g. "2.0"
+    memory: str | None = None  # --memory, e.g. "4g"
+    pids_limit: int | None = None  # --pids-limit, e.g. 100
 
 
 @dataclass
@@ -88,6 +104,9 @@ class RunnerConfig:
     # attempts. See issue #69.
     retries: int = 0
     retry_delay: float = 5.0
+    # Container resource limits (issue #72). Unset fields mean "no limit",
+    # matching the behavior before this option existed.
+    resources: ResourceLimits = field(default_factory=ResourceLimits)
 
 
 @dataclass
@@ -330,6 +349,7 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
     trace_fetch_retry_delay = _require_number(runner_raw, "trace_fetch_retry_delay", 2.0, minimum=0)
     retries = _require_int(runner_raw, "retries", 0, minimum=0)
     retry_delay = _require_number(runner_raw, "retry_delay", 5.0, minimum=0)
+    resources = _build_resources(runner_raw.get("resources"))
 
     return RunnerConfig(
         epochs=epochs,
@@ -363,7 +383,41 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         trace_fetch_retry_delay=trace_fetch_retry_delay,
         retries=retries,
         retry_delay=retry_delay,
+        resources=resources,
     )
+
+
+def _build_resources(resources_raw: Any) -> ResourceLimits:
+    if resources_raw is None:
+        return ResourceLimits()
+    if not isinstance(resources_raw, dict):
+        raise ConfigError(
+            f"runner.resources must be a mapping, got {type(resources_raw).__name__}."
+        )
+
+    cpus = resources_raw.get("cpus")
+    if cpus is not None:
+        if not isinstance(cpus, str) or not _CPUS_RE.match(cpus):
+            raise ConfigError(
+                f"runner.resources.cpus must be a positive number as a string "
+                f"(e.g. '2.0'), got {cpus!r}."
+            )
+        if float(cpus) <= 0:
+            raise ConfigError(f"runner.resources.cpus must be > 0, got {cpus!r}.")
+
+    memory = resources_raw.get("memory")
+    if memory is not None:
+        if not isinstance(memory, str) or not _MEMORY_RE.match(memory):
+            raise ConfigError(
+                f"runner.resources.memory must be a Docker memory value "
+                f"(e.g. '512m', '2g', '1073741824'), got {memory!r}."
+            )
+
+    pids_limit = resources_raw.get("pids_limit")
+    if pids_limit is not None:
+        pids_limit = _coerce_int("runner.resources.pids_limit", pids_limit, minimum=1)
+
+    return ResourceLimits(cpus=cpus, memory=memory, pids_limit=pids_limit)
 
 
 def _coerce_int(key: str, value: object, minimum: int | None = None) -> int:
