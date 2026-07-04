@@ -25,6 +25,11 @@ MIN_RELIABLE_N = 5
 # which is the floor for an "exploratory" look at the data).
 CI_GATE_RECOMMENDED_N = 10
 
+# Minimum attempts-per-task-run (k) for pass@k/pass^k to be meaningful. Below
+# this, "did it ever/always succeed in k tries" is mostly noise -- e.g. at
+# k=1, pass@k and pass^k are identical and just restate the raw success rate.
+MIN_RELIABLE_K = 3
+
 # Cohen's d effect sizes (small / medium / large) power is reported for. Medium
 # (0.5) is the headline number surfaced in the low-power banner.
 _EFFECT_SIZES = (0.2, 0.5, 0.8)
@@ -83,6 +88,10 @@ class Report:
     # Per-epoch judge score spread: key = (variant, epoch_str) -> {evaluator: stddev}
     epoch_stddevs: dict[tuple[str, str], dict[str, float]] = field(default_factory=dict)
     judge_names: list[str] = field(default_factory=list)
+    # pass@k ("succeeded at least once in k tries") / pass^k ("succeeded every
+    # time in k tries") reliability rows, one pair per evaluator that produced
+    # scores. Empty when no evaluators ran (mirrors judge_scores).
+    pass_k: list[SummaryRow] = field(default_factory=list)
     # Per-task judge-runtime aggregate (outcome counts, host Copilot versions,
     # truncated-context count, version-mismatch flag). Empty when no judges ran.
     judge_runtime: dict[str, Any] = field(default_factory=dict)
@@ -187,6 +196,23 @@ def _pair_label(fixture: str, epoch: str) -> str:
     return f"{fixture}#{epoch}"
 
 
+def _task_run_key(pair_label: str) -> str:
+    """Recover the pass@k/pass^k "task-run" grouping key from a pair label.
+
+    pass@k ("did it ever succeed?") and pass^k ("did it always succeed?") are
+    each computed over one *set* of k repeated attempts at the same task
+    instance. Single-fixture tasks have exactly one such instance per variant
+    (this returns ``""`` for every epoch, so all epochs pool into one k-sized
+    group). Multi-fixture tasks (see ``_pair_label``) get one task-run per
+    fixture, so the input-coverage axis becomes the sample the rate averages
+    over -- matching the "sum over task_run / n_task_runs" aggregation in
+    issue #88.
+    """
+    if "#" in pair_label:
+        return pair_label.rsplit("#", 1)[0]
+    return ""
+
+
 def _calc_delta(values: dict[str, float], variants: list[str]) -> str:
     if len(variants) != 2:
         return ""
@@ -284,6 +310,101 @@ def _build_summary_row(
     return row
 
 
+# --- pass@k / pass^k reliability ---
+#
+# pass@k = P(at least one of k attempts at a task instance succeeded) -- the
+# capability ceiling. pass^k = P(every one of k attempts succeeded) -- the
+# consistency floor. Both are computed per evaluator (reusing whichever
+# evaluator produced a per-epoch score) from that evaluator's persisted
+# ``passed`` bit, grouped into task-run buckets (see `_task_run_key`) and
+# averaged across task-runs, per Anthropic's agent-eval methodology
+# (https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents).
+
+
+def _task_run_groups(
+    epoch_passed: dict[tuple[str, str], dict[str, bool]], variant: str, evaluator: str
+) -> dict[str, list[bool]]:
+    """This variant's per-epoch pass/fail values for one evaluator, by task-run."""
+    groups: dict[str, list[bool]] = defaultdict(list)
+    for (v, epoch_str), passed_by_name in epoch_passed.items():
+        if v != variant or evaluator not in passed_by_name:
+            continue
+        groups[_task_run_key(epoch_str)].append(passed_by_name[evaluator])
+    return groups
+
+
+def _build_pass_k_row(
+    metric: str,
+    rates_by_variant: dict[str, dict[str, float]],
+    variants: list[str],
+    aggregate: str,
+) -> SummaryRow:
+    """Build a pass@k/pass^k row: values already expressed as a 0-100 rate.
+
+    Unlike `_build_summary_row`, the delta is an absolute percentage-point
+    difference (the metric is already a rate), not a relative-to-baseline
+    percentage -- e.g. baseline=67%, experimental=100% -> delta="+33%", not
+    "+49%". The bootstrap CI reuses the same paired-task-run-delta machinery
+    as other metrics, just over {0, 100} values instead of continuous ones.
+    """
+    row = SummaryRow(metric=metric, values={}, precision=0)
+    for v in variants:
+        rates = list(rates_by_variant.get(v, {}).values())
+        row.n[v] = len(rates)
+        row.values[v] = _mean_agg(rates)
+        row.stddev[v] = _stddev(rates)
+        row.vmin[v], row.vmax[v] = _min_max(rates)
+
+    if len(variants) == 2:
+        v0, v1 = variants
+        row.delta = f"{(row.values.get(v1, 0.0) - row.values.get(v0, 0.0)):+.0f}%"
+
+    if aggregate == "paired" and len(variants) == 2:
+        v0, v1 = variants
+        deltas = _paired_deltas(rates_by_variant.get(v0, {}), rates_by_variant.get(v1, {}))
+        row.paired_n = len(deltas)
+        ci = _bootstrap_ci(deltas)
+        if ci is not None:
+            row.ci_low, row.ci_high = ci
+        row.significant = _ci_significant(ci) if row.paired_n >= MIN_RELIABLE_N else None
+    return row
+
+
+def _build_pass_k_rows(
+    epoch_passed: dict[tuple[str, str], dict[str, bool]],
+    variants: list[str],
+    evaluator_names: list[str],
+    aggregate: str,
+) -> tuple[list[SummaryRow], int | None]:
+    """Build pass@k/pass^k rows for every evaluator that produced scores.
+
+    Returns (rows, min_k) where min_k is the smallest task-run attempt count
+    seen across all evaluators/variants (None when there's no data at all) --
+    used to decide whether to raise the "insufficient data" warning.
+    """
+    rows: list[SummaryRow] = []
+    min_k: int | None = None
+
+    for name in evaluator_names:
+        at_k_by_variant: dict[str, dict[str, float]] = {}
+        all_k_by_variant: dict[str, dict[str, float]] = {}
+        k = 0
+        for v in variants:
+            groups = _task_run_groups(epoch_passed, v, name)
+            at_k_by_variant[v] = {run: (100.0 if any(g) else 0.0) for run, g in groups.items()}
+            all_k_by_variant[v] = {run: (100.0 if all(g) else 0.0) for run, g in groups.items()}
+            for g in groups.values():
+                k = max(k, len(g))
+                min_k = len(g) if min_k is None else min(min_k, len(g))
+
+        if k == 0:
+            continue  # no data at all for this evaluator
+        rows.append(_build_pass_k_row(f"pass@{k} ({name})", at_k_by_variant, variants, aggregate))
+        rows.append(_build_pass_k_row(f"pass^{k} ({name})", all_k_by_variant, variants, aggregate))
+
+    return rows, min_k
+
+
 # --- Report building ---
 
 
@@ -357,13 +478,17 @@ def build_report(
         # Judge scores (both aggregated + per-epoch)
         epoch_judges, epoch_reasons, judge_names = {}, {}, []
         epoch_stddevs: dict[tuple[str, str], dict[str, float]] = {}
+        epoch_passed: dict[tuple[str, str], dict[str, bool]] = {}
         judge_rows: list[SummaryRow] = []
         judge_runtime: dict[str, Any] = {}
+        pass_k_rows: list[SummaryRow] = []
+        min_k: int | None = None
         if results_dir:
-            raw, reasons, names, stddevs = _load_judge_raw(results_dir, variants, task_name)
+            raw, reasons, names, stddevs, passed = _load_judge_raw(results_dir, variants, task_name)
             epoch_judges = raw
             epoch_reasons = reasons
             epoch_stddevs = stddevs
+            epoch_passed = passed
             judge_names = names
             judge_runtime = _load_judge_runtime(results_dir, variants, task_name)
             # Aggregate judge scores
@@ -375,6 +500,7 @@ def build_report(
                         if rv == v and name in scores:
                             vals_by_v[v][ep] = float(scores[name])
                 judge_rows.append(_build_summary_row(name, vals_by_v, variants, aggregate))
+            pass_k_rows, min_k = _build_pass_k_rows(epoch_passed, variants, names, aggregate)
 
         # Sample sizes: per-variant trace count and shared paired-epoch count.
         variant_n = {v: len(by_variant[v]) for v in variants}
@@ -393,6 +519,18 @@ def build_report(
             epoch_judges if judge_names else None,
         )
         warnings = _build_warnings(variants, variant_n, paired_n, aggregate)
+        if min_k is not None and min_k < MIN_RELIABLE_K:
+            warnings.append(
+                {
+                    "type": "insufficient_k",
+                    "message": (
+                        f"Insufficient data for pass@k/pass^k (k={min_k} < {MIN_RELIABLE_K}). "
+                        "Run with more epochs for a meaningful capability-ceiling/consistency read."
+                    ),
+                    "k": min_k,
+                    "min_reliable_k": MIN_RELIABLE_K,
+                }
+            )
 
         reports.append(
             Report(
@@ -406,6 +544,7 @@ def build_report(
                 epoch_reasons=epoch_reasons,
                 epoch_stddevs=epoch_stddevs,
                 judge_names=judge_names,
+                pass_k=pass_k_rows,
                 judge_runtime=judge_runtime,
                 aggregate=aggregate,
                 variant_n=variant_n,
@@ -636,11 +775,40 @@ def _fmt_delta(row: SummaryRow) -> str:
     return out
 
 
+def _fmt_pass_k_value(row: SummaryRow, v: str) -> str:
+    """pass@k/pass^k value: already a 0-100 rate, rendered as a percentage."""
+    if row.n.get(v, 0) == 0:
+        return "\u2014"
+    val = row.values.get(v, 0.0)
+    sd = row.stddev.get(v, 0.0)
+    if row.n.get(v, 0) >= 2 and sd > 0:
+        return f"{val:.0f}% \u00b1{sd:.0f}%"
+    return f"{val:.0f}%"
+
+
+def _fmt_pass_k_delta(row: SummaryRow) -> str:
+    """pass@k/pass^k delta: an absolute percentage-point difference (the metric
+    is already a rate), not a relative-to-baseline percentage like other
+    metrics -- e.g. baseline=67%, experimental=100% -> "+33%"."""
+    if not row.delta:
+        return ""
+    out = row.delta
+    if row.ci_low is not None and row.ci_high is not None:
+        out += f" [CI {row.ci_low:+.0f}%,{row.ci_high:+.0f}% abs]"
+        if row.significant is True:
+            out += "*"
+        elif row.significant is False:
+            out += " ns"
+        else:
+            out += " low-n"
+    return out
+
+
 def _significance_legend(reports: list[Report]) -> bool:
     return any(
         row.ci_low is not None
         for report in reports
-        for row in (*report.summary, *report.judge_scores)
+        for row in (*report.summary, *report.judge_scores, *report.pass_k)
     )
 
 
@@ -710,6 +878,12 @@ def format_table(reports: list[Report]) -> str:
             for row in report.judge_scores:
                 cols = "".join(f"{_fmt_value(row, v):>22}" for v in report.variants)
                 lines.append(f"{row.metric:<24} {cols} {_fmt_delta(row):>26}")
+        if report.pass_k:
+            lines.append(f"\n{'Pass@k / Pass^k':<24} {hdr} {'Delta':>26}")
+            lines.append("-" * (24 + 22 * len(report.variants) + 26))
+            for row in report.pass_k:
+                cols = "".join(f"{_fmt_pass_k_value(row, v):>22}" for v in report.variants)
+                lines.append(f"{row.metric:<24} {cols} {_fmt_pass_k_delta(row):>26}")
 
         rt = report.judge_runtime
         if rt:
@@ -788,6 +962,7 @@ def format_json(reports: list[Report]) -> str:
                 "summary": [_summary_row_json(r, "metric") for r in report.summary],
                 "tool_patterns": report.tool_patterns,
                 "judge_scores": [_summary_row_json(r, "judge") for r in report.judge_scores],
+                "pass_k": [_summary_row_json(r, "metric") for r in report.pass_k],
                 "judge_runtime": report.judge_runtime,
             }
             for report in reports
@@ -847,6 +1022,15 @@ def format_markdown(reports: list[Report]) -> str:
             for row in report.judge_scores:
                 cols = "".join(f" {_fmt_value(row, v)} |" for v in report.variants)
                 lines.append(f"| {row.metric} |{cols} {_fmt_delta(row)} |")
+
+        # pass@k / pass^k reliability
+        if report.pass_k:
+            lines.append("\n### Pass@k / Pass^k Reliability\n")
+            lines.append("| Metric |" + "".join(f" {v} |" for v in report.variants) + " Delta |")
+            lines.append("|--------|" + "".join("--------:|" for _ in report.variants) + "------:|")
+            for row in report.pass_k:
+                cols = "".join(f" {_fmt_pass_k_value(row, v)} |" for v in report.variants)
+                lines.append(f"| {row.metric} |{cols} {_fmt_pass_k_delta(row)} |")
 
         # Judge runtime (reproducibility / observability)
         rt = report.judge_runtime
@@ -927,18 +1111,28 @@ def _load_judge_raw(
     dict[tuple[str, str], dict[str, str]],
     list[str],
     dict[tuple[str, str], dict[str, float]],
+    dict[tuple[str, str], dict[str, bool]],
 ]:
-    """Load per-epoch judge scores, reasons, and spread.
+    """Load per-epoch judge scores, reasons, spread, and pass/fail.
 
-    Returns (epoch_data, epoch_reasons, evaluator_names, epoch_stddevs).
+    Returns (epoch_data, epoch_reasons, evaluator_names, epoch_stddevs, epoch_passed).
+    ``epoch_passed`` is each evaluator's persisted ``EvalScore.passed`` bit (see
+    ``eval.protocols.score_to_dict``) — the binary signal pass@k/pass^k are built
+    from. Older/hand-written ``*.scores.json`` fixtures that predate the
+    ``passed`` key fall back to the score's truthiness, which matches
+    production for the deterministic evaluator types (contains/regex/script/
+    metric all derive ``score`` from ``passed`` 1:1); for judge evaluators
+    production always persists ``passed=True`` for a successful score, so this
+    fallback is only ever exercised by fixtures, not real data.
     """
     epoch_data: dict[tuple[str, str], dict[str, int]] = {}
     epoch_reasons: dict[tuple[str, str], dict[str, str]] = {}
     epoch_stddevs: dict[tuple[str, str], dict[str, float]] = {}
+    epoch_passed: dict[tuple[str, str], dict[str, bool]] = {}
     all_names: set[str] = set()
 
     if not results_dir or not results_dir.exists():
-        return {}, {}, [], {}
+        return {}, {}, [], {}, {}
 
     for pattern in ["*.scores.json", "*.judges.json"]:
         for jf in results_dir.glob(pattern):
@@ -956,20 +1150,23 @@ def _load_judge_raw(
                 scores = {}
                 reasons = {}
                 stddevs = {}
+                passed = {}
                 for s in json.loads(jf.read_text()):
                     if s.get("score") is not None:
                         scores[s["name"]] = int(s["score"])
                         reasons[s["name"]] = str(s.get("reason", ""))
                         if s.get("score_stddev") is not None:
                             stddevs[s["name"]] = float(s["score_stddev"])
+                        passed[s["name"]] = bool(s.get("passed", s.get("score")))
                         all_names.add(s["name"])
                 epoch_data[(variant, epoch_str)] = scores
                 epoch_reasons[(variant, epoch_str)] = reasons
                 epoch_stddevs[(variant, epoch_str)] = stddevs
+                epoch_passed[(variant, epoch_str)] = passed
             except (json.JSONDecodeError, KeyError):
                 continue
 
-    return epoch_data, epoch_reasons, sorted(all_names), epoch_stddevs
+    return epoch_data, epoch_reasons, sorted(all_names), epoch_stddevs, epoch_passed
 
 
 def _load_judge_runtime(results_dir: Path, variants: list[str], task: str) -> dict[str, Any]:

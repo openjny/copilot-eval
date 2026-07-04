@@ -342,6 +342,42 @@ score spread (σ). The markdown/JSON reports show each per-run judge score with 
 > `judge_samples`, `judge_aggregate`, or `judge_model` and want existing scores
 > re-evaluated with the new settings, re-run `analyze --re-eval`.
 
+### Pass@k / Pass^k Reliability
+
+Any evaluator's per-epoch `passed` bit (see the `.scores.json` shape above — it's
+persisted by every evaluator type, not just `judge`) also feeds two agent-eval
+reliability metrics, following [Anthropic's demystifying-evals
+methodology](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents):
+
+- **pass@k** — did the evaluator succeed at least once across `k` epochs? (the
+  capability ceiling: "can it ever do this?")
+- **pass^k** — did the evaluator succeed on *every* one of `k` epochs? (the
+  consistency floor: "does it do this reliably?")
+
+Both are computed per evaluator, per variant, over each **task-run** — a single
+fixture's epochs (or, for single-fixture/legacy tasks, the task's only fixture,
+which degrades pass@k/pass^k to a binary 0%/100% result) — and then averaged
+across task-runs:
+
+```
+pass_at_k_rate  = mean(1 if any(epoch_results) else 0 for each task-run)
+pass_all_k_rate = mean(1 if all(epoch_results) else 0 for each task-run)
+```
+
+The report renders one `pass@k (<evaluator>)` / `pass^k (<evaluator>)` row pair
+per evaluator that produced scores, right after the judge scores, with the same
+paired bootstrap CI as other metrics — except the delta is an **absolute
+percentage-point** difference (the values are already 0-100 rates), e.g.
+`baseline=67%, experimental=100% → +33%`. Use `runner.fixtures` (see
+[Multiple fixtures per task](#multiple-fixtures-per-task-input-coverage-axis))
+to get a real multi-task-run rate instead of the single-fixture binary case.
+
+`k` is the number of epochs actually observed; when it's below 3 the report adds
+an `insufficient_k` warning (surfaced alongside the other statistical-power
+warnings) since "did it ever/always succeed" is mostly noise with fewer than 3
+attempts — at `k=1`, pass@k and pass^k are identical and just restate the raw
+success rate.
+
 ### Batched Judging (opt-in)
 
 By default each judge evaluator is scored by its own Copilot call, so a task with

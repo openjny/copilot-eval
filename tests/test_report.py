@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 
 from eval.report import (
+    MIN_RELIABLE_K,
     MIN_RELIABLE_N,
     _aggregate_values,
     _approx_power,
+    _build_pass_k_rows,
     _epoch_sort_key,
     _load_judge_raw,
+    _task_run_key,
     build_report,
 )
 from tests.conftest import make_metrics
@@ -174,7 +177,7 @@ def test_load_judge_raw(tmp_path):
             {"name": "quality", "type": "judge", "score": 6, "reason": "meh"},
         ],
     )
-    epoch_data, reasons, names, stddevs = _load_judge_raw(tmp_path, ["a", "b"], "t1")
+    epoch_data, reasons, names, stddevs, passed = _load_judge_raw(tmp_path, ["a", "b"], "t1")
     assert names == ["quality", "speed"]
     assert epoch_data[("a", "1")] == {"quality": 8, "speed": 5}
     assert epoch_data[("b", "1")] == {"quality": 6}
@@ -192,19 +195,19 @@ def test_load_judge_raw_skips_null_scores(tmp_path):
             {"name": "speed", "type": "judge", "score": 7},
         ],
     )
-    epoch_data, _, names, _ = _load_judge_raw(tmp_path, ["a"], "t1")
+    epoch_data, _, names, _, _ = _load_judge_raw(tmp_path, ["a"], "t1")
     assert names == ["speed"]
     assert epoch_data[("a", "1")] == {"speed": 7}
 
 
 def test_load_judge_raw_missing_dir(tmp_path):
-    assert _load_judge_raw(tmp_path / "nope", ["a"], "t1") == ({}, {}, [], {})
+    assert _load_judge_raw(tmp_path / "nope", ["a"], "t1") == ({}, {}, [], {}, {})
 
 
 def test_load_judge_raw_matches_longest_variant(tmp_path):
     # variants "v" and "my_v": a file for "my_v" must not be claimed by "v".
     _write_scores(tmp_path, "t1", "my_v", "1", [{"name": "q", "score": 9}])
-    epoch_data, _, _, _ = _load_judge_raw(tmp_path, ["v", "my_v"], "t1")
+    epoch_data, _, _, _, _ = _load_judge_raw(tmp_path, ["v", "my_v"], "t1")
     assert ("my_v", "1") in epoch_data
     assert ("v", "1") not in epoch_data
 
@@ -278,7 +281,7 @@ def test_multi_fixture_judge_scores_pool_by_fixture(tmp_path):
     _write_scores_fx(tmp_path, "cr", "plugin", "1", "fixA", [{"name": "q", "score": 6}])
     _write_scores_fx(tmp_path, "cr", "base", "1", "fixB", [{"name": "q", "score": 8}])
     _write_scores_fx(tmp_path, "cr", "plugin", "1", "fixB", [{"name": "q", "score": 10}])
-    epoch_data, _, names, _ = _load_judge_raw(tmp_path, ["base", "plugin"], "cr")
+    epoch_data, _, names, _, _ = _load_judge_raw(tmp_path, ["base", "plugin"], "cr")
     assert names == ["q"]
     # Keyed by (variant, fixture#epoch) so each fixture stays distinct.
     assert epoch_data[("base", "fixA#1")] == {"q": 4}
@@ -746,3 +749,112 @@ def test_format_table_and_markdown_render_reliability():
     assert "Reliability" in table and "Success rate" in table
     assert "Samples:" in table
     assert "### Reliability" in md and "Success rate" in md
+
+
+# --- pass@k / pass^k reliability ---
+
+
+def test_task_run_key_single_fixture_pools_into_one_group():
+    assert _task_run_key("1") == ""
+    assert _task_run_key("2") == ""
+
+
+def test_task_run_key_multi_fixture_groups_by_fixture():
+    assert _task_run_key("fixA#1") == "fixA"
+    assert _task_run_key("fixA#2") == "fixA"
+    assert _task_run_key("fixB#1") == "fixB"
+
+
+def test_build_pass_k_rows_single_fixture_is_binary(tmp_path):
+    # One task-run (no fixture) with k=3 epochs: 2 pass, 1 fail -> pass@3=100%
+    # (any succeeded), pass^3=0% (not all succeeded).
+    _write_scores(tmp_path, "t1", "a", "1", [{"name": "q", "type": "judge", "score": 1}])
+    _write_scores(tmp_path, "t1", "a", "2", [{"name": "q", "type": "judge", "score": 1}])
+    _write_scores(tmp_path, "t1", "a", "3", [{"name": "q", "type": "judge", "score": 0}])
+    _, _, names, _, epoch_passed = _load_judge_raw(tmp_path, ["a"], "t1")
+    rows, min_k = _build_pass_k_rows(epoch_passed, ["a"], names, "paired")
+    assert min_k == 3
+    at_k = next(r for r in rows if r.metric == "pass@3 (q)")
+    all_k = next(r for r in rows if r.metric == "pass^3 (q)")
+    assert at_k.values["a"] == 100.0
+    assert all_k.values["a"] == 0.0
+
+
+def test_build_pass_k_rows_multi_fixture_rate_and_ci(tmp_path):
+    # 3 fixtures (task-runs) x k=3 epochs each, for two variants.
+    # baseline: 2/3 fixtures pass every epoch (pass^k=1), 1/3 has a failure.
+    # experimental: all 3/3 fixtures pass every epoch.
+    fixtures = {
+        "fixA": {"baseline": [1, 1, 1], "candidate": [1, 1, 1]},
+        "fixB": {"baseline": [1, 1, 1], "candidate": [1, 1, 1]},
+        "fixC": {"baseline": [1, 1, 0], "candidate": [1, 1, 1]},
+    }
+    for fx, by_variant in fixtures.items():
+        for variant, scores in by_variant.items():
+            for i, s in enumerate(scores, start=1):
+                _write_scores_fx(
+                    tmp_path,
+                    "t1",
+                    variant,
+                    str(i),
+                    fx,
+                    [{"name": "q", "type": "judge", "score": s}],
+                )
+    _, _, names, _, epoch_passed = _load_judge_raw(tmp_path, ["baseline", "candidate"], "t1")
+    rows, min_k = _build_pass_k_rows(epoch_passed, ["baseline", "candidate"], names, "paired")
+    assert min_k == 3
+    at_k = next(r for r in rows if r.metric == "pass@3 (q)")
+    all_k = next(r for r in rows if r.metric == "pass^3 (q)")
+    # pass@3: every fixture had at least one success in all 3 epochs -> 100% both.
+    assert at_k.values == {"baseline": 100.0, "candidate": 100.0}
+    assert at_k.delta == "+0%"
+    # pass^3: baseline 2/3 fixtures fully passed -> 66.7%; candidate 3/3 -> 100%.
+    assert round(all_k.values["baseline"], 1) == 66.7
+    assert all_k.values["candidate"] == 100.0
+    assert all_k.delta == "+33%"
+    # 3 paired task-runs (fixtures) -> bootstrap CI is computable.
+    assert all_k.paired_n == 3
+    assert all_k.ci_low is not None
+    assert all_k.ci_high is not None
+
+
+def test_build_pass_k_rows_no_data_skips_evaluator():
+    rows, min_k = _build_pass_k_rows({}, ["a", "b"], ["q"], "paired")
+    assert rows == []
+    assert min_k is None
+
+
+def test_build_report_warns_when_k_below_minimum(tmp_path):
+    # Only k=2 epochs scored -> below MIN_RELIABLE_K (3), warning expected.
+    _write_scores(tmp_path, "t1", "a", "1", [{"name": "q", "type": "judge", "score": 1}])
+    _write_scores(tmp_path, "t1", "a", "2", [{"name": "q", "type": "judge", "score": 1}])
+    results = [make_metrics("t1", "a", "1"), make_metrics("t1", "a", "2")]
+    reports = build_report(results, tmp_path, ["a"], "median")
+    assert reports[0].pass_k  # rows are still produced, just flagged as low-k
+    insufficient = [w for w in reports[0].warnings if w["type"] == "insufficient_k"]
+    assert insufficient
+    assert insufficient[0]["k"] == 2
+    assert insufficient[0]["min_reliable_k"] == MIN_RELIABLE_K
+
+
+def test_build_report_no_warning_when_k_meets_minimum(tmp_path):
+    for i in range(1, 4):
+        _write_scores(tmp_path, "t1", "a", str(i), [{"name": "q", "type": "judge", "score": 1}])
+    results = [make_metrics("t1", "a", str(i)) for i in range(1, 4)]
+    reports = build_report(results, tmp_path, ["a"], "median")
+    assert not [w for w in reports[0].warnings if w["type"] == "insufficient_k"]
+
+
+def test_build_report_pass_k_missing_passed_defaults_to_score_truthiness(tmp_path):
+    # Hand-written scores.json without a "passed" key: falls back to bool(score),
+    # matching production for deterministic evaluator types (contains/regex/
+    # script/metric all derive score from passed 1:1).
+    _write_scores(tmp_path, "t1", "a", "1", [{"name": "lint", "type": "metric", "score": 1}])
+    _write_scores(tmp_path, "t1", "a", "2", [{"name": "lint", "type": "metric", "score": 0}])
+    _write_scores(tmp_path, "t1", "a", "3", [{"name": "lint", "type": "metric", "score": 1}])
+    results = [make_metrics("t1", "a", str(i)) for i in range(1, 4)]
+    reports = build_report(results, tmp_path, ["a"], "median")
+    all_k = next(r for r in reports[0].pass_k if r.metric == "pass^3 (lint)")
+    assert all_k.values["a"] == 0.0  # epoch 2 failed -> not all-passing
+    at_k = next(r for r in reports[0].pass_k if r.metric == "pass@3 (lint)")
+    assert at_k.values["a"] == 100.0  # epochs 1 and 3 passed

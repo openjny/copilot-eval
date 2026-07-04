@@ -571,6 +571,120 @@
           "significant": true
         }
       ],
+      "pass_k": [
+        {
+          "metric": "pass@5 (lint_pass)",
+          "values": {
+            "base": 100.0,
+            "new": 100.0
+          },
+          "delta": "+0%",
+          "n": {
+            "base": 1,
+            "new": 1
+          },
+          "stddev": {
+            "base": 0.0,
+            "new": 0.0
+          },
+          "min": {
+            "base": 100.0,
+            "new": 100.0
+          },
+          "max": {
+            "base": 100.0,
+            "new": 100.0
+          },
+          "paired_n": 1,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        },
+        {
+          "metric": "pass^5 (lint_pass)",
+          "values": {
+            "base": 100.0,
+            "new": 0.0
+          },
+          "delta": "-100%",
+          "n": {
+            "base": 1,
+            "new": 1
+          },
+          "stddev": {
+            "base": 0.0,
+            "new": 0.0
+          },
+          "min": {
+            "base": 100.0,
+            "new": 0.0
+          },
+          "max": {
+            "base": 100.0,
+            "new": 0.0
+          },
+          "paired_n": 1,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        },
+        {
+          "metric": "pass@5 (quality)",
+          "values": {
+            "base": 100.0,
+            "new": 100.0
+          },
+          "delta": "+0%",
+          "n": {
+            "base": 1,
+            "new": 1
+          },
+          "stddev": {
+            "base": 0.0,
+            "new": 0.0
+          },
+          "min": {
+            "base": 100.0,
+            "new": 100.0
+          },
+          "max": {
+            "base": 100.0,
+            "new": 100.0
+          },
+          "paired_n": 1,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        },
+        {
+          "metric": "pass^5 (quality)",
+          "values": {
+            "base": 100.0,
+            "new": 100.0
+          },
+          "delta": "+0%",
+          "n": {
+            "base": 1,
+            "new": 1
+          },
+          "stddev": {
+            "base": 0.0,
+            "new": 0.0
+          },
+          "min": {
+            "base": 100.0,
+            "new": 100.0
+          },
+          "max": {
+            "base": 100.0,
+            "new": 100.0
+          },
+          "paired_n": 1,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        }
+      ],
       "judge_runtime": {
         "total": 10,
         "outcomes": {
