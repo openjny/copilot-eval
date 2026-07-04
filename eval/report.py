@@ -44,6 +44,11 @@ _BOOTSTRAP_ITERATIONS = 2000
 _BOOTSTRAP_SEED = 12345
 _CI_CONFIDENCE = 0.95
 
+# GitHub's hard cap on a single issue/PR comment body (65,536 characters). The
+# compact markdown formatter truncates with a visible notice rather than
+# silently letting `gh pr comment` reject an oversized report.
+PR_COMMENT_CHAR_LIMIT = 65536
+
 
 @dataclass
 class SummaryRow:
@@ -1296,6 +1301,128 @@ def format_markdown(reports: list[Report]) -> str:
             f"{' ' + trailing_note if trailing_note else ''}_"
         )
     return body
+
+
+# --- Compact markdown (PR comment) ---
+
+
+def _fmt_delta_compact(row: SummaryRow, *, higher_is_better: bool) -> str:
+    """Delta cell for the compact table: bold + ✅/❌ only when the delta is
+    CI-significant (survives multiple-comparison correction), otherwise a bare
+    percentage. The full `[CI low,high abs]`/`ns`/`low-n` detail from
+    `_fmt_delta` is left out on purpose -- that's for the full `analyze`
+    report, not a PR comment skimmed in a few seconds."""
+    if not row.delta:
+        return ""
+    if row.significant is not True:
+        return row.delta
+    try:
+        pct = float(row.delta.rstrip("%"))
+    except ValueError:
+        return row.delta
+    improved = (pct > 0) if higher_is_better else (pct < 0)
+    return f"**{row.delta}** {'✅' if improved else '❌'}"
+
+
+def _significant_metrics(report: Report) -> list[str]:
+    return [
+        row.metric
+        for row in (*report.summary, *report.judge_scores, *report.pass_k)
+        if row.significant is True
+    ]
+
+
+def _ci_summary_line(report: Report) -> str | None:
+    """One-line, plain-language summary of which metrics (if any) have a
+    bootstrap CI that excludes zero -- the headline takeaway for a reviewer
+    who only reads one line of the PR comment."""
+    if report.aggregate != "paired" or len(report.variants) != 2:
+        return None
+    n = report.paired_n
+    epoch_word = "epoch" if n == 1 else "epochs"
+    sig = _significant_metrics(report)
+    if sig:
+        return f"> 95% CI excludes zero for {', '.join(sig)}. N={n} paired {epoch_word}."
+    return f"> No metric's 95% CI excludes zero. N={n} paired {epoch_word}."
+
+
+def _warning_banners_compact(report: Report) -> list[str]:
+    """Condensed (first-line-only) warning banners for the compact format."""
+    return [f"> ⚠️ {w['message'].split(chr(10), 1)[0]}" for w in report.warnings]
+
+
+def _truncate_for_pr_comment(text: str, limit: int = PR_COMMENT_CHAR_LIMIT) -> str:
+    """Truncate to fit GitHub's comment size limit, appending a visible notice.
+
+    Cuts on a line boundary so the result never ends mid-table-row, and never
+    exceeds `limit` even after the notice is appended.
+    """
+    if len(text) <= limit:
+        return text
+    notice = "\n\n> ⚠️ **Report truncated** to fit GitHub's 65,536-character PR comment limit."
+    budget = limit - len(notice)
+    truncated = text[:budget]
+    # Cut at the last full line so we don't emit a broken markdown table row.
+    last_newline = truncated.rfind("\n")
+    if last_newline > 0:
+        truncated = truncated[:last_newline]
+    return truncated + notice
+
+
+def _compact_row(metric: str, cols: str, delta: str, *, two_variant: bool) -> str:
+    if two_variant:
+        return f"| {metric} |{cols} {delta} |"
+    return f"| {metric} |{cols}"
+
+
+def format_markdown_compact(reports: list[Report]) -> str:
+    """Condensed markdown for CI PR comments (`analyze -o markdown --compact`).
+
+    Unlike `format_markdown`, this drops per-run tables, tool-usage lists, and
+    judge reasons -- just the headline metric/judge/pass@k tables, a one-line
+    CI summary, and any data-sufficiency warnings -- so it comfortably fits
+    GitHub's 65KB comment limit (enforced as a last-resort truncation guard)
+    and reads well pasted straight into `gh pr comment --body`.
+    """
+    sections: list[str] = []
+    for report in reports:
+        lines: list[str] = [f"## 📊 copilot-eval: {report.task}\n"]
+
+        variants = report.variants
+        two_variant = report.aggregate == "paired" and len(variants) == 2
+
+        header = "| Metric |" + "".join(f" {v} |" for v in variants)
+        sep = "|--------|" + "".join("--------:|" for _ in variants)
+        if two_variant:
+            header += " Δ |"
+            sep += "------:|"
+        lines.append(header)
+        lines.append(sep)
+
+        for row in report.summary:
+            cols = "".join(f" {_fmt_value(row, v)} |" for v in variants)
+            delta = _fmt_delta_compact(row, higher_is_better=False) if two_variant else ""
+            lines.append(_compact_row(row.metric, cols, delta, two_variant=two_variant))
+        for row in report.judge_scores:
+            cols = "".join(f" {_fmt_value(row, v)} |" for v in variants)
+            delta = _fmt_delta_compact(row, higher_is_better=True) if two_variant else ""
+            lines.append(_compact_row(row.metric, cols, delta, two_variant=two_variant))
+        for row in report.pass_k:
+            cols = "".join(f" {_fmt_pass_k_value(row, v)} |" for v in variants)
+            delta = _fmt_delta_compact(row, higher_is_better=True) if two_variant else ""
+            lines.append(_compact_row(row.metric, cols, delta, two_variant=two_variant))
+
+        if ci_line := _ci_summary_line(report):
+            lines.append("")
+            lines.append(ci_line)
+        lines.extend(_warning_banners_compact(report))
+        if mc_line := _mc_correction_line(report):
+            lines.append(f"> {mc_line}")
+
+        sections.append("\n".join(lines))
+
+    body = "\n\n---\n\n".join(sections)
+    return _truncate_for_pr_comment(body)
 
 
 # --- Judge score loading ---

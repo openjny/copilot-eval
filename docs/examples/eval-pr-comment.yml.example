@@ -1,0 +1,99 @@
+# Example: run copilot-eval on a PR and post the compact report as a comment.
+#
+# This file ships as `.yml.example` (not `.yml`) so it doesn't run in this repo,
+# which has no Copilot-customization PRs of its own to gate. Copy it to
+# `.github/workflows/eval-pr-comment.yml` in a project that uses copilot-eval
+# to A/B-test skills/agents/instructions/hooks/MCP servers, and adjust
+# `config-dir`/`epochs` for that project's eval set.
+#
+# See docs/ci-integration.md for the compact markdown format this produces.
+
+name: Eval PR Comment
+
+on:
+  pull_request:
+    paths:
+      - "eval-config.yaml"
+      - "examples/**"
+      # Add paths for whatever your PRs actually change, e.g.:
+      # - ".github/skills/**"
+      # - ".github/agents/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --locked --python 3.13
+
+      - name: Build variant images
+        run: uv run copilot-eval build --config-dir examples/prompt-language
+
+      - name: Run evaluation
+        id: run
+        run: |
+          RUN_ID=$(uv run copilot-eval run --config-dir examples/prompt-language --epochs 5 | tee /dev/stderr | grep -oP 'Run ID:\s*\K\S+')
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Analyze results (CI gate)
+        id: analyze
+        run: |
+          {
+            echo 'report<<EVAL_REPORT_EOF'
+            uv run copilot-eval analyze \
+              --run-id "${{ steps.run.outputs.run_id }}" \
+              --config-dir examples/prompt-language \
+              --min-epochs 5 \
+              -o markdown --compact
+            echo 'EVAL_REPORT_EOF'
+          } >> "$GITHUB_OUTPUT"
+        # Exit code reflects analyze's CI gates (metric thresholds,
+        # --min-epochs); it fails the job on regression without extra logic.
+        continue-on-error: true
+
+      - name: Post/update PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = "<!-- copilot-eval-report -->";
+            const body = `${marker}\n${{ toJSON(steps.analyze.outputs.report) }}`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find((c) => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail job on eval regression
+        if: steps.analyze.outcome == 'failure'
+        run: exit 1

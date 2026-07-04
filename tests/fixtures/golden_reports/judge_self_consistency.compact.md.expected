@@ -1,0 +1,19 @@
+## 📊 copilot-eval: consistency_task
+
+| Metric | a | b | Δ |
+|--------|--------:|--------:|------:|
+| Duration (s) | 5.0 ±0.1 | 5.0 ±0.1 | +0.0% |
+| Turn count | 3.0 | 3.0 | +0.0% |
+| Total spans | 11.0 | 11.0 | +0.0% |
+| Tool calls | 1.0 | 1.0 | +0.0% |
+| Input tokens | 550.0 ±3.8 | 550.0 ±3.8 | +0.0% |
+| Output tokens | 160.0 ±1.6 | 160.0 ±1.6 | +0.0% |
+| Cache tokens | 30.0 ±0.5 | 30.0 ±0.5 | +0.0% |
+| Tool duration (s) | 0.6 ±0.0 | 0.6 ±0.0 | +0.0% |
+| Cost ($) | 0.0090 ±0.0001 | 0.0090 ±0.0001 | +0.0% |
+| quality | 7.0 ±0.4 | 7.0 ±1.6 | -14.3% |
+| pass@5 (quality) | 100% | 100% | +0% |
+| pass^5 (quality) | 100% | 100% | +0% |
+
+> No metric's 95% CI excludes zero. N=5 paired epochs.
+> Multiple-comparison correction: Holm-Bonferroni across 10 test(s).

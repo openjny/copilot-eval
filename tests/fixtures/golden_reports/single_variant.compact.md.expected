@@ -1,0 +1,13 @@
+## 📊 copilot-eval: solo_task
+
+| Metric | only |
+|--------|--------:|
+| Duration (s) | 6.0 ±0.1 |
+| Turn count | 3.0 |
+| Total spans | 12.0 ±0.4 |
+| Tool calls | 2.0 |
+| Input tokens | 600.0 ±5.9 |
+| Output tokens | 200.0 ±2.8 |
+| Cache tokens | 40.0 ±0.9 |
+| Tool duration (s) | 1.5 ±0.0 |
+| Cost ($) | 0.0100 ±0.0001 |
