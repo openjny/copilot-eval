@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from eval.config import Config, Evaluator, RunnerConfig, Variant
+from eval.config import Config, Evaluator, RunnerConfig, Task, Variant
 from eval.runner import (
     EvalScore,
     RunResult,
@@ -716,6 +716,68 @@ def test_run_one_masks_log_on_setup_failed(tmp_path, monkeypatch):
     assert "***REDACTED***" in text
     # No leftover temp env files.
     assert not list(Path(tempfile.gettempdir()).glob("eval-env-*"))
+
+
+# --- Evaluator registry dispatch (_run_evaluators) ---
+
+
+def test_run_evaluators_dispatches_via_registry(tmp_path):
+    """script/contains/regex evaluators run inline via EVALUATOR_REGISTRY;
+    judge/metric evaluators are skipped here (they run in `analyze`)."""
+    from eval import runner as runner_mod
+
+    config = _config(tmp_path)
+    log_file = tmp_path / "run.log"
+    log_file.write_text("hello world\nstatus: ok\n")
+
+    script_path = tmp_path / "check.sh"
+    script_path.write_text("#!/bin/sh\nexit 0\n")
+    script_path.chmod(0o755)
+
+    task = Task(
+        name="t",
+        prompt="p",
+        evaluators=[
+            Evaluator(name="j", type="judge", prompt="score it"),
+            Evaluator(name="m", type="metric", metric="cost", op="<", threshold=1.0),
+            Evaluator(name="c", type="contains", value="hello"),
+            Evaluator(name="r", type="regex", value=r"status:\s*ok"),
+            Evaluator(name="s", type="script", script=str(script_path)),
+        ],
+    )
+    variant = Variant(name="v")
+
+    scores = runner_mod._run_evaluators(task, variant, config, log_file, token="tok")
+
+    by_name = {s.name: s for s in scores}
+    assert set(by_name) == {"c", "r", "s"}  # judge/metric deferred to `analyze`
+    assert by_name["c"].passed is True
+    assert by_name["r"].passed is True
+    assert by_name["s"].passed is True
+    assert log_file.with_suffix(".scores.json").exists()
+
+
+def test_run_evaluators_contains_and_regex_fail(tmp_path):
+    from eval import runner as runner_mod
+
+    config = _config(tmp_path)
+    log_file = tmp_path / "run.log"
+    log_file.write_text("nothing matches here\n")
+    task = Task(
+        name="t",
+        prompt="p",
+        evaluators=[
+            Evaluator(name="c", type="contains", value="hello"),
+            Evaluator(name="r", type="regex", value=r"status:\s*ok"),
+        ],
+    )
+    variant = Variant(name="v")
+
+    scores = runner_mod._run_evaluators(task, variant, config, log_file, token="tok")
+
+    by_name = {s.name: s for s in scores}
+    assert by_name["c"].passed is False
+    assert by_name["r"].passed is False
 
 
 # --- judge aggregation / self-consistency ---
