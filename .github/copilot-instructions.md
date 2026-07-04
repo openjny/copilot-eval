@@ -1,6 +1,6 @@
 # copilot-eval
 
-A/B evaluation framework for GitHub Copilot customizations using OpenTelemetry.
+Environment-isolated A/B evaluation framework for GitHub Copilot customizations.
 
 ## Architecture
 
