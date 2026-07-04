@@ -1,6 +1,6 @@
 # copilot-eval
 
-A/B evaluation framework for GitHub Copilot CLI customizations using OpenTelemetry.
+Environment-isolated A/B evaluation framework for GitHub Copilot customizations.
 
 ## Architecture
 
@@ -18,7 +18,8 @@ docker/            Container infrastructure
 
 docs/              Detailed documentation
 ├── architecture.md   Execution flow, Docker design, OTel tracing
-└── configuration.md  eval-config.yaml reference, evaluators, fixtures, hooks
+├── configuration.md  eval-config.yaml reference, evaluators, fixtures, hooks
+└── vision.md         Project vision, target users, positioning, non-goals
 
 examples/          Eval sets (--config-dir)
 ├── azure-skills/  Azure Skills Plugin A/B evaluation
@@ -76,4 +77,4 @@ Each variant has its own Dockerfile that extends `copilot-eval:base` with varian
 
 - Python 3.10+, uv, Docker
 - pyyaml, requests, click (see pyproject.toml)
-- Jaeger (docker-compose.yml) for OTel trace collection
+- Jaeger (docker-compose.yml) optional for interactive trace browsing

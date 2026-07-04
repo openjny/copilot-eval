@@ -1,8 +1,8 @@
 # copilot-eval
 
-A/B evaluation framework for [GitHub Copilot CLI](https://docs.github.com/copilot/concepts/agents/about-copilot-cli) customizations using [OpenTelemetry](https://opentelemetry.io/) telemetry.
+Environment-isolated A/B evaluation framework for [GitHub Copilot](https://github.com/features/copilot) customizations.
 
-Measure the effect of plugins, custom instructions, MCP servers, and other Copilot customizations with reproducible, containerized eval runs and automated analysis.
+Prove whether a set of primitives (skills, custom agents, instructions, hooks, MCP servers) actually improves outcomes — with reproducible eval runs, statistical rigor, and zero infrastructure.
 
 ## Quick Start
 
@@ -28,6 +28,12 @@ uv run copilot-eval run --config-dir examples/prompt-language
 # Analyze
 uv run copilot-eval analyze --run-id <RUN_ID> --config-dir examples/prompt-language -o markdown
 ```
+
+## Documentation
+
+- [Vision](docs/vision.md) — project vision, target users, positioning, and non-goals
+- [Configuration Guide](docs/configuration.md) — eval-config.yaml, evaluators, fixtures, hooks, parallel modes
+- [Architecture](docs/architecture.md) — execution flow, Docker design, OTel tracing, report generation
 
 ## CLI
 
@@ -66,11 +72,6 @@ uv run copilot-eval --log-level warning --log-format json run --config-dir examp
 | [prompt-language](examples/prompt-language/) | English vs Japanese prompts on code tasks |
 | [azure-skills](examples/azure-skills/) | Azure Skills Plugin impact on Azure operations |
 | [judge-calibration](examples/judge-calibration/) | Judge reliability/calibration via fixed-answer tasks |
-
-## Documentation
-
-- [Configuration Guide](docs/configuration.md) — eval-config.yaml, evaluators, fixtures, hooks, parallel modes
-- [Architecture](docs/architecture.md) — execution flow, Docker design, OTel tracing, report generation
 
 ## Project Structure
 

@@ -1,5 +1,7 @@
 # Architecture
 
+copilot-eval evaluates Copilot customizations by running the agent inside isolated container environments and collecting OTel telemetry for A/B comparison. See [docs/vision.md](vision.md) for the project's goals and non-goals.
+
 ## Overview
 
 ```
