@@ -29,6 +29,15 @@ uv run copilot-eval run --config-dir examples/prompt-language
 uv run copilot-eval analyze --run-id <RUN_ID> --config-dir examples/prompt-language -o markdown
 ```
 
+### Or scaffold your own eval project
+
+```bash
+uv run copilot-eval init --config-dir my-eval
+cp my-eval/.env.example my-eval/.env   # then add COPILOT_GITHUB_TOKEN
+uv run copilot-eval validate --config-dir my-eval
+uv run copilot-eval run --config-dir my-eval --dry-run
+```
+
 ## Documentation
 
 - [Vision](docs/vision.md) — project vision, target users, positioning, and non-goals
@@ -61,6 +70,7 @@ uv run copilot-eval --log-level warning --log-format json run --config-dir examp
 
 | Command | Description |
 |---------|-------------|
+| `init --config-dir <dir> [--template minimal] [--force]` | Scaffold a minimal, runnable eval project (config, one task, two variants, fixture, Dockerfile, `.env.example`, `.gitignore`) — fails if files already exist unless `--force` |
 | `list --config-dir <dir>` | List tasks and variants |
 | `validate --config-dir <dir>` | Check config schema, fixtures, script/variant references, and var interpolation (warnings for non-blocking issues, e.g. missing optional fixtures) |
 | `build --config-dir <dir> [--variant NAME]` | Build Docker images |

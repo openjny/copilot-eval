@@ -1,8 +1,8 @@
 """CLI entry point for the eval framework: Click group + shared options.
 
 Subcommands are routing-only wrappers defined in sibling modules
-(``list_cmd``, ``build_cmd``, ``run_cmd``, ``analyze_cmd``, ``validate_cmd``);
-their business logic lives in :mod:`eval.services` (issue #83).
+(``list_cmd``, ``build_cmd``, ``run_cmd``, ``analyze_cmd``, ``validate_cmd``,
+``init_cmd``); their business logic lives in :mod:`eval.services` (issue #83).
 """
 
 from __future__ import annotations
@@ -49,6 +49,7 @@ def main(log_level: str | None, log_format: str | None) -> None:
 
 from eval.cli.analyze_cmd import analyze  # noqa: E402
 from eval.cli.build_cmd import build  # noqa: E402
+from eval.cli.init_cmd import init  # noqa: E402
 from eval.cli.list_cmd import list_tasks  # noqa: E402
 from eval.cli.run_cmd import run  # noqa: E402
 from eval.cli.validate_cmd import validate  # noqa: E402
@@ -56,6 +57,7 @@ from eval.cli.validate_cmd import validate  # noqa: E402
 main.add_command(run)
 main.add_command(analyze)
 main.add_command(build)
+main.add_command(init)
 main.add_command(list_tasks)
 main.add_command(validate)
 

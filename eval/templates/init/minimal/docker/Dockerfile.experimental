@@ -1,0 +1,8 @@
+FROM copilot-eval:base
+
+# Add the Copilot customization under test here, e.g.:
+#   RUN copilot plugin install <owner>/<plugin> --config-dir /root/.copilot
+#   COPY my-instructions.md /root/.copilot/instructions.md
+#
+# Keep everything else identical to the base image so the baseline vs.
+# experimental comparison isolates this one change.
