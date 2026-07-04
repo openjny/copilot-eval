@@ -107,11 +107,12 @@ uv run --group dev pytest
 Lint and type-check (the same gates run in CI):
 
 ```bash
-uv run ruff check eval tests   # lint
-uv run mypy                     # strict type check (eval package)
+uv run ruff check eval tests          # lint
+uv run ruff format --check eval tests  # format check (use without --check to apply)
+uv run mypy                            # strict type check (eval package)
 ```
 
-These three checks (ruff → mypy → pytest) run automatically on every push to `main`
+These checks (ruff lint → ruff format → mypy → pytest) run automatically on every push to `main`
 and on every pull request via GitHub Actions (`.github/workflows/ci.yml`, Python 3.13).
 
 ## License
