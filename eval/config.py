@@ -91,9 +91,14 @@ class Evaluator:
 
     name: str
     type: str = "judge"
-    prompt: str | None = None  # type=judge
+    prompt: str | None = None  # type=judge (composed from criterion+rubric when given)
     script: str | None = None  # type=script
     value: str | None = None  # type=contains/regex
+    # type=judge structured form: a scoring axis (criterion) plus score→anchor
+    # descriptions (rubric). When provided, the framework composes `prompt` from
+    # them; the strict-JSON output contract is appended by the runner.
+    criterion: str | None = None
+    rubric: dict[int, str] | None = None
 
 
 @dataclass
@@ -365,8 +370,21 @@ def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Eva
                 f"Must be one of: {', '.join(EVALUATOR_TYPES)}."
             )
         prompt, script, value = e.get("prompt"), e.get("script"), e.get("value")
-        if etype == "judge" and not prompt:
-            raise ConfigError(f"Evaluator '{name}'{where} (type=judge) requires a 'prompt'.")
+        criterion, rubric = None, None
+        if etype == "judge":
+            criterion, rubric = _parse_rubric(e, name, where)
+            if rubric is not None:
+                if prompt:
+                    raise ConfigError(
+                        f"Evaluator '{name}'{where} (type=judge) cannot set both 'prompt' and "
+                        f"'rubric'; use one or the other."
+                    )
+                assert criterion is not None  # guaranteed by _parse_rubric when rubric is set
+                prompt = _build_rubric_prompt(criterion, rubric)
+            elif not prompt:
+                raise ConfigError(
+                    f"Evaluator '{name}'{where} (type=judge) requires a 'prompt' or a 'rubric'."
+                )
         if etype == "script" and not script:
             raise ConfigError(f"Evaluator '{name}'{where} (type=script) requires a 'script'.")
         if etype in ("contains", "regex") and not value:
@@ -380,9 +398,87 @@ def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Eva
                 ) from exc
 
         evaluators.append(
-            Evaluator(name=name, type=etype, prompt=prompt, script=script, value=value)
+            Evaluator(
+                name=name,
+                type=etype,
+                prompt=prompt,
+                script=script,
+                value=value,
+                criterion=criterion,
+                rubric=rubric,
+            )
         )
     return evaluators
+
+
+def _parse_rubric(
+    e: dict[str, Any], name: str, where: str
+) -> tuple[str | None, dict[int, str] | None]:
+    """Validate and normalize a judge's structured `criterion`/`rubric` fields.
+
+    Returns ``(criterion, rubric)`` with integer-keyed anchors, or ``(criterion, None)``
+    when no rubric is present. Raises ``ConfigError`` on malformed input.
+    """
+    raw_rubric = e.get("rubric")
+    criterion = e.get("criterion")
+    if raw_rubric is None:
+        if criterion:
+            raise ConfigError(
+                f"Evaluator '{name}'{where} (type=judge) sets 'criterion' without a 'rubric'."
+            )
+        return None, None
+
+    if not isinstance(raw_rubric, dict) or not raw_rubric:
+        raise ConfigError(
+            f"Evaluator '{name}'{where} 'rubric' must be a non-empty mapping of score to description."
+        )
+    if not criterion or not str(criterion).strip():
+        raise ConfigError(
+            f"Evaluator '{name}'{where} (type=judge) with a 'rubric' requires a non-empty 'criterion'."
+        )
+
+    rubric: dict[int, str] = {}
+    for k, v in raw_rubric.items():
+        score = _coerce_rubric_score(k)
+        if score is None:
+            raise ConfigError(
+                f"Evaluator '{name}'{where} 'rubric' has a non-integer score key {k!r}."
+            )
+        if not isinstance(v, str) or not v.strip():
+            raise ConfigError(
+                f"Evaluator '{name}'{where} 'rubric' anchor for score {score} must be a non-empty string."
+            )
+        rubric[score] = v.strip()
+    return str(criterion).strip(), rubric
+
+
+def _coerce_rubric_score(key: object) -> int | None:
+    """Coerce a rubric key to an int. YAML keys may be ints or numeric strings.
+
+    Returns ``None`` when the key is not a valid integer score.
+    """
+    if isinstance(key, bool):
+        return None
+    if isinstance(key, int):
+        return key
+    if isinstance(key, str):
+        try:
+            return int(key.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _build_rubric_prompt(criterion: str, rubric: dict[int, str]) -> str:
+    """Compose a judge prompt from a criterion and score→anchor descriptions.
+
+    Anchors are listed high-to-low. The strict-JSON output contract is appended
+    by the runner, so it is intentionally omitted here.
+    """
+    scores = sorted(rubric, reverse=True)
+    lines = [criterion, "", f"Score from {scores[-1]} to {scores[0]} using these anchors:"]
+    lines += [f"- {s}: {rubric[s]}" for s in scores]
+    return "\n".join(lines)
 
 
 def _parse_hooks(raw: dict[str, Any] | None) -> Hooks:
