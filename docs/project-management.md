@@ -1,7 +1,3 @@
----
-applyTo: "**"
----
-
 # Project Management & Issue Tracking
 
 Guidelines for creating, organizing, and prioritizing issues in this repository.

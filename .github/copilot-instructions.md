@@ -78,3 +78,13 @@ Each variant has its own Dockerfile that extends `copilot-eval:base` with varian
 - Python 3.10+, uv, Docker
 - pyyaml, requests, click (see pyproject.toml)
 - Jaeger (docker-compose.yml) optional for interactive trace browsing
+
+## Issue Tracking
+
+See `docs/project-management.md` for full details. Key conventions:
+
+- **Epics**: tracking issues (label `epic`) with task lists grouping related work
+- **Titles**: conventional commit style — `type(scope): description`
+- **Priority labels**: `priority: critical` > `high` > `medium` > `low`
+- **Issue body**: Problem → Proposal → Acceptance Criteria → References (link parent Epic, blockers)
+- **Closing**: reference in PR/commit (`Closes #N`) and check off the Epic's task list
