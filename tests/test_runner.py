@@ -10,10 +10,11 @@ from __future__ import annotations
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from eval.config import Config, Evaluator, RunnerConfig, Task, Variant
+from eval.config import Config, ConfigError, Evaluator, RunnerConfig, Task, Variant
 from eval.runner import (
     EvalScore,
     RunResult,
@@ -417,9 +418,10 @@ def _stub_no_docker(monkeypatch, runner_mod, *, docker_rc: int = 0):
 
 
 def test_run_one_setup_exception_returns_setup_failed(tmp_path, monkeypatch):
-    """An exception raised during setup must be isolated, not propagated."""
+    """A typed EvalError raised during setup must be isolated, not propagated."""
     from eval import runner as runner_mod
     from eval.config import Task
+    from eval.exceptions import HookError
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     config = _config(tmp_path)
@@ -427,7 +429,7 @@ def test_run_one_setup_exception_returns_setup_failed(tmp_path, monkeypatch):
     run_dir.mkdir()
 
     def boom(*a, **k):
-        raise RuntimeError("docker binary missing")
+        raise HookError("docker binary missing")
 
     monkeypatch.setattr(runner_mod, "_run_hook", boom)
 
@@ -574,10 +576,11 @@ def test_run_one_after_run_failure_surfaces_in_scores(tmp_path, monkeypatch):
 
 
 def test_run_one_post_processing_exception_preserves_run_status(tmp_path, monkeypatch):
-    """An exception after the container ran keeps the container's exit status
-    (not setup_failed) and surfaces a failing infra score."""
+    """A typed EvalError after the container ran keeps the container's exit
+    status (not setup_failed) and surfaces a failing infra score."""
     from eval import runner as runner_mod
     from eval.config import Task
+    from eval.exceptions import EvalError
 
     config = _config(tmp_path)
     run_dir = tmp_path / "results"
@@ -586,7 +589,7 @@ def test_run_one_post_processing_exception_preserves_run_status(tmp_path, monkey
     monkeypatch.setattr(runner_mod, "_run_hook", lambda *a, **k: 0)
 
     def boom(*a, **k):
-        raise RuntimeError("evaluator crashed")
+        raise EvalError("evaluator crashed")
 
     monkeypatch.setattr(runner_mod, "_run_evaluators", boom)
 
@@ -712,6 +715,186 @@ def test_run_one_masks_log_on_setup_failed(tmp_path, monkeypatch):
     assert "***REDACTED***" in text
     # No leftover temp env files.
     assert not list(Path(tempfile.gettempdir()).glob("eval-env-*"))
+
+
+# --- run_one with an injected AgentRunner (dependency injection, no Docker) ---
+
+
+class _FakeAgentRunner:
+    """Minimal AgentRunner test double: never touches Docker or subprocess.
+
+    Exercises the `runner:` DI parameter added for issue #90 so run_one's
+    setup/hook/evaluator orchestration can be unit tested without a Docker
+    daemon.
+    """
+
+    def __init__(
+        self,
+        *,
+        exit_code: int = 0,
+        status=None,
+        raise_error: Exception | None = None,
+        supported_collectors: tuple[str, ...] = ("file", "jaeger"),
+    ) -> None:
+        from eval.protocols import RunStatus
+
+        self.exit_code = exit_code
+        self.status = status if status is not None else RunStatus.SUCCESS
+        self.raise_error = raise_error
+        self._supported_collectors = supported_collectors
+        self.calls: list[Any] = []
+
+    def build(self, variant, config) -> None:
+        pass
+
+    def health_check(self) -> None:
+        pass
+
+    @property
+    def supported_collectors(self) -> tuple[str, ...]:
+        return self._supported_collectors
+
+    def run(self, run_context):
+        from eval.protocols import RunArtifacts
+
+        self.calls.append(run_context)
+        if self.raise_error is not None:
+            raise self.raise_error
+        return RunArtifacts(
+            exit_code=self.exit_code,
+            log_file=run_context.run_dir / "fake.log",
+            trace_file=None,
+            output_dir=None,
+            duration_seconds=0.01,
+            status=self.status,
+            started_at="2024-01-01T00:00:00",
+            finished_at="2024-01-01T00:00:01",
+        )
+
+
+def test_run_one_injected_runner_succeeds_without_docker(tmp_path, monkeypatch):
+    """A fake AgentRunner injected via `runner=` drives run_one end-to-end
+    without ever invoking subprocess (i.e. without Docker)."""
+    from eval import runner as runner_mod
+    from eval.config import Task
+
+    def _no_subprocess(*a, **k):
+        raise AssertionError("run_one must not invoke subprocess when a runner is injected")
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", _no_subprocess)
+
+    fake = _FakeAgentRunner(exit_code=0)
+    config = _config(tmp_path)
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+
+    result = runner_mod.run_one(
+        Task(name="t", prompt="p"),
+        Variant(name="v"),
+        epoch=1,
+        config=config,
+        run_id="r",
+        run_dir=run_dir,
+        github_token="tok",
+        runner=fake,
+    )
+
+    assert result.status == "completed"
+    assert result.exit_code == 0
+    assert len(fake.calls) == 1
+
+
+def test_run_one_injected_runner_docker_error_returns_setup_failed(tmp_path, monkeypatch):
+    """A DockerError raised by the injected runner's `run()` becomes a
+    setup_failed RunResult (narrow typed catch, see eval.exceptions)."""
+    from eval import runner as runner_mod
+    from eval.config import Task
+    from eval.exceptions import DockerError
+
+    monkeypatch.setattr(
+        runner_mod.subprocess,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no subprocess expected")),
+    )
+
+    fake = _FakeAgentRunner(raise_error=DockerError("docker daemon unreachable"))
+    config = _config(tmp_path)
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+
+    result = runner_mod.run_one(
+        Task(name="t", prompt="p"),
+        Variant(name="v"),
+        epoch=1,
+        config=config,
+        run_id="r",
+        run_dir=run_dir,
+        github_token="tok",
+        runner=fake,
+    )
+
+    assert result.status == "setup_failed"
+    assert result.exit_code == -1
+    assert "docker daemon unreachable" in result.log_file.read_text()
+
+
+def test_run_one_injected_runner_timeout_returns_timeout_status(tmp_path, monkeypatch):
+    """A subprocess.TimeoutExpired raised by the injected runner is mapped to
+    RunStatus.TIMEOUT, not a generic failure."""
+    import subprocess
+
+    from eval import runner as runner_mod
+    from eval.config import Task
+
+    monkeypatch.setattr(
+        runner_mod.subprocess,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no subprocess expected")),
+    )
+
+    fake = _FakeAgentRunner(raise_error=subprocess.TimeoutExpired(cmd=["copilot"], timeout=300))
+    config = _config(tmp_path)
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+
+    result = runner_mod.run_one(
+        Task(name="t", prompt="p"),
+        Variant(name="v"),
+        epoch=1,
+        config=config,
+        run_id="r",
+        run_dir=run_dir,
+        github_token="tok",
+        runner=fake,
+    )
+
+    assert result.status == "timeout"
+    assert result.exit_code == 124
+
+
+def test_run_one_injected_runner_respects_collector_support(tmp_path):
+    """The collector/runner compatibility check still runs for an injected
+    runner, using its own `supported_collectors`."""
+    from eval import runner as runner_mod
+    from eval.config import Task
+
+    fake = _FakeAgentRunner(supported_collectors=("jaeger",))
+    config = _config(tmp_path)
+    config.runner.collector = "file"
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+
+    with pytest.raises(ConfigError, match="jaeger"):
+        runner_mod.run_one(
+            Task(name="t", prompt="p"),
+            Variant(name="v"),
+            epoch=1,
+            config=config,
+            run_id="r",
+            run_dir=run_dir,
+            github_token="tok",
+            runner=fake,
+        )
 
 
 # --- Evaluator registry dispatch (_run_evaluators) ---

@@ -29,12 +29,14 @@ from eval.env_utils import (
 from eval.env_utils import (
     load_env_file as _load_env_file,
 )
+from eval.exceptions import AuthError, DockerError, EvalError, FixtureError, HookError
 from eval.judge_executor import JudgeContext, JudgeExecutor
 from eval.judge_executor import _aggregate_scores as _aggregate_scores
 from eval.judge_executor import _parse_json as _parse_json
 from eval.judge_executor import host_copilot_version as host_copilot_version
 from eval.naming import run_slug
 from eval.protocols import (
+    AgentRunner,
     EvalContext,
     RunArtifacts,
     RunContext,
@@ -115,7 +117,7 @@ def get_github_token() -> str:
         r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=True)
         return r.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        raise RuntimeError("GITHUB_TOKEN not set and gh CLI not authenticated") from exc
+        raise AuthError("GITHUB_TOKEN not set and gh CLI not authenticated") from exc
 
 
 def run_one(
@@ -128,6 +130,7 @@ def run_one(
     github_token: str,
     order_index: int | None = None,
     fixture: str | None = None,
+    runner: AgentRunner | None = None,
 ) -> RunResult:
     # Concrete fixture directory to mount; the reporting label is empty for
     # single-fixture tasks so legacy file names / report layout are preserved.
@@ -159,10 +162,14 @@ def run_one(
             "duration_seconds": round(time.monotonic() - started_monotonic, 3),
         }
 
+    # `runner` is injectable (see AgentRunner protocol) so callers -- notably
+    # unit tests -- can exercise run_one's setup/hook/evaluator orchestration
+    # without a live Docker daemon; production callers rely on the default.
+    runner = runner or DockerCLIRunner(github_token, run_command=subprocess.run)
+
     # Fail fast on invalid runner/collector combinations before doing any setup
     # work, so a misconfiguration surfaces as a clear ConfigError instead of a
     # confusing runtime failure later in the run.
-    runner = DockerCLIRunner(github_token, run_command=subprocess.run)
     if config.runner.collector not in runner.supported_collectors:
         supported = ", ".join(runner.supported_collectors)
         raise ConfigError(
@@ -224,7 +231,10 @@ def run_one(
         work_dir = Path(tempfile.mkdtemp(prefix="eval-work-"))
         fixture_dir = (config.config_dir / "fixtures" / fixture_dir_name).resolve()
         if fixture_dir.is_dir():
-            shutil.copytree(fixture_dir, work_dir, dirs_exist_ok=True)
+            try:
+                shutil.copytree(fixture_dir, work_dir, dirs_exist_ok=True)
+            except OSError as exc:
+                raise FixtureError(f"failed to copy fixture '{fixture_dir}': {exc}") from exc
         # Create directories DockerCLIRunner expects and Copilot writes into.
         (work_dir / "output").mkdir(exist_ok=True)
         (work_dir / TRACE_FILE.parent).mkdir(exist_ok=True)
@@ -300,12 +310,47 @@ def run_one(
         # sees hook failures too, not just evaluator-produced scores.
         _write_scores_file(log_file, scores)
         _print_scores(scores)
-    except Exception as exc:  # noqa: BLE001 - isolate per-run failures from the batch
+    except DockerError as exc:
+        # A DockerError can currently only originate from the `runner.run()`
+        # call above (container execution), i.e. before the container produced
+        # any artifacts -- so it's always a setup-stage failure.
+        logger.error("Docker error: %s", exc)
+        _append_log(log_file, f"run_one raised a DockerError: {exc}")
+        return RunResult(
+            task=task.name,
+            variant=variant.name,
+            epoch=epoch,
+            test_id=test_id,
+            run_id=run_id,
+            log_file=log_file,
+            exit_code=-1,
+            status=RunStatus.SETUP_FAILED,
+            scores=scores,
+            **_timing(),
+            fixture=fixture_label,
+        )
+    except subprocess.TimeoutExpired as exc:
+        logger.error("Run timed out: %s", exc)
+        _append_log(log_file, f"run_one timed out: {exc}")
+        return RunResult(
+            task=task.name,
+            variant=variant.name,
+            epoch=epoch,
+            test_id=test_id,
+            run_id=run_id,
+            log_file=log_file,
+            exit_code=124,
+            status=RunStatus.TIMEOUT,
+            scores=scores,
+            **_timing(),
+            fixture=fixture_label,
+        )
+    except EvalError as exc:
         # A failure before the container ran is a setup problem; a failure during
         # post-processing (persist/evaluators/after_run) happened after a real run,
         # so preserve the container's exit status instead of mislabeling it.
         if not container_run_completed or artifacts is None:
-            logger.error("Run errored during setup: %s", exc)
+            logger.error("Eval error during setup: %s", exc)
             _append_log(log_file, f"run_one raised during setup: {exc!r}")
             return RunResult(
                 task=task.name,
@@ -320,7 +365,7 @@ def run_one(
                 **_timing(),
                 fixture=fixture_label,
             )
-        logger.error("Run errored during post-processing: %s", exc)
+        logger.error("Eval error during post-processing: %s", exc)
         _append_log(log_file, f"run_one raised during post-processing: {exc!r}")
         scores.append(
             EvalScore(
@@ -388,7 +433,12 @@ def _run_hook(
         **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()},
     }
     with open(log_file, "a") as lf:
-        proc = subprocess.run(["bash", str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)
+        try:
+            proc = subprocess.run(
+                ["bash", str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env
+            )
+        except OSError as exc:
+            raise HookError(f"{label} script '{resolved}' failed to execute: {exc}") from exc
     return proc.returncode
 
 
@@ -419,7 +469,12 @@ def _run_health_check(
         **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()},
     }
     with open(log_file, "a") as lf:
-        proc = subprocess.run(["bash", str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)
+        try:
+            proc = subprocess.run(
+                ["bash", str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env
+            )
+        except OSError as exc:
+            raise HookError(f"health_check script '{resolved}' failed to execute: {exc}") from exc
     return proc.returncode == 0
 
 
