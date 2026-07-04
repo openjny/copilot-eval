@@ -371,9 +371,80 @@ def test_run_metric_evaluators_fails_closed_when_metrics_absent(tmp_path: Path):
     assert budget["passed"] is False
 
 
+def _metric_trace_fx(fixture: str, duration: float):
+    """A metric trace tagged with eval.fixture (multi-fixture input-coverage axis)."""
+    from eval.trace import Span, Trace
+
+    root = Span(
+        name="invoke_agent",
+        duration_s=duration,
+        span_id="r",
+        parent_id=None,
+        tags={
+            "github.copilot.turn_count": 3,
+            "github.copilot.cost": "0.10",
+            "gen_ai.request.model": "m",
+        },
+    )
+    return Trace(
+        trace_id=f"tr-{fixture}",
+        spans=[root],
+        resource_tags={
+            "eval.scenario": "t",
+            "eval.variant": "v",
+            "eval.epoch": "0",
+            "eval.test_id": f"abc-{fixture}",
+            "eval.fixture": fixture,
+        },
+    )
+
+
+def test_run_metric_evaluators_multi_fixture_writes_separate_files_and_catches_failure(
+    tmp_path: Path,
+):
+    """Each fixture of a multi-fixture task must get its own fixture-suffixed scores
+    file, and a metric that fails on one fixture must not be dedup-skipped by another
+    fixture that shares scenario/variant/epoch."""
+    from eval.config import Evaluator, Task
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    task = Task(
+        name="t",
+        prompt="p",
+        fixtures=["fixA", "fixB"],
+        evaluators=[
+            Evaluator(name="latency", type="metric", metric="duration", op="<", threshold=60.0),
+        ],
+    )
+    config = Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[task],
+        variants=_variants("v"),
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+
+    # fixA passes (42 < 60); fixB fails (90 not < 60). Same scenario/variant/epoch.
+    traces = [_metric_trace_fx("fixA", 42.0), _metric_trace_fx("fixB", 90.0)]
+    failed = _run_metric_evaluators(config, traces, results_dir)
+
+    # Each fixture wrote its own fixture-suffixed scores file (no orphaning/misattribution).
+    file_a = results_dir / "t_v_epoch0__fixture__fixA.scores.json"
+    file_b = results_dir / "t_v_epoch0__fixture__fixB.scores.json"
+    assert file_a.exists() and file_b.exists()
+    assert not (results_dir / "t_v_epoch0.scores.json").exists()
+    assert json.loads(file_a.read_text())[0]["passed"] is True
+    assert json.loads(file_b.read_text())[0]["passed"] is False
+
+    # fixB's failure is caught (not skipped by the dedup `seen` set) and is labelled.
+    assert len(failed) == 1
+    assert "latency" in failed[0]
+    assert "fixB" in failed[0]
+
+
 # --- analyze exit code (CI gating) ---
-
-
 def _analyze_gate_config(tmp_path: Path, budget_threshold: float) -> Config:
     """Build a Config (rooted at tmp_path) with a single cost-budget metric gate."""
     from eval.config import Evaluator, Task
@@ -453,3 +524,40 @@ def test_analyze_gate_runs_without_preexisting_results_dir(tmp_path: Path, monke
     assert result.exit_code != 0
     assert "Metric gate failed" in result.output
     assert "budget" in result.output
+
+
+def test_analyze_exits_nonzero_when_one_fixture_fails_metric_gate(tmp_path: Path, monkeypatch):
+    """A multi-fixture task whose metric gate passes on fixA but fails on fixB must
+    make `analyze` exit non-zero — the failing fixture is not masked by the passer."""
+    from click.testing import CliRunner
+
+    from eval import cli
+    from eval.config import Evaluator, Task
+
+    run_id = "run-1"
+    task = Task(
+        name="t",
+        prompt="p",
+        fixtures=["fixA", "fixB"],
+        evaluators=[
+            Evaluator(name="latency", type="metric", metric="duration", op="<", threshold=60.0),
+        ],
+    )
+    config = Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[task],
+        variants=_variants("v"),
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+    (config.results_dir / run_id).mkdir(parents=True)
+    traces = [_metric_trace_fx("fixA", 42.0), _metric_trace_fx("fixB", 90.0)]
+    monkeypatch.setattr(cli, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr(cli, "_collect_file_traces", lambda *a, **k: traces)
+
+    result = CliRunner().invoke(cli.main, ["analyze", "--run-id", run_id, "--skip-eval"])
+
+    assert result.exit_code != 0
+    assert "Metric gate failed" in result.output
+    assert "fixB" in result.output

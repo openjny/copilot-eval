@@ -218,9 +218,79 @@ def test_build_report_judge_paired_by_epoch(tmp_path):
     assert judge_row.delta == "+50.0%"
 
 
+# --- Multiple fixtures (input-coverage axis) ---
+
+
+def _write_scores_fx(d, task, variant, epoch, fixture, scores):
+    from eval.naming import run_slug
+
+    f = d / f"{run_slug(task, variant, epoch, fixture)}.scores.json"
+    f.write_text(json.dumps(scores), encoding="utf-8")
+
+
+def test_single_fixture_runs_unchanged():
+    # Empty fixture label -> report epoch labels are the bare epoch (legacy).
+    results = [make_metrics("t1", "a", "1"), make_metrics("t1", "a", "2")]
+    reports = build_report(results, variant_order=["a"], aggregate="median")
+    assert sorted(r.epoch for r in reports[0].runs) == ["1", "2"]
+
+
+def test_multi_fixture_pooled_paired_delta():
+    # Two fixtures, plugin consistently faster within each (fixture, epoch) cell.
+    results = [
+        make_metrics("cr", "base", "1", duration=10, fixture="fixA"),
+        make_metrics("cr", "plugin", "1", duration=8, fixture="fixA"),
+        make_metrics("cr", "base", "1", duration=20, fixture="fixB"),
+        make_metrics("cr", "plugin", "1", duration=16, fixture="fixB"),
+    ]
+    reports = build_report(results, None, ["base", "plugin"], "paired")
+    report = reports[0]
+    # Runs are labelled by fixture#epoch so the per-fixture breakdown is visible.
+    assert {r.epoch for r in report.runs} == {"fixA#1", "fixB#1"}
+    # Paired delta pools across both fixtures: 2 paired cells.
+    assert report.paired_n == 2
+    dur = next(s for s in report.summary if s.metric == "Duration (s)")
+    # deltas: -2/10=-20%, -4/20=-20% -> median -20.0%
+    assert dur.delta == "-20.0%"
+
+
+def test_multi_fixture_does_not_pair_across_fixtures():
+    # base only ran fixA, plugin only ran fixB -> no shared (fixture, epoch) cell.
+    results = [
+        make_metrics("cr", "base", "1", duration=10, fixture="fixA"),
+        make_metrics("cr", "plugin", "1", duration=8, fixture="fixB"),
+    ]
+    reports = build_report(results, None, ["base", "plugin"], "paired")
+    assert reports[0].paired_n == 0
+    dur = next(s for s in reports[0].summary if s.metric == "Duration (s)")
+    assert dur.delta == ""
+
+
+def test_multi_fixture_judge_scores_pool_by_fixture(tmp_path):
+    _write_scores_fx(tmp_path, "cr", "base", "1", "fixA", [{"name": "q", "score": 4}])
+    _write_scores_fx(tmp_path, "cr", "plugin", "1", "fixA", [{"name": "q", "score": 6}])
+    _write_scores_fx(tmp_path, "cr", "base", "1", "fixB", [{"name": "q", "score": 8}])
+    _write_scores_fx(tmp_path, "cr", "plugin", "1", "fixB", [{"name": "q", "score": 10}])
+    epoch_data, _, names, _ = _load_judge_raw(tmp_path, ["base", "plugin"], "cr")
+    assert names == ["q"]
+    # Keyed by (variant, fixture#epoch) so each fixture stays distinct.
+    assert epoch_data[("base", "fixA#1")] == {"q": 4}
+    assert epoch_data[("plugin", "fixB#1")] == {"q": 10}
+
+    results = [
+        make_metrics("cr", "base", "1", fixture="fixA"),
+        make_metrics("cr", "plugin", "1", fixture="fixA"),
+        make_metrics("cr", "base", "1", fixture="fixB"),
+        make_metrics("cr", "plugin", "1", fixture="fixB"),
+    ]
+    reports = build_report(results, tmp_path, ["base", "plugin"], "paired")
+    judge_row = next(r for r in reports[0].judge_scores if r.metric == "q")
+    # deltas: +2 over baseline 4 (fixA) and +2 over baseline 8 (fixB)
+    # -> pct uses paired baseline median([4,8])=6 -> +2/6 = +33.3%
+    assert judge_row.delta == "+33.3%"
+
+
 # --- Judge runtime aggregation ---
-
-
 def test_load_judge_runtime_aggregates(tmp_path):
     from eval.report import _load_judge_runtime
 

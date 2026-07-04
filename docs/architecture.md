@@ -38,7 +38,7 @@ sequenceDiagram
     participant Docker as Container
     participant Collector as Trace Collector
 
-    CLI->>Runner: run_one(task, variant, epoch)
+    CLI->>Runner: run_one(task, variant, epoch, fixture)
     Runner->>Runner: before_run hook
     Runner->>Runner: health_check
     Runner->>Runner: Copy fixture → tmpdir + create output/

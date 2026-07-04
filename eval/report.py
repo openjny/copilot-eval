@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import random
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from statistics import mean as _mean
 from statistics import median
 from statistics import stdev as _stdev
 from typing import Any
 
+from eval.naming import parse_slug
 from eval.protocols import RunStatus
 from eval.trace import RunMetrics
 
@@ -156,6 +157,21 @@ def _epoch_sort_key(epoch: str) -> tuple[int, object]:
         return (1, str(epoch))
 
 
+def _pair_label(fixture: str, epoch: str) -> str:
+    """Fixture-qualified pairing/display key for a run.
+
+    Single-fixture / legacy runs (empty fixture) keep the bare epoch, so paired
+    aggregation and report layout are byte-identical to the pre-fixture behavior.
+    Multi-fixture runs get a ``{fixture}#{epoch}`` key so variants are paired
+    within the same (fixture, epoch) cell and the paired delta pools across
+    fixtures. The ``"?"`` sentinel (missing OTel epoch) is preserved verbatim so
+    it never pairs.
+    """
+    if not fixture or epoch == "?":
+        return epoch
+    return f"{fixture}#{epoch}"
+
+
 def _calc_delta(values: dict[str, float], variants: list[str]) -> str:
     if len(variants) != 2:
         return ""
@@ -290,7 +306,10 @@ def build_report(
 
     reports: list[Report] = []
     for task_name in sorted(set(by_task.keys()) | manifest_tasks):
-        task_runs = by_task[task_name]
+        # Qualify each run's epoch with its fixture so paired aggregation pools
+        # across fixtures (variant × fixture × epoch). Single-fixture runs keep
+        # the bare epoch, preserving the legacy report layout exactly.
+        task_runs = [replace(r, epoch=_pair_label(r.fixture, r.epoch)) for r in by_task[task_name]]
         task_runs.sort(key=lambda r: (r.variant, _epoch_sort_key(r.epoch)))
 
         by_variant: dict[str, list[RunMetrics]] = defaultdict(list)
@@ -837,17 +856,13 @@ def _load_judge_raw(
             stem = jf.stem.replace(".scores", "").replace(".judges", "")
             if not stem.startswith(f"{task}_"):
                 continue
-            parts = stem.rsplit("_epoch", 1)
-            if len(parts) < 2:
+            parsed = parse_slug(stem, variants)
+            if not parsed:
                 continue
-            name_variant = parts[0]
-            epoch_str = parts[1]
-            # Match the longest variant name to avoid a shorter name (e.g. "v")
-            # incorrectly claiming a file that belongs to "my_v".
-            matches = [v for v in variants if name_variant.endswith(f"_{v}")]
-            variant = max(matches, key=len) if matches else None
-            if not variant:
-                continue
+            variant, fixture, epoch = parsed
+            # Fixture-qualified key so scores pair with the same (fixture, epoch)
+            # cell as the OTel metrics; single-fixture keeps the bare epoch.
+            epoch_str = _pair_label(fixture, epoch)
             try:
                 scores = {}
                 reasons = {}

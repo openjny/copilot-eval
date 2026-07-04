@@ -47,6 +47,87 @@ def test_default_variant_when_none(tmp_path):
     assert [v.name for v in cfg.variants] == ["baseline"]
 
 
+# --- Fixtures (input-coverage axis) ---
+
+
+def test_single_fixture_defaults(tmp_path):
+    cfg = load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "p"}]})
+    task = cfg.get_task("t1")
+    assert task.fixtures == []
+    assert task.fixture_names() == ["t1"]  # falls back to task name
+    assert task.is_multi_fixture is False
+    assert task.fixture_label("t1") == ""  # single-fixture -> no reporting label
+
+
+def test_singular_fixture_backward_compat(tmp_path):
+    cfg = load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "p", "fixture": "sample-app"}]})
+    task = cfg.get_task("t1")
+    assert task.fixture_names() == ["sample-app"]
+    assert task.is_multi_fixture is False
+    assert task.fixture_label("sample-app") == ""
+
+
+def test_multiple_fixtures_expand(tmp_path):
+    cfg = load_inline(
+        tmp_path,
+        {
+            "tasks": [
+                {
+                    "name": "code-review",
+                    "prompt": "review",
+                    "fixtures": ["sample-app", "legacy-api", "microservice-x"],
+                }
+            ],
+        },
+    )
+    task = cfg.get_task("code-review")
+    assert task.fixture_names() == ["sample-app", "legacy-api", "microservice-x"]
+    assert task.is_multi_fixture is True
+    assert task.fixture_label("legacy-api") == "legacy-api"
+
+
+def test_single_element_fixtures_is_not_multi(tmp_path):
+    cfg = load_inline(
+        tmp_path,
+        {
+            "tasks": [{"name": "t1", "prompt": "p", "fixtures": ["only"]}],
+        },
+    )
+    task = cfg.get_task("t1")
+    assert task.fixture_names() == ["only"]
+    assert task.is_multi_fixture is False
+
+
+def test_fixtures_takes_precedence_over_singular(tmp_path):
+    cfg = load_inline(
+        tmp_path,
+        {
+            "tasks": [{"name": "t1", "prompt": "p", "fixture": "ignored", "fixtures": ["a", "b"]}],
+        },
+    )
+    assert cfg.get_task("t1").fixture_names() == ["a", "b"]
+
+
+def test_fixtures_must_be_list(tmp_path):
+    with pytest.raises(ConfigError, match="invalid 'fixtures'"):
+        load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "p", "fixtures": "a"}]})
+
+
+def test_fixtures_reject_empty_string(tmp_path):
+    with pytest.raises(ConfigError, match="non-empty string"):
+        load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "p", "fixtures": ["a", ""]}]})
+
+
+def test_fixtures_reject_invalid_name(tmp_path):
+    with pytest.raises(ConfigError, match="invalid"):
+        load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "p", "fixtures": ["a/b"]}]})
+
+
+def test_fixtures_reject_duplicates(tmp_path):
+    with pytest.raises(ConfigError, match="duplicate fixture"):
+        load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "p", "fixtures": ["a", "a"]}]})
+
+
 # --- Backward compatibility ---
 
 

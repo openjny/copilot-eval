@@ -91,6 +91,7 @@ tasks:
     prompt: "Do something with {key}"    # {key} interpolated from vars
     enabled: true
     fixture: my-fixture                  # Directory under fixtures/ to mount at /workspace
+    # fixtures: [app-a, app-b]           # Or: run the task against multiple fixtures (input-coverage axis)
     timeout_seconds: null                # Override runner.timeout_seconds
     health_check: scripts/check.sh       # Script that must pass before running
     vars: {}                             # Task-level variable overrides
@@ -372,6 +373,21 @@ in `examples/prompt-language` and `examples/judge-calibration`.
 
 Place files under `<config-dir>/fixtures/<fixture-name>/`. They are copied to a temp directory and mounted at `/workspace` inside the container (read-write). An `output/` subdirectory is automatically created.
 
+### Multiple fixtures per task (input-coverage axis)
+
+A task can be run against several fixtures so a customization is A/B-compared across diverse workspaces instead of a single, possibly cherry-picked one. Use the `fixtures` list instead of the singular `fixture`:
+
+```yaml
+tasks:
+  - name: refactor
+    prompt: "Refactor the module"
+    fixtures: [small-app, legacy-app, monorepo]   # each becomes its own run
+```
+
+This expands the eval matrix from `variant × epoch` to `variant × fixture × epoch`. Each fixture is executed as its own run with its own persisted telemetry and output, keyed by a `__fixture__<name>` suffix on the run slug and an `eval.fixture` OTel resource tag. The `analyze` report pairs variants within each `(fixture, epoch)` cell and pools the paired deltas across fixtures, while per-run rows remain labelled `<fixture>#<epoch>` so the per-fixture breakdown stays visible.
+
+The singular `fixture:` form keeps working unchanged and is equivalent to a single-element `fixtures:` list (no `__fixture__` suffix, empty `eval.fixture` tag).
+
 ## Hooks
 
 `before_run` and `after_run` scripts run on the **host** (not inside Docker). Environment variables `EVAL_<KEY>` are set from resolved vars. Use them for:
@@ -431,6 +447,7 @@ Each run writes a `results.json` manifest under `results/<run-id>/`. It records 
 
 - A top-level `schedule` block: `parallel`, `max_workers`, `variant_order`, `seed`.
 - Per run:
+  - `fixture` — the fixture the run used (empty unless the task declares multiple fixtures via `fixtures:`).
   - `order_index` — scheduled position. In `off` it is the global execution sequence; in `per_task` it is the position within that task; in `full` it is the submission index. It reflects *intended* order, not actual start order under concurrency — use `started_at` for that.
   - `started_at` / `finished_at` — microsecond wall-clock timestamps (`started_at` is captured before hooks/health-check).
   - `duration_seconds` — total run wall time, including hooks, the Copilot container run, and non-judge evaluators (not Copilot execution time alone).
