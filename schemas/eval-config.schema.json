@@ -154,6 +154,18 @@
           "description": "Optional reasoning effort passed to Copilot (e.g. low, medium, high).",
           "type": "string"
         },
+        "retries": {
+          "default": 0,
+          "description": "run_one: retry attempts for transient failures (DockerError, container timeout). 0 disables retries. Deterministic failures (auth/hook/fixture errors) are never retried.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retry_delay": {
+          "default": 5.0,
+          "description": "run_one: base seconds between retries, doubling per attempt (exponential backoff) up to a 60s cap.",
+          "minimum": 0,
+          "type": "number"
+        },
         "seed": {
           "default": null,
           "description": "RNG seed for variant_order=random (reproducibility).",

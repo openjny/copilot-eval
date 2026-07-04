@@ -235,6 +235,21 @@ def _runner_schema() -> dict[str, Any]:
                 "default": 2.0,
                 "description": "analyze: seconds between trace-ingestion retries.",
             },
+            "retries": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "description": "run_one: retry attempts for transient failures "
+                "(DockerError, container timeout). 0 disables retries. "
+                "Deterministic failures (auth/hook/fixture errors) are never retried.",
+            },
+            "retry_delay": {
+                "type": "number",
+                "minimum": 0,
+                "default": 5.0,
+                "description": "run_one: base seconds between retries, doubling "
+                "per attempt (exponential backoff) up to a 60s cap.",
+            },
         },
     }
 

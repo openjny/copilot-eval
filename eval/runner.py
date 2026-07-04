@@ -80,6 +80,9 @@ class RunResult:
     # multi-fixture tasks). Recorded in the manifest so `analyze` can group runs
     # along the input-coverage axis.
     fixture: str = ""
+    # Number of transient-failure retries performed before this result was
+    # produced (0 = succeeded/failed on the first attempt). See issue #69.
+    retry_count: int = 0
 
     @property
     def passed(self) -> bool:
@@ -102,6 +105,7 @@ class RunResult:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "duration_seconds": self.duration_seconds,
+            "retry_count": self.retry_count,
             "scores": [score_to_dict(s) for s in self.scores],
         }
 
@@ -200,181 +204,176 @@ def run_one(
             f"'{config.runner.collector}'. Supported collectors: {supported}."
         )
 
-    # Tracked across the run so the outer `finally` can always clean up and
-    # redact secrets, even on early returns (e.g. setup_failed) or exceptions.
-    work_dir: Path | None = None
-    scores: list[EvalScore] = []
-    artifacts: RunArtifacts | None = None
-    container_run_completed = False
-    try:
-        before_rc = _run_hook(task.hooks.before_run, config, task, variant, log_file, "before_run")
-        if before_rc != 0:
-            if task.hooks.on_failure == "fail":
-                logger.error("before_run hook failed (exit %s) — skipping run", before_rc)
-                _append_log(log_file, f"before_run hook failed with exit code {before_rc}")
-                return RunResult(
-                    task=task.name,
-                    variant=variant.name,
-                    epoch=epoch,
-                    test_id=test_id,
-                    run_id=run_id,
-                    log_file=log_file,
-                    exit_code=-1,
-                    status=RunStatus.SETUP_FAILED,
-                    **_timing(),
-                    fixture=fixture_label,
+    # Retry budget for transient failures (DockerError, container timeout) --
+    # see issue #69. `attempt` is the 0-based index of the current try; it is
+    # also recorded as `retry_count` on the final RunResult so `analyze` can
+    # tell a flaky-but-eventually-passing run from a clean first try.
+    max_retries = config.runner.retries
+    retry_delay = config.runner.retry_delay
+    attempt = 0
+    while True:
+        # Tracked across each attempt so the inner `finally` can always clean up
+        # and redact secrets, even on early returns (e.g. setup_failed) or
+        # exceptions.
+        work_dir: Path | None = None
+        scores: list[EvalScore] = []
+        artifacts: RunArtifacts | None = None
+        container_run_completed = False
+        try:
+            before_rc = _run_hook(
+                task.hooks.before_run, config, task, variant, log_file, "before_run"
+            )
+            if before_rc != 0:
+                if task.hooks.on_failure == "fail":
+                    logger.error("before_run hook failed (exit %s) — skipping run", before_rc)
+                    _append_log(log_file, f"before_run hook failed with exit code {before_rc}")
+                    return RunResult(
+                        task=task.name,
+                        variant=variant.name,
+                        epoch=epoch,
+                        test_id=test_id,
+                        run_id=run_id,
+                        log_file=log_file,
+                        exit_code=-1,
+                        status=RunStatus.SETUP_FAILED,
+                        **_timing(),
+                        fixture=fixture_label,
+                        retry_count=attempt,
+                    )
+                logger.warning(
+                    "before_run hook failed (exit %s) — continuing (on_failure=warn)",
+                    before_rc,
                 )
-            logger.warning(
-                "before_run hook failed (exit %s) — continuing (on_failure=warn)",
-                before_rc,
-            )
-            _append_log(
-                log_file,
-                f"before_run hook failed with exit code {before_rc}; continuing because hooks.on_failure=warn",
-            )
-
-        # Health check: verify environment is ready before running Copilot
-        if task.health_check:
-            if not _run_health_check(task.health_check, config, task, variant, log_file):
-                logger.error("Health check failed — skipping run")
-                return RunResult(
-                    task=task.name,
-                    variant=variant.name,
-                    epoch=epoch,
-                    test_id=test_id,
-                    run_id=run_id,
-                    log_file=log_file,
-                    exit_code=-1,
-                    status=RunStatus.SETUP_FAILED,
-                    fixture=fixture_label,
-                    **_timing(),
+                _append_log(
+                    log_file,
+                    f"before_run hook failed with exit code {before_rc}; continuing because hooks.on_failure=warn",
                 )
 
-        # Writable workspace: copy fixture to tmpdir so Copilot can read AND write
-        work_dir = Path(tempfile.mkdtemp(prefix="eval-work-"))
-        fixture_dir = (config.config_dir / "fixtures" / fixture_dir_name).resolve()
-        if fixture_dir.is_dir():
-            try:
-                shutil.copytree(fixture_dir, work_dir, dirs_exist_ok=True)
-            except OSError as exc:
-                raise FixtureError(f"failed to copy fixture '{fixture_dir}': {exc}") from exc
-        # Create directories DockerCLIRunner expects and Copilot writes into.
-        (work_dir / "output").mkdir(exist_ok=True)
-        (work_dir / TRACE_FILE.parent).mkdir(exist_ok=True)
-        collector_kwargs = (
-            {
-                "jaeger_url": config.runner.jaeger_url,
-                "otel_endpoint": config.runner.otel_endpoint,
-            }
-            if config.runner.collector == "jaeger"
-            else {}
-        )
-        collector = create_collector(config.runner.collector, **collector_kwargs)
-        collector_context = RunContext(
-            run_id=run_id,
-            test_id=test_id,
-            epoch=epoch,
-            run_dir=run_dir,
-            task=task,
-            variant=variant,
-            config=config,
-            work_dir=work_dir,
-            fixture=fixture_dir_name,
-            fixture_label=fixture_label,
-        )
-        run_context = RunContext(
-            run_id=run_id,
-            test_id=test_id,
-            epoch=epoch,
-            run_dir=run_dir,
-            task=task,
-            variant=variant,
-            config=config,
-            extra_env=collector.exporter_env(collector_context),
-            work_dir=work_dir,
-            fixture=fixture_dir_name,
-            fixture_label=fixture_label,
-        )
+            # Health check: verify environment is ready before running Copilot
+            if task.health_check:
+                if not _run_health_check(task.health_check, config, task, variant, log_file):
+                    logger.error("Health check failed — skipping run")
+                    return RunResult(
+                        task=task.name,
+                        variant=variant.name,
+                        epoch=epoch,
+                        test_id=test_id,
+                        run_id=run_id,
+                        log_file=log_file,
+                        exit_code=-1,
+                        status=RunStatus.SETUP_FAILED,
+                        fixture=fixture_label,
+                        **_timing(),
+                        retry_count=attempt,
+                    )
 
-        logger.info("Running copilot in container...")
-        artifacts = runner.run(run_context)
-        container_run_completed = True
-        _print_summary(log_file)
+            # Writable workspace: copy fixture to tmpdir so Copilot can read AND write
+            work_dir = Path(tempfile.mkdtemp(prefix="eval-work-"))
+            fixture_dir = (config.config_dir / "fixtures" / fixture_dir_name).resolve()
+            if fixture_dir.is_dir():
+                try:
+                    shutil.copytree(fixture_dir, work_dir, dirs_exist_ok=True)
+                except OSError as exc:
+                    raise FixtureError(f"failed to copy fixture '{fixture_dir}': {exc}") from exc
+            # Create directories DockerCLIRunner expects and Copilot writes into.
+            (work_dir / "output").mkdir(exist_ok=True)
+            (work_dir / TRACE_FILE.parent).mkdir(exist_ok=True)
+            collector_kwargs = (
+                {
+                    "jaeger_url": config.runner.jaeger_url,
+                    "otel_endpoint": config.runner.otel_endpoint,
+                }
+                if config.runner.collector == "jaeger"
+                else {}
+            )
+            collector = create_collector(config.runner.collector, **collector_kwargs)
+            collector_context = RunContext(
+                run_id=run_id,
+                test_id=test_id,
+                epoch=epoch,
+                run_dir=run_dir,
+                task=task,
+                variant=variant,
+                config=config,
+                work_dir=work_dir,
+                fixture=fixture_dir_name,
+                fixture_label=fixture_label,
+            )
+            run_context = RunContext(
+                run_id=run_id,
+                test_id=test_id,
+                epoch=epoch,
+                run_dir=run_dir,
+                task=task,
+                variant=variant,
+                config=config,
+                extra_env=collector.exporter_env(collector_context),
+                work_dir=work_dir,
+                fixture=fixture_dir_name,
+                fixture_label=fixture_label,
+            )
 
-        after_rc = _run_hook(task.hooks.after_run, config, task, variant, log_file, "after_run")
-        if after_rc != 0:
-            logger.warning("after_run hook failed (exit %s) — surfacing in results", after_rc)
-            _append_log(log_file, f"after_run hook failed with exit code {after_rc}")
-            scores.append(
-                EvalScore(
-                    name="after_run_hook",
-                    type="hook",
-                    score=None,
-                    reason=f"after_run hook failed with exit code {after_rc}",
-                    passed=False,
+            logger.info("Running copilot in container...")
+            artifacts = runner.run(run_context)
+            container_run_completed = True
+            _print_summary(log_file)
+
+            after_rc = _run_hook(task.hooks.after_run, config, task, variant, log_file, "after_run")
+            if after_rc != 0:
+                logger.warning("after_run hook failed (exit %s) — surfacing in results", after_rc)
+                _append_log(log_file, f"after_run hook failed with exit code {after_rc}")
+                scores.append(
+                    EvalScore(
+                        name="after_run_hook",
+                        type="hook",
+                        score=None,
+                        reason=f"after_run hook failed with exit code {after_rc}",
+                        passed=False,
+                    )
                 )
-            )
 
-        # Persist output files to results dir before tmpdir cleanup
-        _persist_output_files(work_dir, run_dir, task.name, variant.name, epoch, fixture_label)
-        _persist_trace_file(work_dir, run_dir, task.name, variant.name, epoch, fixture_label)
-        if (
-            config.runner.collector == "file"
-            and artifacts.exit_code == 0
-            and not (work_dir / TRACE_FILE).exists()
-        ):
-            logger.warning(
-                "file collector enabled but no trace file was written; "
-                "ensure your Copilot CLI supports COPILOT_OTEL_FILE_EXPORTER_PATH."
-            )
+            # Persist output files to results dir before tmpdir cleanup
+            _persist_output_files(work_dir, run_dir, task.name, variant.name, epoch, fixture_label)
+            _persist_trace_file(work_dir, run_dir, task.name, variant.name, epoch, fixture_label)
+            if (
+                config.runner.collector == "file"
+                and artifacts.exit_code == 0
+                and not (work_dir / TRACE_FILE).exists()
+            ):
+                logger.warning(
+                    "file collector enabled but no trace file was written; "
+                    "ensure your Copilot CLI supports COPILOT_OTEL_FILE_EXPORTER_PATH."
+                )
 
-        scores.extend(_run_evaluators(task, variant, config, log_file, github_token, work_dir))
-        # Persist the full score set (hook + evaluator scores) so later analysis
-        # sees hook failures too, not just evaluator-produced scores.
-        _write_scores_file(log_file, scores)
-        _print_scores(scores)
-    except DockerError as exc:
-        # A DockerError can currently only originate from the `runner.run()`
-        # call above (container execution), i.e. before the container produced
-        # any artifacts -- so it's always a setup-stage failure.
-        logger.error("Docker error: %s", exc)
-        _append_log(log_file, f"run_one raised a DockerError: {exc}")
-        return RunResult(
-            task=task.name,
-            variant=variant.name,
-            epoch=epoch,
-            test_id=test_id,
-            run_id=run_id,
-            log_file=log_file,
-            exit_code=-1,
-            status=RunStatus.SETUP_FAILED,
-            scores=scores,
-            **_timing(),
-            fixture=fixture_label,
-        )
-    except subprocess.TimeoutExpired as exc:
-        logger.error("Run timed out: %s", exc)
-        _append_log(log_file, f"run_one timed out: {exc}")
-        return RunResult(
-            task=task.name,
-            variant=variant.name,
-            epoch=epoch,
-            test_id=test_id,
-            run_id=run_id,
-            log_file=log_file,
-            exit_code=124,
-            status=RunStatus.TIMEOUT,
-            scores=scores,
-            **_timing(),
-            fixture=fixture_label,
-        )
-    except EvalError as exc:
-        # A failure before the container ran is a setup problem; a failure during
-        # post-processing (persist/evaluators/after_run) happened after a real run,
-        # so preserve the container's exit status instead of mislabeling it.
-        if not container_run_completed or artifacts is None:
-            logger.error("Eval error during setup: %s", exc)
-            _append_log(log_file, f"run_one raised during setup: {exc!r}")
+            scores.extend(_run_evaluators(task, variant, config, log_file, github_token, work_dir))
+            # Persist the full score set (hook + evaluator scores) so later analysis
+            # sees hook failures too, not just evaluator-produced scores.
+            _write_scores_file(log_file, scores)
+            _print_scores(scores)
+        except DockerError as exc:
+            # A DockerError can currently only originate from the `runner.run()`
+            # call above (container execution), i.e. before the container produced
+            # any artifacts -- so it's always a setup-stage failure.
+            logger.error("Docker error: %s", exc)
+            _append_log(log_file, f"run_one raised a DockerError: {exc}")
+            if attempt < max_retries:
+                delay = min(retry_delay * (2**attempt), 60.0)
+                logger.warning(
+                    "Retrying after transient DockerError (attempt %s/%s): %s "
+                    "— waiting %.1fs before retry",
+                    attempt + 1,
+                    max_retries,
+                    exc,
+                    delay,
+                )
+                _append_log(
+                    log_file,
+                    f"retrying (attempt {attempt + 1}/{max_retries}) after DockerError: "
+                    f"{exc}; waiting {delay:.1f}s",
+                )
+                time.sleep(delay)
+                attempt += 1
+                continue
             return RunResult(
                 task=task.name,
                 variant=variant.name,
@@ -387,18 +386,96 @@ def run_one(
                 scores=scores,
                 **_timing(),
                 fixture=fixture_label,
+                retry_count=attempt,
             )
-        logger.error("Eval error during post-processing: %s", exc)
-        _append_log(log_file, f"run_one raised during post-processing: {exc!r}")
-        scores.append(
-            EvalScore(
-                name="post_processing",
-                type="infra",
-                score=None,
-                reason=f"post-run exception: {exc!r}",
-                passed=False,
+        except subprocess.TimeoutExpired as exc:
+            logger.error("Run timed out: %s", exc)
+            _append_log(log_file, f"run_one timed out: {exc}")
+            if attempt < max_retries:
+                delay = min(retry_delay * (2**attempt), 60.0)
+                logger.warning(
+                    "Retrying after timeout (attempt %s/%s): %s — waiting %.1fs before retry",
+                    attempt + 1,
+                    max_retries,
+                    exc,
+                    delay,
+                )
+                _append_log(
+                    log_file,
+                    f"retrying (attempt {attempt + 1}/{max_retries}) after timeout: "
+                    f"{exc}; waiting {delay:.1f}s",
+                )
+                time.sleep(delay)
+                attempt += 1
+                continue
+            return RunResult(
+                task=task.name,
+                variant=variant.name,
+                epoch=epoch,
+                test_id=test_id,
+                run_id=run_id,
+                log_file=log_file,
+                exit_code=124,
+                status=RunStatus.TIMEOUT,
+                scores=scores,
+                **_timing(),
+                fixture=fixture_label,
+                retry_count=attempt,
             )
-        )
+        except EvalError as exc:
+            # A failure before the container ran is a setup problem; a failure during
+            # post-processing (persist/evaluators/after_run) happened after a real run,
+            # so preserve the container's exit status instead of mislabeling it.
+            if not container_run_completed or artifacts is None:
+                logger.error("Eval error during setup: %s", exc)
+                _append_log(log_file, f"run_one raised during setup: {exc!r}")
+                return RunResult(
+                    task=task.name,
+                    variant=variant.name,
+                    epoch=epoch,
+                    test_id=test_id,
+                    run_id=run_id,
+                    log_file=log_file,
+                    exit_code=-1,
+                    status=RunStatus.SETUP_FAILED,
+                    scores=scores,
+                    **_timing(),
+                    fixture=fixture_label,
+                    retry_count=attempt,
+                )
+            logger.error("Eval error during post-processing: %s", exc)
+            _append_log(log_file, f"run_one raised during post-processing: {exc!r}")
+            scores.append(
+                EvalScore(
+                    name="post_processing",
+                    type="infra",
+                    score=None,
+                    reason=f"post-run exception: {exc!r}",
+                    passed=False,
+                )
+            )
+            return RunResult(
+                task=task.name,
+                variant=variant.name,
+                epoch=epoch,
+                test_id=test_id,
+                run_id=run_id,
+                log_file=log_file,
+                exit_code=artifacts.exit_code,
+                status=artifacts.status,
+                scores=scores,
+                **_timing(),
+                fixture=fixture_label,
+                retry_count=attempt,
+            )
+        finally:
+            if work_dir is not None:
+                shutil.rmtree(work_dir, ignore_errors=True)
+            # Redact secret values from the persisted log. Done in `finally` (after
+            # evaluators, which read the raw log for contains/regex) so it also
+            # covers early returns and exceptions, and never skews evaluator results.
+            _mask_log_file(log_file, collect_secrets(config, github_token))
+
         return RunResult(
             task=task.name,
             variant=variant.name,
@@ -409,30 +486,10 @@ def run_one(
             exit_code=artifacts.exit_code,
             status=artifacts.status,
             scores=scores,
-            **_timing(),
             fixture=fixture_label,
+            **_timing(),
+            retry_count=attempt,
         )
-    finally:
-        if work_dir is not None:
-            shutil.rmtree(work_dir, ignore_errors=True)
-        # Redact secret values from the persisted log. Done in `finally` (after
-        # evaluators, which read the raw log for contains/regex) so it also
-        # covers early returns and exceptions, and never skews evaluator results.
-        _mask_log_file(log_file, collect_secrets(config, github_token))
-
-    return RunResult(
-        task=task.name,
-        variant=variant.name,
-        epoch=epoch,
-        test_id=test_id,
-        run_id=run_id,
-        log_file=log_file,
-        exit_code=artifacts.exit_code,
-        status=artifacts.status,
-        scores=scores,
-        fixture=fixture_label,
-        **_timing(),
-    )
 
 
 def _run_hook(

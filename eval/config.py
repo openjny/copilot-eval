@@ -80,6 +80,14 @@ class RunnerConfig:
     trace_fetch_limit: int = 2000
     trace_fetch_retries: int = 5
     trace_fetch_retry_delay: float = 2.0
+    # run_one: retry a run when it fails with a transient error (Docker daemon
+    # hiccup, container timeout) instead of permanently recording it as
+    # setup_failed/timeout. 0 keeps the legacy no-retry behavior. Deterministic
+    # failures (AuthError, HookError, FixtureError) are never retried. Delay
+    # backs off exponentially (delay * 2**attempt, capped at 60s) between
+    # attempts. See issue #69.
+    retries: int = 0
+    retry_delay: float = 5.0
 
 
 @dataclass
@@ -320,6 +328,8 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
     trace_fetch_limit = _require_int(runner_raw, "trace_fetch_limit", 2000, minimum=1)
     trace_fetch_retries = _require_int(runner_raw, "trace_fetch_retries", 5, minimum=0)
     trace_fetch_retry_delay = _require_number(runner_raw, "trace_fetch_retry_delay", 2.0, minimum=0)
+    retries = _require_int(runner_raw, "retries", 0, minimum=0)
+    retry_delay = _require_number(runner_raw, "retry_delay", 5.0, minimum=0)
 
     return RunnerConfig(
         epochs=epochs,
@@ -351,6 +361,8 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         trace_fetch_limit=trace_fetch_limit,
         trace_fetch_retries=trace_fetch_retries,
         trace_fetch_retry_delay=trace_fetch_retry_delay,
+        retries=retries,
+        retry_delay=retry_delay,
     )
 
 

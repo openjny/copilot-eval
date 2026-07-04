@@ -140,6 +140,8 @@ vars:
 runner:
   epochs: 3                     # Repetitions per task×variant
   timeout_seconds: 300           # Max seconds per Copilot run
+  retries: 0                     # Retry a run this many times on transient failure (DockerError/timeout); 0 disables
+  retry_delay: 5.0               # Base seconds between retries; doubles per attempt (exponential backoff), capped at 60s
   model: claude-sonnet-4         # Copilot model
   judge_model: claude-sonnet-4.6 # Model for LLM-as-Judge (separate from eval model)
   judge_samples: 1               # Self-consistency: sample each judge N times, aggregate
@@ -583,6 +585,18 @@ Hook exit codes are checked (a missing script is treated as success):
 - **`after_run`** — a non-zero exit is always logged and surfaced as a failing `hook` score, so the run is marked as not passed without aborting the batch.
 
 Per-run errors are isolated: an exception during setup (e.g. missing `docker` binary, fixture copy failure, a hook raising) is caught and recorded as `status: setup_failed` for that run only — it never aborts the whole batch, and the run manifest is always written.
+
+### Retrying transient failures
+
+`runner.retries` (default `0`) retries a run when it fails with a **transient** error — a Docker daemon hiccup (`DockerError`) or a container timeout (`timeout_seconds` exceeded) — instead of immediately recording it as `setup_failed`/`timeout`. Deterministic failures (auth, hook, fixture errors) are never retried, since re-running them would just fail the same way.
+
+Each retry waits `retry_delay * 2**attempt` seconds (exponential backoff), capped at 60s, and is logged with the attempt number and error. The manifest's `retry_count` field records how many retries a run needed (`0` = passed/failed on the first try), so `analyze` can distinguish a clean result from a flaky one that needed a re-run.
+
+```yaml
+runner:
+  retries: 2       # up to 2 retries (3 attempts total) on DockerError/timeout
+  retry_delay: 5.0 # 5s, then 10s between retries
+```
 
 ## Health Check
 
