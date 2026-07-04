@@ -326,7 +326,11 @@ def run(
     if skip_preflight:
         click.echo("Pre-flight checks: skipped (--skip-preflight)", err=True)
     else:
-        preflight = validate_readiness(config, tasks=tasks, check_build=not no_build)
+        # The base-image check only makes sense when builds are disabled
+        # (--no-build): if auto-build is enabled, _ensure_images() below will
+        # build the image itself, so a missing image pre-flight isn't a
+        # failure — the default first-run flow must not be blocked here.
+        preflight = validate_readiness(config, tasks=tasks, check_build=no_build)
         if any(not r.passed for r in preflight):
             _print_check_results(preflight, "Pre-flight checks")
         if any_failed(preflight):

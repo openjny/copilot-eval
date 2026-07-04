@@ -201,8 +201,7 @@ def check_script_references(config: Config) -> list[CheckResult]:
                 results.append(
                     _fail(
                         f"variant:{variant.name}:run_script",
-                        f"Run script '{variant.run_script}' not found for variant "
-                        f"'{variant.name}'",
+                        f"Run script '{variant.run_script}' not found for variant '{variant.name}'",
                         f"Expected at: {path}",
                     )
                 )
@@ -313,15 +312,14 @@ def check_docker_daemon() -> CheckResult:
 
 
 def check_github_token() -> CheckResult:
-    token = os.environ.get("GITHUB_TOKEN", "").strip() or os.environ.get(
-        "COPILOT_GITHUB_TOKEN", ""
-    ).strip()
+    token = (
+        os.environ.get("GITHUB_TOKEN", "").strip()
+        or os.environ.get("COPILOT_GITHUB_TOKEN", "").strip()
+    )
     if token:
         return _ok("github_token", "GITHUB_TOKEN/COPILOT_GITHUB_TOKEN is set")
     try:
-        result = subprocess.run(
-            ["gh", "auth", "token"], capture_output=True, text=True, timeout=10
-        )
+        result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=10)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         result = None
     if result is not None and result.returncode == 0 and result.stdout.strip():

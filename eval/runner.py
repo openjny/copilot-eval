@@ -158,9 +158,7 @@ def get_github_token() -> str:
         r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=True)
         return r.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        raise RuntimeError(
-            "GITHUB_TOKEN not set and gh CLI not authenticated"
-        ) from exc
+        raise RuntimeError("GITHUB_TOKEN not set and gh CLI not authenticated") from exc
 
 
 def run_one(

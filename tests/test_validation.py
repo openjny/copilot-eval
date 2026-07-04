@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 from click.testing import CliRunner
 
@@ -533,9 +534,7 @@ def test_cli_run_fails_fast_on_preflight_without_touching_docker(tmp_path: Path)
         patch("eval.cli._ensure_jaeger") as mock_ensure_jaeger,
         patch("eval.cli.get_github_token") as mock_token,
     ):
-        result = runner.invoke(
-            main, ["run", "--config-dir", str(config_dir), "--task", "t1"]
-        )
+        result = runner.invoke(main, ["run", "--config-dir", str(config_dir), "--task", "t1"])
 
     assert result.exit_code == 1
     mock_ensure_images.assert_not_called()
@@ -558,15 +557,55 @@ def test_cli_run_dry_run_skips_preflight(tmp_path: Path):
     mock_validate.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("no_build_flag", "expected_check_build"),
+    [([], False), (["--no-build"], True)],
+)
+def test_cli_run_check_build_matches_no_build_flag(
+    tmp_path: Path, no_build_flag: list[str], expected_check_build: bool
+):
+    """Regression test: `run`'s pre-flight must only require the base image to
+    already exist when auto-build is disabled (--no-build). When auto-build is
+    enabled (the default), `_ensure_images()` builds the image itself, so
+    pre-flight must NOT check for it beforehand — that inverted logic
+    (`check_build=not no_build`) would hard-fail every first-time `run` on a
+    fresh config, since the image can never exist before its first build."""
+    config_dir = tmp_path / "cfg"
+    _write_yaml_config(config_dir, {"tasks": [{"name": "t1", "prompt": "hi"}]})
+    (config_dir / "fixtures" / "t1").mkdir(parents=True)
+    runner = CliRunner()
+
+    with (
+        patch("eval.cli.validate_readiness", return_value=[]) as mock_validate,
+        patch("eval.cli.get_github_token", return_value="fake-token"),
+        patch("eval.cli._ensure_images"),
+        patch("eval.cli.run_one") as mock_run_one,
+    ):
+        mock_run_one.return_value = MagicMock(
+            status=MagicMock(value="success"),
+            task="t1",
+            variant="baseline",
+            epoch=1,
+            passed=True,
+            to_dict=lambda: {"status": "success"},
+        )
+        result = runner.invoke(
+            main,
+            ["run", "--config-dir", str(config_dir), "--task", "t1", *no_build_flag],
+        )
+
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_validate.call_args
+    assert kwargs["check_build"] is expected_check_build
+
+
 def test_cli_run_proceeds_despite_missing_fixture_warning(tmp_path: Path):
     """Regression test for the reviewer-flagged azure-skills `compliance-audit`
     scenario: a task with no fixture dir on disk (relying solely on a
     `before_run` hook) must still be allowed to run — a missing fixture is a
     warning, not a blocking pre-flight failure."""
     config_dir = tmp_path / "cfg"
-    _write_yaml_config(
-        config_dir, {"tasks": [{"name": "compliance-audit", "prompt": "audit"}]}
-    )
+    _write_yaml_config(config_dir, {"tasks": [{"name": "compliance-audit", "prompt": "audit"}]})
     runner = CliRunner()
 
     with (
@@ -593,7 +632,6 @@ def test_cli_run_proceeds_despite_missing_fixture_warning(tmp_path: Path):
                 str(config_dir),
                 "--task",
                 "compliance-audit",
-                "--no-build",
             ],
         )
 
@@ -629,4 +667,3 @@ def test_cli_run_skip_preflight_bypasses_checks_entirely(tmp_path: Path):
     assert result.exit_code == 0, result.output
     mock_validate.assert_not_called()
     assert "skipped" in result.output.lower()
-
