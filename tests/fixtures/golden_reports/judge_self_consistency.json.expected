@@ -553,6 +553,64 @@
           "significant": false
         }
       ],
+      "pass_k": [
+        {
+          "metric": "pass@5 (quality)",
+          "values": {
+            "a": 100.0,
+            "b": 100.0
+          },
+          "delta": "+0%",
+          "n": {
+            "a": 1,
+            "b": 1
+          },
+          "stddev": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "min": {
+            "a": 100.0,
+            "b": 100.0
+          },
+          "max": {
+            "a": 100.0,
+            "b": 100.0
+          },
+          "paired_n": 1,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        },
+        {
+          "metric": "pass^5 (quality)",
+          "values": {
+            "a": 100.0,
+            "b": 100.0
+          },
+          "delta": "+0%",
+          "n": {
+            "a": 1,
+            "b": 1
+          },
+          "stddev": {
+            "a": 0.0,
+            "b": 0.0
+          },
+          "min": {
+            "a": 100.0,
+            "b": 100.0
+          },
+          "max": {
+            "a": 100.0,
+            "b": 100.0
+          },
+          "paired_n": 1,
+          "ci_low": null,
+          "ci_high": null,
+          "significant": null
+        }
+      ],
       "judge_runtime": {
         "total": 10,
         "outcomes": {

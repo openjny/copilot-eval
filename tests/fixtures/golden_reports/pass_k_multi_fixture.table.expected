@@ -1,0 +1,60 @@
+
+================================================================================
+TASK: code_review
+================================================================================
+
+Samples: baseline=9, experimental=9; paired epochs=9
+
+Reliability
+Metric                             baseline      experimental
+------------------------------------------------------------
+Runs (traces)                             9                 9
+Success/failure rates     n/a (no manifest) n/a (no manifest)
+
+Variant            Epoch  Dur(s) Turns Spans Tools   In Tok  Out Tok    Cache TDur(s)   Cost($) thorough
+---------------------------------------------------------------------------------------------------
+baseline           fixA#1    10.0     3    15     2      800      250       50     1.5    0.0120        8
+baseline           fixA#2    10.0     3    15     2      800      250       50     1.5    0.0120        8
+baseline           fixA#3    10.0     3    15     2      800      250       50     1.5    0.0120        8
+baseline           fixB#1    10.0     3    15     2      800      250       50     1.5    0.0120        8
+baseline           fixB#2    10.0     3    15     2      800      250       50     1.5    0.0120        8
+baseline           fixB#3    10.0     3    15     2      800      250       50     1.5    0.0120        8
+baseline           fixC#1    10.0     3    15     2      800      250       50     1.5    0.0120        8
+baseline           fixC#2    10.0     3    15     2      800      250       50     1.5    0.0120        8
+baseline           fixC#3    10.0     3    15     2      800      250       50     1.5    0.0120        3
+experimental       fixA#1     9.0     3    15     2      800      250       50     1.5    0.0120        8
+experimental       fixA#2     9.0     3    15     2      800      250       50     1.5    0.0120        8
+experimental       fixA#3     9.0     3    15     2      800      250       50     1.5    0.0120        8
+experimental       fixB#1     9.0     3    15     2      800      250       50     1.5    0.0120        8
+experimental       fixB#2     9.0     3    15     2      800      250       50     1.5    0.0120        8
+experimental       fixB#3     9.0     3    15     2      800      250       50     1.5    0.0120        8
+experimental       fixC#1     9.0     3    15     2      800      250       50     1.5    0.0120        8
+experimental       fixC#2     9.0     3    15     2      800      250       50     1.5    0.0120        8
+experimental       fixC#3     9.0     3    15     2      800      250       50     1.5    0.0120        8
+
+Metrics (paired)
+Metric                                 baseline          experimental                      Delta
+----------------------------------------------------------------------------------------------
+Duration (s)                               10.0                   9.0 -10.0% [CI -1.0,-1.0 abs]*
+Turn count                                  3.0                   3.0 +0.0% [CI +0.0,+0.0 abs] ns
+Total spans                                15.0                  15.0 +0.0% [CI +0.0,+0.0 abs] ns
+Tool calls                                  2.0                   2.0 +0.0% [CI +0.0,+0.0 abs] ns
+Input tokens                              800.0                 800.0 +0.0% [CI +0.0,+0.0 abs] ns
+Output tokens                             250.0                 250.0 +0.0% [CI +0.0,+0.0 abs] ns
+Cache tokens                               50.0                  50.0 +0.0% [CI +0.0,+0.0 abs] ns
+Tool duration (s)                           1.5                   1.5 +0.0% [CI +0.0,+0.0 abs] ns
+Cost ($)                                 0.0120                0.0120 +0.0% [CI +0.0000,+0.0000 abs] ns
+
+Judge                                  baseline          experimental                      Delta
+----------------------------------------------------------------------------------------------
+thoroughness                           8.0 ±1.7                   8.0 +0.0% [CI +0.0,+0.0 abs] ns
+
+Pass@k / Pass^k                        baseline          experimental                      Delta
+----------------------------------------------------------------------------------------------
+pass@3 (thoroughness)                      100%                  100% +0% [CI +0%,+0% abs] low-n
+pass^3 (thoroughness)                  67% ±58%                  100% +33% [CI +0%,+100% abs] low-n
+
+Judge runtime
+  Outcomes (18): ok=18
+
+Legend: value ±stddev; Delta is a percentage, [CI low,high abs] is a bootstrap interval of the paired delta in absolute metric units; * = CI excludes 0 (statistically supported), ns = not supported (observed only), low-n = fewer than 5 paired samples (significance not assessed). No multiple-comparison correction applied.

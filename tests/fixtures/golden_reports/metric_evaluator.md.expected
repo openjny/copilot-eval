@@ -35,6 +35,15 @@
 | lint_pass | 1.0 | 1.0 ±0.5 | +0.0% [CI -1.0,+0.0 abs] ns |
 | quality | 7.0 ±0.4 | 8.0 ±0.4 | +14.3% [CI +1.0,+3.0 abs]* |
 
+### Pass@k / Pass^k Reliability
+
+| Metric | base | new | Delta |
+|--------|--------:|--------:|------:|
+| pass@5 (lint_pass) | 100% | 100% | +0% |
+| pass^5 (lint_pass) | 100% | 0% | -100% |
+| pass@5 (quality) | 100% | 100% | +0% |
+| pass^5 (quality) | 100% | 100% | +0% |
+
 ### Judge Runtime
 
 - Outcomes (10): `ok`=10

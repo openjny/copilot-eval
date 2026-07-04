@@ -343,6 +343,7 @@
         }
       },
       "judge_scores": [],
+      "pass_k": [],
       "judge_runtime": {}
     }
   ]
