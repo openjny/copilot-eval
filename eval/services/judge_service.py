@@ -11,6 +11,7 @@ scores.
 from __future__ import annotations
 
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ import click
 from eval.config import Config
 from eval.evaluators import JudgeEvaluator
 from eval.naming import run_slug
+from eval.progress import NullProgress, ProgressReporter
 from eval.protocols import EvalContext
 from eval.runner import get_github_token, read_files_from_dir, run_judges_batch, score_to_dict
 from eval.trace import Trace, extract_conversation
@@ -31,14 +33,20 @@ def _is_truncated(text: str | None) -> bool:
 
 
 def _run_judges(
-    config: Config, traces: list[Trace], results_dir: Path, force: bool = False
+    config: Config,
+    traces: list[Trace],
+    results_dir: Path,
+    force: bool = False,
+    reporter: ProgressReporter | None = None,
 ) -> None:
     """Run judge evaluators using OTel traces + output files.
 
     Skips judge evaluators that already have a recorded score (judge presence,
     not file existence — non-judge scores share the same file). Pass force=True
-    to re-run every judge regardless of cached scores.
+    to re-run every judge regardless of cached scores. ``reporter`` (default: a
+    silent :class:`NullProgress`) receives per-call progress events.
     """
+    reporter = reporter or NullProgress()
     github_token = get_github_token()
     tasks_by_name = {t.name: t for t in config.tasks}
 
@@ -162,10 +170,9 @@ def _run_judges(
         ctx = contexts[key]
         label = ", ".join(ev.name for ev in evs)
         fx = f"/{ctx['fixture']}" if ctx.get("fixture") else ""
-        click.echo(
-            f"    [{ctx['scenario']}{fx}/{ctx['variant']}/e{ctx['epoch']}] Evaluating: {label} (judge)...",
-            err=True,
-        )
+        cell_name = f"{ctx['scenario']}{fx}/{ctx['variant']}/e{ctx['epoch']}: {label}"
+        reporter.cell_started(cell_name)
+        reporter.notice(f"    [{cell_name}] Evaluating (judge)...")
         extra_meta = {"truncation": ctx["truncation"]} if ctx["truncation"] else None
         if config.runner.judge_batch and len(evs) > 1:
             scored = run_judges_batch(
@@ -194,41 +201,55 @@ def _run_judges(
             scored = [score]
         for s in scored:
             if s.score is not None:
-                click.echo(f"    ✓ {s.name}: {s.score} — {s.reason[:60]}", err=True)
+                reporter.notice(f"    ✓ {s.name}: {s.score} — {s.reason[:60]}")
             else:
-                click.echo(f"    ! {s.name}: {s.reason}", err=True)
+                reporter.notice(f"    ! {s.name}: {s.reason}")
         return key, [score_to_dict(s) for s in scored]
 
-    with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
-        futures = {pool.submit(_judge, key, evs): (key, evs) for key, evs in work}
-        for future in as_completed(futures):
-            key, evs = futures[future]
-            try:
-                key, scores = future.result()
-            except Exception as exc:  # never let one judge abort the whole batch
-                click.echo(f"    ! {', '.join(ev.name for ev in evs)}: error — {exc}", err=True)
-                n = max(1, config.runner.judge_samples)
-                scores = [
-                    {
-                        "name": ev.name,
-                        "type": "judge",
-                        "score": None,
-                        "reason": f"error: {exc}",
-                        "passed": False,
-                        "samples": [],
-                        "score_stddev": None,
-                        "n_samples": n,
-                        "outcomes": {"ok": 0, "parse_error": 0, "timeout": 0, "error": n},
-                        "judge_model": config.runner.judge_model,
-                        "judge_version": None,
-                    }
-                    for ev in evs
-                ]
-            ctx = contexts[key]
-            ctx["scores"].extend(scores)
-            ctx["remaining"] -= len(scores)
-            if ctx["remaining"] <= 0:
-                _write_ctx(ctx)
+    reporter.start(len(work), label="judge scoring", workers=config.runner.max_workers)
+    try:
+        with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
+            futures = {
+                pool.submit(_judge, key, evs): (key, evs, time.monotonic()) for key, evs in work
+            }
+            for future in as_completed(futures):
+                key, evs, started = futures[future]
+                fx = f"/{contexts[key]['fixture']}" if contexts[key].get("fixture") else ""
+                cell_name = (
+                    f"{contexts[key]['scenario']}{fx}/{contexts[key]['variant']}"
+                    f"/e{contexts[key]['epoch']}: {', '.join(ev.name for ev in evs)}"
+                )
+                duration = time.monotonic() - started
+                try:
+                    key, scores = future.result()
+                    reporter.cell_completed(cell_name, duration=duration, status="scored")
+                except Exception as exc:  # never let one judge abort the whole batch
+                    reporter.notice(f"    ! {', '.join(ev.name for ev in evs)}: error — {exc}")
+                    reporter.cell_failed(cell_name, duration=duration, reason=str(exc))
+                    n = max(1, config.runner.judge_samples)
+                    scores = [
+                        {
+                            "name": ev.name,
+                            "type": "judge",
+                            "score": None,
+                            "reason": f"error: {exc}",
+                            "passed": False,
+                            "samples": [],
+                            "score_stddev": None,
+                            "n_samples": n,
+                            "outcomes": {"ok": 0, "parse_error": 0, "timeout": 0, "error": n},
+                            "judge_model": config.runner.judge_model,
+                            "judge_version": None,
+                        }
+                        for ev in evs
+                    ]
+                ctx = contexts[key]
+                ctx["scores"].extend(scores)
+                ctx["remaining"] -= len(scores)
+                if ctx["remaining"] <= 0:
+                    _write_ctx(ctx)
+    finally:
+        reporter.finish()
 
 
 def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path) -> None:

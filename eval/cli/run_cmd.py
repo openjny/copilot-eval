@@ -26,6 +26,11 @@ from eval.services.orchestrator import run_command
     is_flag=True,
     help="Skip pre-flight readiness checks (Docker/auth/fixtures/disk space)",
 )
+@click.option(
+    "--no-progress",
+    is_flag=True,
+    help="Disable live progress reporting (progress bar / per-cell status)",
+)
 @click.option("--config-dir", default=None, type=click.Path(exists=True), help="Project directory")
 def run(
     task: str | None,
@@ -33,6 +38,7 @@ def run(
     dry_run: bool,
     no_build: bool,
     skip_preflight: bool,
+    no_progress: bool,
     config_dir: str | None,
 ) -> None:
     """Run A/B eval for one or more tasks."""
@@ -45,4 +51,5 @@ def run(
         no_build=no_build,
         skip_preflight=skip_preflight,
         config_dir=config_dir,
+        no_progress=no_progress,
     )

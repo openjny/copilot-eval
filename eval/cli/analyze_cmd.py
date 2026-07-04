@@ -57,6 +57,11 @@ from eval.services.analyze_service import run_analysis
         "65KB comment limit -- pipe straight into `gh pr comment --body`."
     ),
 )
+@click.option(
+    "--no-progress",
+    is_flag=True,
+    help="Disable live progress reporting for judge scoring",
+)
 def analyze(
     run_id: str,
     output: str,
@@ -68,6 +73,7 @@ def analyze(
     min_epochs: int | None,
     no_mc_correction: bool,
     compact: bool,
+    no_progress: bool,
 ) -> None:
     """Analyze traces from a previous eval run."""
     run_analysis(
@@ -81,4 +87,5 @@ def analyze(
         min_epochs=min_epochs,
         mc_correction="none" if no_mc_correction else "holm",
         compact=compact,
+        no_progress=no_progress,
     )

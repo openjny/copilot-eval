@@ -521,6 +521,18 @@ A script that validates the environment is ready before running Copilot. If it e
 
 During `analyze`, judge evaluators are always run in parallel across traces (up to `max_workers`), independent of the `parallel` mode above. Each judge's Copilot invocation is bounded by `judge_timeout_seconds`. Scores files are written per trace, so parallel judging does not cause write conflicts.
 
+## Progress Reporting
+
+`run` and `analyze` show live progress so a 30+ minute parallel matrix isn't a silent black box:
+
+- **Interactive terminal (TTY) with `rich` installed**: a live progress bar with percentage and ETA, plus a rolling list of per-cell status (`✓ completed`, `✗ failed`, `● running`). ETA is derived from the average duration of completed cells, divided by the effective concurrency (`max_workers`, or fewer if there are fewer tasks/variants to fill them).
+- **Non-TTY (CI logs, pipes) or `rich` not installed**: one compact log line per completed/failed cell, e.g. `[12/40] completed: code-review/baseline/e1 (23s, completed)` or `[13/40] FAILED: code-review/baseline/e2 (timeout after 300s)`.
+- **`analyze`** shows the same style of progress for judge scoring calls.
+
+`rich` is an optional dependency (`pip install copilot-eval[progress]` / `uv sync --extra progress`); without it, output falls back to the plain log-line format even on a TTY.
+
+Pass `--no-progress` to `run` or `analyze` to disable all progress output (useful for scripts that parse stdout, or to keep logs minimal).
+
 ## Variant Order (reducing measurement bias)
 
 In serial (`off`) and `per_task` modes, variants run one after another within each epoch. Always running them in the same order lets order effects (cache warmup, rate limits, time-of-day drift) accumulate on whichever variant runs first. `runner.variant_order` controls how variants are ordered per epoch:
