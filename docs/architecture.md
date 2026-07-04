@@ -215,7 +215,13 @@ surfaces its own uncertainty:
   supported); `ns` marks an *observed only* delta whose CI includes 0.
 - **Insufficient-data warnings**: when a variant's `n` or the paired epoch count
   is below `MIN_RELIABLE_N` (5), the report warns that deltas are observed, not
-  statistically supported.
+  statistically supported. Below that threshold, the report also renders a
+  **low statistical power banner**: an approximate (dependency-free, no scipy)
+  power estimate at Cohen's d = 0.2/0.5/0.8, so a "no significant difference"
+  result at N=3 isn't mistaken for "no effect" when the run was simply
+  underpowered to detect one. `analyze --min-epochs N` turns this into a hard
+  CI gate, exiting non-zero when a task has fewer than `N` paired epochs (or
+  per-variant samples, for non-paired aggregates).
 
 ### Reliability (anti-survivorship-bias)
 

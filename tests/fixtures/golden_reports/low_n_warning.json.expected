@@ -13,8 +13,27 @@
       },
       "paired_n": 2,
       "warnings": [
-        "Small sample size (n<5): a=3, b=2. Treat deltas as observed, not statistically supported.",
-        "Only 2 paired epoch(s) (<5); paired deltas and confidence intervals are low-confidence."
+        {
+          "type": "small_sample_size",
+          "message": "Small sample size (n<5): a=3, b=2. Treat deltas as observed, not statistically supported.",
+          "variant_n": {
+            "a": 3,
+            "b": 2
+          },
+          "min_reliable_n": 5
+        },
+        {
+          "type": "low_power",
+          "message": "⚠️  LOW STATISTICAL POWER: N=2 paired epochs. Minimum recommended: N=5 for exploratory, N=10+ for CI gates.\n    Current power at d=0.5 (medium effect): 11% — 89% chance of missing a real difference.\n    Run with --epochs 10 for reliable conclusions.",
+          "paired_n": 2,
+          "min_reliable_n": 5,
+          "ci_gate_recommended_n": 10,
+          "power": {
+            "0.2": 0.05921402610801335,
+            "0.5": 0.10895461746167079,
+            "0.8": 0.20466363093931922
+          }
+        }
       ],
       "reliability": [
         {

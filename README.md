@@ -64,7 +64,7 @@ uv run copilot-eval --log-level warning --log-format json run --config-dir examp
 | `validate --config-dir <dir>` | Check config schema, fixtures, script/variant references, and var interpolation (warnings for non-blocking issues, e.g. missing optional fixtures) |
 | `build --config-dir <dir> [--variant NAME]` | Build Docker images |
 | `run --config-dir <dir> [--task NAME] [--epochs N] [--dry-run] [--no-build] [--skip-preflight]` | Execute eval runs (fails fast on pre-flight checks before any Docker work; `--skip-preflight` bypasses those checks entirely) |
-| `analyze --run-id <ID> [--config-dir <dir>] [-o table\|json\|markdown] [-a paired\|median\|mean] [--jaeger-url URL] [--skip-eval] [--re-eval]` | Analyze results |
+| `analyze --run-id <ID> [--config-dir <dir>] [-o table\|json\|markdown] [-a paired\|median\|mean] [--jaeger-url URL] [--skip-eval] [--re-eval] [--min-epochs N]` | Analyze results (`--min-epochs` exits non-zero if a task has fewer than `N` paired epochs — a CI gate for statistical power) |
 
 ## Examples
 

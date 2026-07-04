@@ -561,3 +561,52 @@ def test_analyze_exits_nonzero_when_one_fixture_fails_metric_gate(tmp_path: Path
     assert result.exit_code != 0
     assert "Metric gate failed" in result.output
     assert "fixB" in result.output
+
+
+# --- analyze --min-epochs (statistical power CI gate) ---
+
+
+def test_analyze_exits_nonzero_when_below_min_epochs(tmp_path: Path, monkeypatch):
+    from click.testing import CliRunner
+
+    from eval import cli
+
+    # budget_threshold=0.5 keeps the metric gate passing so only --min-epochs
+    # decides the exit code below.
+    run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.5)
+
+    result = CliRunner().invoke(
+        cli.main, ["analyze", "--run-id", run_id, "--skip-eval", "--min-epochs", "2"]
+    )
+
+    assert result.exit_code != 0
+    assert "Insufficient epochs" in result.output
+    assert "n=1" in result.output
+
+
+def test_analyze_exits_zero_when_min_epochs_satisfied(tmp_path: Path, monkeypatch):
+    from click.testing import CliRunner
+
+    from eval import cli
+
+    run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.5)
+
+    result = CliRunner().invoke(
+        cli.main, ["analyze", "--run-id", run_id, "--skip-eval", "--min-epochs", "1"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Insufficient epochs" not in result.output
+
+
+def test_analyze_min_epochs_omitted_does_not_gate(tmp_path: Path, monkeypatch):
+    """Without --min-epochs, a low sample size must not affect the exit code."""
+    from click.testing import CliRunner
+
+    from eval import cli
+
+    run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.5)
+
+    result = CliRunner().invoke(cli.main, ["analyze", "--run-id", run_id, "--skip-eval"])
+
+    assert result.exit_code == 0, result.output

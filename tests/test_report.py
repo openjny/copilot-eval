@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import json
 
-from eval.report import _aggregate_values, _epoch_sort_key, _load_judge_raw, build_report
+from eval.report import (
+    MIN_RELIABLE_N,
+    _aggregate_values,
+    _approx_power,
+    _epoch_sort_key,
+    _load_judge_raw,
+    build_report,
+)
 from tests.conftest import make_metrics
 
 # --- Paired aggregation pairs by epoch key, not list index ---
@@ -489,8 +496,12 @@ def test_small_sample_warning_emitted():
         make_metrics("t1", "b", "1"),
     ]
     reports = build_report(results, variant_order=["a", "b"], aggregate="paired")
-    assert any("Small sample size" in w for w in reports[0].warnings)
-    assert any("paired epoch" in w for w in reports[0].warnings)
+    messages = [w["message"] for w in reports[0].warnings]
+    assert any("Small sample size" in m for m in messages)
+    assert any(w["type"] == "low_power" for w in reports[0].warnings)
+    low_power = next(w for w in reports[0].warnings if w["type"] == "low_power")
+    assert low_power["paired_n"] == 1
+    assert "0.5" in low_power["power"]
 
 
 def test_no_warning_with_enough_samples():
@@ -500,6 +511,43 @@ def test_no_warning_with_enough_samples():
         results.append(make_metrics("t1", "b", str(e), duration=float(e) + 1))
     reports = build_report(results, variant_order=["a", "b"], aggregate="paired")
     assert reports[0].warnings == []
+
+
+# --- Power approximation ---
+
+
+def test_approx_power_increases_with_n_and_effect_size():
+    # Power should monotonically increase as N grows for a fixed effect size...
+    powers_by_n = [_approx_power(n, 0.5) for n in (2, 5, 10, 30)]
+    assert powers_by_n == sorted(powers_by_n)
+    # ...and as the effect size grows for a fixed N.
+    powers_by_d = [_approx_power(10, d) for d in (0.2, 0.5, 0.8)]
+    assert powers_by_d == sorted(powers_by_d)
+
+
+def test_approx_power_bounds():
+    assert _approx_power(1, 0.5) == 0.0  # undefined below n=2
+    for n in (2, 3, 5, 10, 50):
+        for d in (0.2, 0.5, 0.8, 2.0):
+            p = _approx_power(n, d)
+            assert 0.0 <= p <= 1.0
+
+
+def test_low_power_warning_includes_power_for_medium_effect():
+    results = [
+        make_metrics("t1", "a", "1"),
+        make_metrics("t1", "a", "2"),
+        make_metrics("t1", "a", "3"),
+        make_metrics("t1", "b", "1"),
+        make_metrics("t1", "b", "2"),
+        make_metrics("t1", "b", "3"),
+    ]
+    reports = build_report(results, variant_order=["a", "b"], aggregate="paired")
+    assert reports[0].paired_n == 3 < MIN_RELIABLE_N
+    low_power = next(w for w in reports[0].warnings if w["type"] == "low_power")
+    assert set(low_power["power"]) == {"0.2", "0.5", "0.8"}
+    assert "LOW STATISTICAL POWER" in low_power["message"]
+    assert "N=3 paired epochs" in low_power["message"]
 
 
 # --- Reliability (survivorship bias) ---

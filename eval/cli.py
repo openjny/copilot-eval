@@ -22,7 +22,7 @@ from eval.evaluators import load_evaluator_plugins
 from eval.logging_config import LOG_FORMATS, LOG_LEVELS, configure_logging
 from eval.naming import run_slug
 from eval.protocols import EvalContext, RunContext, RunStatus
-from eval.report import build_report, format_json, format_markdown, format_table
+from eval.report import Report, build_report, format_json, format_markdown, format_table
 from eval.runner import RunResult, get_github_token, run_one
 from eval.trace import (
     RunMetrics,
@@ -476,6 +476,18 @@ def run(
     click.echo("=" * 50)
 
 
+def _gate_epochs(report: Report) -> int:
+    """Epoch count `--min-epochs` should gate on.
+
+    Paired reports gate on the shared paired-epoch count (the number of
+    deltas actually being compared); everything else (single variant, or
+    median/mean aggregate) falls back to the smallest per-variant sample.
+    """
+    if report.aggregate == "paired" and len(report.variants) == 2:
+        return report.paired_n
+    return min(report.variant_n.values(), default=0)
+
+
 @main.command()
 @click.option("--run-id", required=True, help="Run ID to analyze")
 @click.option(
@@ -498,6 +510,15 @@ def run(
 @click.option(
     "--re-eval", is_flag=True, help="Force re-run judge evaluation (ignore cached scores)"
 )
+@click.option(
+    "--min-epochs",
+    type=int,
+    default=None,
+    help=(
+        "CI gate: exit non-zero if any task has fewer than N (paired) epochs. "
+        "Use e.g. --min-epochs 10 to require enough data for reliable conclusions."
+    ),
+)
 def analyze(
     run_id: str,
     output: str,
@@ -506,6 +527,7 @@ def analyze(
     config_dir: str | None,
     skip_eval: bool,
     re_eval: bool,
+    min_epochs: int | None,
 ) -> None:
     """Analyze traces from a previous eval run."""
     config = load_config(Path(config_dir) if config_dir else None)
@@ -577,12 +599,26 @@ def analyze(
     formatters = {"table": format_table, "json": format_json, "markdown": format_markdown}
     click.echo(formatters[output](reports))
 
+    gate_failures: list[str] = []
+
     # CI gating: fail the command (non-zero exit) when any metric gate did not
     # pass, so a regression in cost/latency/tokens can block a merge. Runs with no
     # metric evaluators never populate failed_gates, so they stay exit 0.
     if failed_gates:
-        summary = "; ".join(failed_gates)
-        raise click.ClickException(f"Metric gate failed: {summary}")
+        gate_failures.append(f"Metric gate failed: {'; '.join(failed_gates)}")
+
+    if min_epochs is not None:
+        underpowered = [
+            f"{r.task} (n={_gate_epochs(r)})" for r in reports if _gate_epochs(r) < min_epochs
+        ]
+        if underpowered:
+            gate_failures.append(
+                f"Insufficient epochs (< {min_epochs}) for reliable conclusions: "
+                f"{', '.join(underpowered)}"
+            )
+
+    if gate_failures:
+        raise click.ClickException("\n".join(gate_failures))
 
 
 def _fetch_traces_for_run(
