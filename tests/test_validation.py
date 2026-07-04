@@ -527,12 +527,12 @@ def test_cli_run_fails_fast_on_preflight_without_touching_docker(tmp_path: Path)
 
     with (
         patch(
-            "eval.cli.validate_readiness",
+            "eval.services.orchestrator.validate_readiness",
             return_value=[MagicMock(passed=False, format=lambda: "  ✗ docker_daemon: down")],
         ),
-        patch("eval.cli._ensure_images") as mock_ensure_images,
-        patch("eval.cli._ensure_jaeger") as mock_ensure_jaeger,
-        patch("eval.cli.get_github_token") as mock_token,
+        patch("eval.services.orchestrator._ensure_images") as mock_ensure_images,
+        patch("eval.services.orchestrator._ensure_jaeger") as mock_ensure_jaeger,
+        patch("eval.services.orchestrator.get_github_token") as mock_token,
     ):
         result = runner.invoke(main, ["run", "--config-dir", str(config_dir), "--task", "t1"])
 
@@ -548,7 +548,7 @@ def test_cli_run_dry_run_skips_preflight(tmp_path: Path):
     _write_yaml_config(config_dir, {"tasks": [{"name": "t1", "prompt": "hi"}]})
     runner = CliRunner()
 
-    with patch("eval.cli.validate_readiness") as mock_validate:
+    with patch("eval.services.orchestrator.validate_readiness") as mock_validate:
         result = runner.invoke(
             main, ["run", "--config-dir", str(config_dir), "--task", "t1", "--dry-run"]
         )
@@ -576,10 +576,10 @@ def test_cli_run_check_build_matches_no_build_flag(
     runner = CliRunner()
 
     with (
-        patch("eval.cli.validate_readiness", return_value=[]) as mock_validate,
-        patch("eval.cli.get_github_token", return_value="fake-token"),
-        patch("eval.cli._ensure_images"),
-        patch("eval.cli.run_one") as mock_run_one,
+        patch("eval.services.orchestrator.validate_readiness", return_value=[]) as mock_validate,
+        patch("eval.services.orchestrator.get_github_token", return_value="fake-token"),
+        patch("eval.services.orchestrator._ensure_images"),
+        patch("eval.services.orchestrator.run_one") as mock_run_one,
     ):
         mock_run_one.return_value = MagicMock(
             status=MagicMock(value="success"),
@@ -612,9 +612,9 @@ def test_cli_run_proceeds_despite_missing_fixture_warning(tmp_path: Path):
         patch("eval.validation.check_docker_daemon", return_value=MagicMock(passed=True)),
         patch("eval.validation.check_github_token", return_value=MagicMock(passed=True)),
         patch("eval.validation.check_disk_space", return_value=MagicMock(passed=True)),
-        patch("eval.cli.get_github_token", return_value="fake-token"),
-        patch("eval.cli._ensure_images"),
-        patch("eval.cli.run_one") as mock_run_one,
+        patch("eval.services.orchestrator.get_github_token", return_value="fake-token"),
+        patch("eval.services.orchestrator._ensure_images"),
+        patch("eval.services.orchestrator.run_one") as mock_run_one,
     ):
         mock_run_one.return_value = MagicMock(
             status=MagicMock(value="success"),
@@ -646,10 +646,10 @@ def test_cli_run_skip_preflight_bypasses_checks_entirely(tmp_path: Path):
     runner = CliRunner()
 
     with (
-        patch("eval.cli.validate_readiness") as mock_validate,
-        patch("eval.cli.get_github_token", return_value="fake-token"),
-        patch("eval.cli._ensure_images"),
-        patch("eval.cli.run_one") as mock_run_one,
+        patch("eval.services.orchestrator.validate_readiness") as mock_validate,
+        patch("eval.services.orchestrator.get_github_token", return_value="fake-token"),
+        patch("eval.services.orchestrator._ensure_images"),
+        patch("eval.services.orchestrator.run_one") as mock_run_one,
     ):
         mock_run_one.return_value = MagicMock(
             status=MagicMock(value="success"),

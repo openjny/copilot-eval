@@ -81,7 +81,8 @@ copilot-eval/
 ├── eval/                  # Framework
 │   ├── __init__.py        # Package marker
 │   ├── __main__.py        # `python -m eval` entry
-│   ├── cli.py             # CLI entry point
+│   ├── cli/               # Click CLI, routing only (list/build/run/analyze/validate)
+│   ├── services/          # Business logic (orchestrator, judge_service, build_service, ...)
 │   ├── config.py          # Config loading
 │   ├── runner.py          # Docker execution + evaluators
 │   ├── trace.py           # Jaeger trace parsing

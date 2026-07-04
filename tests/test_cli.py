@@ -6,14 +6,11 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from eval.cli import (
-    _collect_file_traces,
-    _ordering_rng,
-    _run_metric_evaluators,
-    main,
-    order_variants,
-)
+from eval.cli import main
 from eval.config import Config, RunnerConfig, Variant
+from eval.services.metrics_service import _run_metric_evaluators
+from eval.services.orchestrator import _ordering_rng, order_variants
+from eval.services.trace_service import _collect_file_traces
 
 FIXTURE = Path(__file__).parent / "fixtures" / "file-exporter-sample.jsonl"
 
@@ -472,25 +469,25 @@ def _patch_analyze(
     tmp_path: Path, monkeypatch, budget_threshold: float, create_results_dir: bool = True
 ) -> str:
     """Point analyze at a tmp-rooted config + results dir with a synthetic trace."""
-    from eval import cli
+    from eval.services import analyze_service
 
     run_id = "run-1"
     config = _analyze_gate_config(tmp_path, budget_threshold)
     if create_results_dir:
         (config.results_dir / run_id).mkdir(parents=True)
-    monkeypatch.setattr(cli, "load_config", lambda *a, **k: config)
-    monkeypatch.setattr(cli, "_collect_file_traces", lambda *a, **k: [_metric_trace()])
+    monkeypatch.setattr(analyze_service, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr(analyze_service, "_collect_file_traces", lambda *a, **k: [_metric_trace()])
     return run_id
 
 
 def test_analyze_exits_nonzero_when_metric_gate_fails(tmp_path: Path, monkeypatch):
     from click.testing import CliRunner
 
-    from eval import cli
+    from eval.cli import main
 
     run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.3)
 
-    result = CliRunner().invoke(cli.main, ["analyze", "--run-id", run_id, "--skip-eval"])
+    result = CliRunner().invoke(main, ["analyze", "--run-id", run_id, "--skip-eval"])
 
     assert result.exit_code != 0
     assert "Metric gate failed" in result.output
@@ -500,11 +497,11 @@ def test_analyze_exits_nonzero_when_metric_gate_fails(tmp_path: Path, monkeypatc
 def test_analyze_exits_zero_when_metric_gate_passes(tmp_path: Path, monkeypatch):
     from click.testing import CliRunner
 
-    from eval import cli
+    from eval.cli import main
 
     run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.5)
 
-    result = CliRunner().invoke(cli.main, ["analyze", "--run-id", run_id, "--skip-eval"])
+    result = CliRunner().invoke(main, ["analyze", "--run-id", run_id, "--skip-eval"])
 
     assert result.exit_code == 0, result.output
     assert "Metric gate failed" not in result.output
@@ -513,13 +510,13 @@ def test_analyze_exits_zero_when_metric_gate_passes(tmp_path: Path, monkeypatch)
 def test_analyze_gate_runs_without_preexisting_results_dir(tmp_path: Path, monkeypatch):
     from click.testing import CliRunner
 
-    from eval import cli
+    from eval.cli import main
 
     # results/<run_id> does NOT exist (e.g. `run` and `analyze` in separate CI jobs).
     # Metric gating must still run and fail the command, not silently exit 0.
     run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.3, create_results_dir=False)
 
-    result = CliRunner().invoke(cli.main, ["analyze", "--run-id", run_id, "--skip-eval"])
+    result = CliRunner().invoke(main, ["analyze", "--run-id", run_id, "--skip-eval"])
 
     assert result.exit_code != 0
     assert "Metric gate failed" in result.output
@@ -531,8 +528,9 @@ def test_analyze_exits_nonzero_when_one_fixture_fails_metric_gate(tmp_path: Path
     make `analyze` exit non-zero — the failing fixture is not masked by the passer."""
     from click.testing import CliRunner
 
-    from eval import cli
+    from eval.cli import main
     from eval.config import Evaluator, Task
+    from eval.services import analyze_service
 
     run_id = "run-1"
     task = Task(
@@ -553,10 +551,10 @@ def test_analyze_exits_nonzero_when_one_fixture_fails_metric_gate(tmp_path: Path
     )
     (config.results_dir / run_id).mkdir(parents=True)
     traces = [_metric_trace_fx("fixA", 42.0), _metric_trace_fx("fixB", 90.0)]
-    monkeypatch.setattr(cli, "load_config", lambda *a, **k: config)
-    monkeypatch.setattr(cli, "_collect_file_traces", lambda *a, **k: traces)
+    monkeypatch.setattr(analyze_service, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr(analyze_service, "_collect_file_traces", lambda *a, **k: traces)
 
-    result = CliRunner().invoke(cli.main, ["analyze", "--run-id", run_id, "--skip-eval"])
+    result = CliRunner().invoke(main, ["analyze", "--run-id", run_id, "--skip-eval"])
 
     assert result.exit_code != 0
     assert "Metric gate failed" in result.output

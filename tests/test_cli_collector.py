@@ -38,11 +38,11 @@ class TestRunCollectorSwitching:
         runner = CliRunner()
 
         with (
-            patch("eval.cli._ensure_jaeger") as mock_ensure,
-            patch("eval.cli.get_github_token", return_value="fake-token"),
-            patch("eval.cli._ensure_images"),
-            patch("eval.cli.validate_readiness", return_value=[]),
-            patch("eval.cli.run_one") as mock_run_one,
+            patch("eval.services.orchestrator._ensure_jaeger") as mock_ensure,
+            patch("eval.services.orchestrator.get_github_token", return_value="fake-token"),
+            patch("eval.services.orchestrator._ensure_images"),
+            patch("eval.services.orchestrator.validate_readiness", return_value=[]),
+            patch("eval.services.orchestrator.run_one") as mock_run_one,
         ):
             mock_run_one.return_value = MagicMock(
                 status=MagicMock(value="success"),
@@ -69,11 +69,11 @@ class TestRunCollectorSwitching:
         runner = CliRunner()
 
         with (
-            patch("eval.cli._ensure_jaeger") as mock_ensure,
-            patch("eval.cli.get_github_token", return_value="fake-token"),
-            patch("eval.cli._ensure_images"),
-            patch("eval.cli.validate_readiness", return_value=[]),
-            patch("eval.cli.run_one") as mock_run_one,
+            patch("eval.services.orchestrator._ensure_jaeger") as mock_ensure,
+            patch("eval.services.orchestrator.get_github_token", return_value="fake-token"),
+            patch("eval.services.orchestrator._ensure_images"),
+            patch("eval.services.orchestrator.validate_readiness", return_value=[]),
+            patch("eval.services.orchestrator.run_one") as mock_run_one,
         ):
             mock_run_one.return_value = MagicMock(
                 status=MagicMock(value="success"),
@@ -109,9 +109,11 @@ class TestAnalyzeCollectorRouting:
         runner = CliRunner()
 
         with (
-            patch("eval.cli._collect_file_traces", return_value=[]) as mock_file,
-            patch("eval.cli._ensure_jaeger") as mock_ensure,
-            patch("eval.cli._fetch_traces_for_run") as mock_jaeger_fetch,
+            patch(
+                "eval.services.analyze_service._collect_file_traces", return_value=[]
+            ) as mock_file,
+            patch("eval.services.analyze_service._ensure_jaeger") as mock_ensure,
+            patch("eval.services.analyze_service._fetch_traces_for_run") as mock_jaeger_fetch,
         ):
             runner.invoke(
                 main,
@@ -134,9 +136,11 @@ class TestAnalyzeCollectorRouting:
         runner = CliRunner()
 
         with (
-            patch("eval.cli._collect_file_traces") as mock_file,
-            patch("eval.cli._ensure_jaeger") as mock_ensure,
-            patch("eval.cli._fetch_traces_for_run", return_value=[]) as mock_jaeger_fetch,
+            patch("eval.services.analyze_service._collect_file_traces") as mock_file,
+            patch("eval.services.analyze_service._ensure_jaeger") as mock_ensure,
+            patch(
+                "eval.services.analyze_service._fetch_traces_for_run", return_value=[]
+            ) as mock_jaeger_fetch,
         ):
             runner.invoke(
                 main,
@@ -159,9 +163,11 @@ class TestAnalyzeCollectorRouting:
         runner = CliRunner()
 
         with (
-            patch("eval.cli._collect_file_traces") as mock_file,
-            patch("eval.cli._ensure_jaeger") as mock_ensure,
-            patch("eval.cli._fetch_traces_for_run", return_value=[]) as mock_jaeger_fetch,
+            patch("eval.services.analyze_service._collect_file_traces") as mock_file,
+            patch("eval.services.analyze_service._ensure_jaeger") as mock_ensure,
+            patch(
+                "eval.services.analyze_service._fetch_traces_for_run", return_value=[]
+            ) as mock_jaeger_fetch,
         ):
             runner.invoke(
                 main,
