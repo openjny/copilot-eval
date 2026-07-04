@@ -9,6 +9,7 @@ import subprocess
 import time
 import uuid
 from datetime import datetime
+from logging import getLogger
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ import requests
 
 from eval.collectors import create_collector
 from eval.config import Config, Task, Variant, load_config
+from eval.logging_config import LOG_FORMATS, LOG_LEVELS, configure_logging
 from eval.protocols import RunContext, RunStatus
 from eval.report import build_report, format_json, format_markdown, format_table
 from eval.runner import RunResult, get_github_token, run_one
@@ -28,6 +30,8 @@ from eval.trace import (
     fetch_traces,
     filter_by_run,
 )
+
+logger = getLogger(__name__)
 
 
 def _ensure_jaeger(config: Config, jaeger_url: str | None = None) -> None:
@@ -132,8 +136,27 @@ def _load_manifest(results_dir: Path) -> list[dict[str, Any]] | None:
 
 
 @click.group()
-def main() -> None:
+@click.option(
+    "--log-level",
+    default=None,
+    type=click.Choice(LOG_LEVELS, case_sensitive=False),
+    help="Diagnostic log level (default: INFO or $EVAL_LOG_LEVEL).",
+)
+@click.option(
+    "--log-format",
+    default=None,
+    type=click.Choice(LOG_FORMATS, case_sensitive=False),
+    help="Diagnostic log format (default: plain or $EVAL_LOG_FORMAT).",
+)
+def main(log_level: str | None, log_format: str | None) -> None:
     """Copilot CLI A/B evaluation framework."""
+    try:
+        configure_logging(log_level, log_format)
+    except ValueError as exc:
+        # Invalid EVAL_LOG_LEVEL / EVAL_LOG_FORMAT env vars reach here (the CLI
+        # flags are already guarded by click.Choice). Surface a clean usage error
+        # (exit code 2, matching click.Choice) instead of an uncaught traceback.
+        raise click.UsageError(str(exc)) from exc
 
 
 def _safe_run_one(
@@ -156,7 +179,7 @@ def _safe_run_one(
     try:
         return run_one(task, variant, epoch, config, run_id, run_dir, github_token, order_index)
     except Exception as exc:  # noqa: BLE001 - isolate per-run failures from the batch
-        click.echo(f"    ✗ [{task.name}] epoch={epoch} variant={variant.name} errored: {exc}")
+        logger.error("[%s] epoch=%s variant=%s errored: %s", task.name, epoch, variant.name, exc)
         return RunResult(
             task=task.name,
             variant=variant.name,

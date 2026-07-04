@@ -35,6 +35,23 @@ uv run copilot-eval analyze --run-id <RUN_ID> --config-dir examples/prompt-langu
 uv run copilot-eval <command> [options]
 ```
 
+Global options (before the command) control diagnostic logging:
+
+| Option | Description |
+|--------|-------------|
+| `--log-level [debug\|info\|warning\|error\|critical]` | Diagnostic log level (default: `info`, or `$EVAL_LOG_LEVEL`) |
+| `--log-format [plain\|json]` | Diagnostic log format (default: `plain`, or `$EVAL_LOG_FORMAT`) |
+
+Diagnostic output (progress, warnings, errors) is emitted via Python's `logging`
+module to stderr, so it can be filtered by level and rendered as JSON for CI. It is
+kept separate from user-facing output (run banners, result tables, reports), which
+stays on stdout. Example:
+
+```bash
+# Quiet CI run with machine-parseable diagnostics
+uv run copilot-eval --log-level warning --log-format json run --config-dir examples/prompt-language
+```
+
 | Command | Description |
 |---------|-------------|
 | `list --config-dir <dir>` | List tasks and variants |

@@ -3,7 +3,9 @@
 import random
 from pathlib import Path
 
-from eval.cli import _collect_file_traces, _ordering_rng, order_variants
+from click.testing import CliRunner
+
+from eval.cli import _collect_file_traces, _ordering_rng, main, order_variants
 from eval.config import Config, RunnerConfig, Variant
 
 FIXTURE = Path(__file__).parent / "fixtures" / "file-exporter-sample.jsonl"
@@ -127,3 +129,27 @@ def test_collect_file_traces_reads_all_per_run_files(tmp_path: Path):
     assert len(traces) == 1
     assert traces[0].trace_id == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     assert traces[0].resource_tags["eval.run_id"] == "run-2"
+
+
+def test_invalid_log_level_env_var_yields_clean_error():
+    """A bogus EVAL_LOG_LEVEL must fail as a ClickException, not a traceback."""
+    result = CliRunner().invoke(
+        main,
+        ["list", "--config-dir", "examples/prompt-language"],
+        env={"EVAL_LOG_LEVEL": "bogus"},
+    )
+    assert result.exit_code == 2
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "Invalid log level" in result.output
+
+
+def test_invalid_log_format_env_var_yields_clean_error():
+    """A bogus EVAL_LOG_FORMAT must fail as a ClickException, not a traceback."""
+    result = CliRunner().invoke(
+        main,
+        ["list", "--config-dir", "examples/prompt-language"],
+        env={"EVAL_LOG_FORMAT": "bogus"},
+    )
+    assert result.exit_code == 2
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "Invalid log format" in result.output

@@ -14,6 +14,7 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
+from logging import getLogger
 from pathlib import Path
 from statistics import mean, median, pstdev
 from typing import Any
@@ -39,6 +40,8 @@ from eval.protocols import (
     status_from_exit_code as _status_from_exit_code,
 )
 from eval.runners.docker_cli_runner import DockerCLIRunner
+
+logger = getLogger(__name__)
 
 status_from_exit_code = _status_from_exit_code
 
@@ -159,7 +162,7 @@ def run_one(
 ) -> RunResult:
     test_id = str(uuid.uuid4())
     log_file = run_dir / f"{task.name}_{variant.name}_epoch{epoch}.log"
-    print(f"--- [{task.name}] epoch={epoch} variant={variant.name} test_id={test_id[:8]}")
+    logger.info("[%s] epoch=%s variant=%s test_id=%s", task.name, epoch, variant.name, test_id[:8])
 
     # Capture wall-clock schedule so post-hoc analysis can detect order/concurrency
     # confounders. monotonic clock is used for duration to avoid clock-skew issues;
@@ -196,7 +199,7 @@ def run_one(
         before_rc = _run_hook(task.hooks.before_run, config, task, variant, log_file, "before_run")
         if before_rc != 0:
             if task.hooks.on_failure == "fail":
-                print(f"    ✗ before_run hook failed (exit {before_rc}) — skipping run")
+                logger.error("before_run hook failed (exit %s) — skipping run", before_rc)
                 _append_log(log_file, f"before_run hook failed with exit code {before_rc}")
                 return RunResult(
                     task=task.name,
@@ -209,8 +212,9 @@ def run_one(
                     status=RunStatus.SETUP_FAILED,
                     **_timing(),
                 )
-            print(
-                f"    WARNING: before_run hook failed (exit {before_rc}) — continuing (on_failure=warn)"
+            logger.warning(
+                "before_run hook failed (exit %s) — continuing (on_failure=warn)",
+                before_rc,
             )
             _append_log(
                 log_file,
@@ -220,7 +224,7 @@ def run_one(
         # Health check: verify environment is ready before running Copilot
         if task.health_check:
             if not _run_health_check(task.health_check, config, task, variant, log_file):
-                print("    ✗ Health check failed — skipping run")
+                logger.error("Health check failed — skipping run")
                 return RunResult(
                     task=task.name,
                     variant=variant.name,
@@ -272,14 +276,14 @@ def run_one(
             work_dir=work_dir,
         )
 
-        print("    Running copilot in container...")
+        logger.info("Running copilot in container...")
         artifacts = runner.run(run_context)
         container_run_completed = True
         _print_summary(log_file)
 
         after_rc = _run_hook(task.hooks.after_run, config, task, variant, log_file, "after_run")
         if after_rc != 0:
-            print(f"    WARNING: after_run hook failed (exit {after_rc}) — surfacing in results")
+            logger.warning("after_run hook failed (exit %s) — surfacing in results", after_rc)
             _append_log(log_file, f"after_run hook failed with exit code {after_rc}")
             scores.append(
                 EvalScore(
@@ -299,8 +303,8 @@ def run_one(
             and artifacts.exit_code == 0
             and not (work_dir / TRACE_FILE).exists()
         ):
-            print(
-                "    WARNING: file collector enabled but no trace file was written; "
+            logger.warning(
+                "file collector enabled but no trace file was written; "
                 "ensure your Copilot CLI supports COPILOT_OTEL_FILE_EXPORTER_PATH."
             )
 
@@ -314,7 +318,7 @@ def run_one(
         # post-processing (persist/evaluators/after_run) happened after a real run,
         # so preserve the container's exit status instead of mislabeling it.
         if not container_run_completed or artifacts is None:
-            print(f"    ✗ Run errored during setup: {exc}")
+            logger.error("Run errored during setup: %s", exc)
             _append_log(log_file, f"run_one raised during setup: {exc!r}")
             return RunResult(
                 task=task.name,
@@ -328,7 +332,7 @@ def run_one(
                 scores=scores,
                 **_timing(),
             )
-        print(f"    ✗ Run errored during post-processing: {exc}")
+        logger.error("Run errored during post-processing: %s", exc)
         _append_log(log_file, f"run_one raised during post-processing: {exc!r}")
         scores.append(
             EvalScore(
@@ -384,9 +388,9 @@ def _run_hook(
     if not resolved.exists():
         resolved = (config.project_dir / script).resolve()
     if not resolved.exists():
-        print(f"    WARNING: {label} script not found: {script}")
+        logger.warning("%s script not found: %s", label, script)
         return 0
-    print(f"    Running {label}...")
+    logger.info("Running %s...", label)
     merged_vars = config.resolve_vars(task, variant)
     env = {
         **os.environ,
@@ -415,9 +419,9 @@ def _run_health_check(
     if not resolved.exists():
         resolved = (config.project_dir / script).resolve()
     if not resolved.exists():
-        print(f"    WARNING: health_check script not found: {script}")
+        logger.warning("health_check script not found: %s", script)
         return True  # skip check if script missing
-    print("    Running health_check...")
+    logger.info("Running health_check...")
     merged_vars = config.resolve_vars(task, variant)
     env = {
         **os.environ,
@@ -698,7 +702,7 @@ def _eval_script(
         resolved = (config.project_dir / ev.script).resolve()
     if not resolved.exists():
         return None
-    print(f"    Evaluating: {ev.name} (script)...")
+    logger.info("Evaluating: %s (script)...", ev.name)
     merged_vars = config.resolve_vars(task, variant)
     env = {
         **os.environ,
@@ -802,7 +806,7 @@ def _print_summary(log_file: Path) -> None:
     try:
         for line in log_file.read_text().splitlines():
             if line.startswith("Total ") or line.startswith("Breakdown"):
-                print(f"    {line}")
+                logger.info("%s", line)
     except OSError:
         pass
 
@@ -811,7 +815,7 @@ def _print_scores(scores: list[EvalScore]) -> None:
     for s in scores:
         icon = "✓" if s.passed else "✗"
         score_str = str(s.score) if s.score is not None else "?"
-        print(f"    {icon} {s.name} ({s.type}): {score_str} — {s.reason[:50]}")
+        logger.info("%s %s (%s): %s — %s", icon, s.name, s.type, score_str, s.reason[:50])
 
 
 def _parse_json(text: str, require_keys: tuple[str, ...] | None = None) -> dict[str, Any] | None:
