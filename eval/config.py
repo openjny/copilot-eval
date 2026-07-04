@@ -1,4 +1,5 @@
 """Configuration loading and validation."""
+
 from __future__ import annotations
 
 import re
@@ -81,11 +82,12 @@ class Variant:
 @dataclass
 class Evaluator:
     """Evaluation criterion. type: judge | script | contains | regex."""
+
     name: str
     type: str = "judge"
-    prompt: str | None = None     # type=judge
-    script: str | None = None     # type=script
-    value: str | None = None      # type=contains/regex
+    prompt: str | None = None  # type=judge
+    script: str | None = None  # type=script
+    value: str | None = None  # type=contains/regex
 
 
 @dataclass
@@ -182,8 +184,14 @@ def load_config(config_dir: Path | None = None) -> Config:
     _check_duplicate_names(tasks, "task")
     _check_duplicate_names(variants, "variant")
 
-    return Config(vars=vars_dict, runner=runner, tasks=tasks, variants=variants,
-                  project_dir=project_dir, config_dir=config_dir)
+    return Config(
+        vars=vars_dict,
+        runner=runner,
+        tasks=tasks,
+        variants=variants,
+        project_dir=project_dir,
+        config_dir=config_dir,
+    )
 
 
 def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
@@ -235,7 +243,9 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
     max_workers = _require_int(runner_raw, "max_workers", 8, minimum=1)
     judge_timeout_seconds = _require_int(runner_raw, "judge_timeout_seconds", 60, minimum=1)
     judge_samples = _require_int(runner_raw, "judge_samples", 1, minimum=1)
-    judge_max_conversation_chars = _require_int(runner_raw, "judge_max_conversation_chars", 8000, minimum=1)
+    judge_max_conversation_chars = _require_int(
+        runner_raw, "judge_max_conversation_chars", 8000, minimum=1
+    )
     judge_max_output_chars = _require_int(runner_raw, "judge_max_output_chars", 8000, minimum=1)
     max_turns = runner_raw.get("max_turns")
     if max_turns is not None:
@@ -294,7 +304,9 @@ def _require_int(raw: dict[str, Any], key: str, default: int, minimum: int | Non
     return _coerce_int(f"runner.{key}", raw[key], minimum=minimum)
 
 
-def _require_number(raw: dict[str, Any], key: str, default: float, minimum: float | None = None) -> float:
+def _require_number(
+    raw: dict[str, Any], key: str, default: float, minimum: float | None = None
+) -> float:
     if key not in raw or raw[key] is None:
         return default
     value = raw[key]
@@ -315,6 +327,7 @@ def _check_duplicate_names(items: list[Any], label: str) -> None:
 
 # --- Internal parsers ---
 
+
 def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Evaluator]:
     if not raw_list:
         return []
@@ -323,7 +336,9 @@ def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Eva
     seen: set[str] = set()
     for i, e in enumerate(raw_list):
         if not isinstance(e, dict):
-            raise ConfigError(f"Evaluator #{i + 1}{where} must be a mapping, got {type(e).__name__}.")
+            raise ConfigError(
+                f"Evaluator #{i + 1}{where} must be a mapping, got {type(e).__name__}."
+            )
         name = e.get("name")
         if not name or not str(name).strip():
             raise ConfigError(f"Evaluator #{i + 1}{where} is missing a required 'name'.")
@@ -354,9 +369,13 @@ def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Eva
             try:
                 re.compile(str(value))
             except re.error as exc:
-                raise ConfigError(f"Evaluator '{name}'{where} has an invalid regex 'value': {exc}.") from exc
+                raise ConfigError(
+                    f"Evaluator '{name}'{where} has an invalid regex 'value': {exc}."
+                ) from exc
 
-        evaluators.append(Evaluator(name=name, type=etype, prompt=prompt, script=script, value=value))
+        evaluators.append(
+            Evaluator(name=name, type=etype, prompt=prompt, script=script, value=value)
+        )
     return evaluators
 
 
@@ -365,9 +384,7 @@ def _parse_hooks(raw: dict[str, Any] | None) -> Hooks:
         return Hooks()
     on_failure = str(raw.get("on_failure", "fail")).lower()
     if on_failure not in ("fail", "warn"):
-        raise ConfigError(
-            f"Invalid hooks.on_failure '{on_failure}'. Use 'fail' or 'warn'."
-        )
+        raise ConfigError(f"Invalid hooks.on_failure '{on_failure}'. Use 'fail' or 'warn'.")
     return Hooks(
         before_run=raw.get("before_run"),
         after_run=raw.get("after_run"),
@@ -396,9 +413,13 @@ def _parse_task(p: dict[str, Any], fallback_name: str = "") -> Task:
     if not evaluators_raw:
         judges = p.get("judges") or (p.get("metrics") or {}).get("judges") or []
         try:
-            evaluators_raw = [{"name": j["name"], "type": "judge", "prompt": j["prompt"]} for j in judges]
+            evaluators_raw = [
+                {"name": j["name"], "type": "judge", "prompt": j["prompt"]} for j in judges
+            ]
         except (KeyError, TypeError) as exc:
-            raise ConfigError(f"Task '{name}' has a malformed 'judges' entry (missing {exc}).") from exc
+            raise ConfigError(
+                f"Task '{name}' has a malformed 'judges' entry (missing {exc})."
+            ) from exc
         if p.get("verify"):
             evaluators_raw.append({"name": "verify", "type": "script", "script": p["verify"]})
 

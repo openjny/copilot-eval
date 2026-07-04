@@ -34,6 +34,9 @@ jobs:
       - name: Lint (ruff)
         run: uv run ruff check eval tests
 
+      - name: Format check (ruff)
+        run: uv run ruff format --check eval tests
+
       - name: Type check (mypy)
         run: uv run mypy
 

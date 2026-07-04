@@ -1,4 +1,5 @@
 """Execute a single eval run in a Docker container."""
+
 from __future__ import annotations
 
 import json
@@ -83,7 +84,9 @@ class RunResult:
 
     @property
     def passed(self) -> bool:
-        return self.status == RunStatus.SUCCESS and (all(s.passed for s in self.scores) if self.scores else True)
+        return self.status == RunStatus.SUCCESS and (
+            all(s.passed for s in self.scores) if self.scores else True
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -111,21 +114,27 @@ def score_to_dict(s: EvalScore) -> dict[str, Any]:
     so non-judge serialization stays byte-identical.
     """
     d: dict[str, Any] = {
-        "name": s.name, "type": s.type, "score": s.score,
-        "reason": s.reason, "passed": s.passed,
+        "name": s.name,
+        "type": s.type,
+        "score": s.score,
+        "reason": s.reason,
+        "passed": s.passed,
     }
     if s.meta:
         d["meta"] = s.meta
     if s.type == "judge" and s.n_samples:
-        d.update({
-            "samples": s.samples,
-            "score_stddev": s.score_stddev,
-            "n_samples": s.n_samples,
-            "outcomes": s.outcomes,
-            "judge_model": s.judge_model,
-            "judge_version": s.judge_version,
-        })
+        d.update(
+            {
+                "samples": s.samples,
+                "score_stddev": s.score_stddev,
+                "n_samples": s.n_samples,
+                "outcomes": s.outcomes,
+                "judge_model": s.judge_model,
+                "judge_version": s.judge_version,
+            }
+        )
     return d
+
 
 def get_github_token() -> str:
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -139,8 +148,13 @@ def get_github_token() -> str:
 
 
 def run_one(
-    task: Task, variant: Variant, epoch: int,
-    config: Config, run_id: str, run_dir: Path, github_token: str,
+    task: Task,
+    variant: Variant,
+    epoch: int,
+    config: Config,
+    run_id: str,
+    run_dir: Path,
+    github_token: str,
     order_index: int | None = None,
 ) -> RunResult:
     test_id = str(uuid.uuid4())
@@ -174,21 +188,37 @@ def run_one(
                 print(f"    ✗ before_run hook failed (exit {before_rc}) — skipping run")
                 _append_log(log_file, f"before_run hook failed with exit code {before_rc}")
                 return RunResult(
-                    task=task.name, variant=variant.name, epoch=epoch,
-                    test_id=test_id, run_id=run_id, log_file=log_file,
-                    exit_code=-1, status=RunStatus.SETUP_FAILED,
+                    task=task.name,
+                    variant=variant.name,
+                    epoch=epoch,
+                    test_id=test_id,
+                    run_id=run_id,
+                    log_file=log_file,
+                    exit_code=-1,
+                    status=RunStatus.SETUP_FAILED,
                 )
-            print(f"    WARNING: before_run hook failed (exit {before_rc}) — continuing (on_failure=warn)")
-            _append_log(log_file, f"before_run hook failed with exit code {before_rc}; continuing because hooks.on_failure=warn")
+            print(
+                f"    WARNING: before_run hook failed (exit {before_rc}) — continuing (on_failure=warn)"
+            )
+            _append_log(
+                log_file,
+                f"before_run hook failed with exit code {before_rc}; continuing because hooks.on_failure=warn",
+            )
 
         # Health check: verify environment is ready before running Copilot
         if task.health_check:
             if not _run_health_check(task.health_check, config, task, variant, log_file):
                 print("    ✗ Health check failed — skipping run")
                 return RunResult(
-                    task=task.name, variant=variant.name, epoch=epoch,
-                    test_id=test_id, run_id=run_id, log_file=log_file,
-                    exit_code=-1, status=RunStatus.SETUP_FAILED, **_timing(),
+                    task=task.name,
+                    variant=variant.name,
+                    epoch=epoch,
+                    test_id=test_id,
+                    run_id=run_id,
+                    log_file=log_file,
+                    exit_code=-1,
+                    status=RunStatus.SETUP_FAILED,
+                    **_timing(),
                 )
 
         # Writable workspace: copy fixture to tmpdir so Copilot can read AND write
@@ -240,10 +270,15 @@ def run_one(
         if after_rc != 0:
             print(f"    WARNING: after_run hook failed (exit {after_rc}) — surfacing in results")
             _append_log(log_file, f"after_run hook failed with exit code {after_rc}")
-            scores.append(EvalScore(
-                name="after_run_hook", type="hook", score=None,
-                reason=f"after_run hook failed with exit code {after_rc}", passed=False,
-            ))
+            scores.append(
+                EvalScore(
+                    name="after_run_hook",
+                    type="hook",
+                    score=None,
+                    reason=f"after_run hook failed with exit code {after_rc}",
+                    passed=False,
+                )
+            )
 
         # Persist output files to results dir before tmpdir cleanup
         _persist_output_files(work_dir, run_dir, task.name, variant.name, epoch)
@@ -271,20 +306,36 @@ def run_one(
             print(f"    ✗ Run errored during setup: {exc}")
             _append_log(log_file, f"run_one raised during setup: {exc!r}")
             return RunResult(
-                task=task.name, variant=variant.name, epoch=epoch,
-                test_id=test_id, run_id=run_id, log_file=log_file,
-                exit_code=-1, status=RunStatus.SETUP_FAILED, scores=scores,
+                task=task.name,
+                variant=variant.name,
+                epoch=epoch,
+                test_id=test_id,
+                run_id=run_id,
+                log_file=log_file,
+                exit_code=-1,
+                status=RunStatus.SETUP_FAILED,
+                scores=scores,
             )
         print(f"    ✗ Run errored during post-processing: {exc}")
         _append_log(log_file, f"run_one raised during post-processing: {exc!r}")
-        scores.append(EvalScore(
-            name="post_processing", type="infra", score=None,
-            reason=f"post-run exception: {exc!r}", passed=False,
-        ))
+        scores.append(
+            EvalScore(
+                name="post_processing",
+                type="infra",
+                score=None,
+                reason=f"post-run exception: {exc!r}",
+                passed=False,
+            )
+        )
         return RunResult(
-            task=task.name, variant=variant.name, epoch=epoch,
-            test_id=test_id, run_id=run_id, log_file=log_file,
-            exit_code=artifacts.exit_code, status=artifacts.status,
+            task=task.name,
+            variant=variant.name,
+            epoch=epoch,
+            test_id=test_id,
+            run_id=run_id,
+            log_file=log_file,
+            exit_code=artifacts.exit_code,
+            status=artifacts.status,
             scores=scores,
         )
     finally:
@@ -296,14 +347,22 @@ def run_one(
         _mask_log_file(log_file, collect_secrets(config, github_token))
 
     return RunResult(
-        task=task.name, variant=variant.name, epoch=epoch,
-        test_id=test_id, run_id=run_id, log_file=log_file,
-        exit_code=artifacts.exit_code, status=artifacts.status,
-        scores=scores, **_timing(),
+        task=task.name,
+        variant=variant.name,
+        epoch=epoch,
+        test_id=test_id,
+        run_id=run_id,
+        log_file=log_file,
+        exit_code=artifacts.exit_code,
+        status=artifacts.status,
+        scores=scores,
+        **_timing(),
     )
 
 
-def _run_hook(script: str | None, config: Config, task: Task, variant: Variant, log_file: Path, label: str) -> int:
+def _run_hook(
+    script: str | None, config: Config, task: Task, variant: Variant, log_file: Path, label: str
+) -> int:
     """Run a before/after hook script. Returns the script's exit code (0 when no
     script is configured or the script is missing, so a missing hook never fails)."""
     if not script:
@@ -316,7 +375,11 @@ def _run_hook(script: str | None, config: Config, task: Task, variant: Variant, 
         return 0
     print(f"    Running {label}...")
     merged_vars = config.resolve_vars(task, variant)
-    env = {**os.environ, **_load_env_file(config.env_file), **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()}}
+    env = {
+        **os.environ,
+        **_load_env_file(config.env_file),
+        **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()},
+    }
     with open(log_file, "a") as lf:
         proc = subprocess.run(["bash", str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)
     return proc.returncode
@@ -331,7 +394,9 @@ def _append_log(log_file: Path, message: str) -> None:
         pass
 
 
-def _run_health_check(script: str, config: Config, task: Task, variant: Variant, log_file: Path) -> bool:
+def _run_health_check(
+    script: str, config: Config, task: Task, variant: Variant, log_file: Path
+) -> bool:
     """Run health check script. Returns True if environment is ready."""
     resolved = (config.config_dir / script).resolve()
     if not resolved.exists():
@@ -341,13 +406,19 @@ def _run_health_check(script: str, config: Config, task: Task, variant: Variant,
         return True  # skip check if script missing
     print("    Running health_check...")
     merged_vars = config.resolve_vars(task, variant)
-    env = {**os.environ, **_load_env_file(config.env_file), **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()}}
+    env = {
+        **os.environ,
+        **_load_env_file(config.env_file),
+        **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()},
+    }
     with open(log_file, "a") as lf:
         proc = subprocess.run(["bash", str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)
     return proc.returncode == 0
 
 
-def _persist_output_files(work_dir: Path, run_dir: Path, task: str, variant: str, epoch: int) -> None:
+def _persist_output_files(
+    work_dir: Path, run_dir: Path, task: str, variant: str, epoch: int
+) -> None:
     """Copy output files from tmpdir to results dir for later analysis."""
     output_dir = work_dir / "output"
     if not output_dir.is_dir():
@@ -374,7 +445,14 @@ def _persist_trace_file(work_dir: Path, run_dir: Path, task: str, variant: str, 
     shutil.copy2(trace_src, trace_dest)
 
 
-def _run_evaluators(task: Task, variant: Variant, config: Config, log_file: Path, token: str, work_dir: Path | None = None) -> list[EvalScore]:
+def _run_evaluators(
+    task: Task,
+    variant: Variant,
+    config: Config,
+    log_file: Path,
+    token: str,
+    work_dir: Path | None = None,
+) -> list[EvalScore]:
     """Run non-judge evaluators (script, contains, regex). Judge runs in analyze."""
     scores: list[EvalScore] = []
     for ev in task.evaluators:
@@ -400,8 +478,10 @@ def _aggregate_scores(samples: list[int], method: str) -> int:
     Uses half-up rounding (not Python's banker's rounding) so an even-length
     median/mean of e.g. 6.5 rounds to 7 rather than 6.
     """
+
     def _round_half_up(x: float) -> int:
         return int(math.floor(x + 0.5))
+
     if method == "mean":
         return _round_half_up(mean(samples))
     if method == "majority":
@@ -445,8 +525,9 @@ def _write_scores_file(log_file: Path, scores: list[EvalScore]) -> None:
     sf.write_text(json.dumps([s.to_dict() for s in scores], indent=2, ensure_ascii=False))
 
 
-def _run_judge_once(prompt: str, config: Config, token: str | None,
-                    secrets: list[str]) -> tuple[int | None, str, str, dict[str, Any]]:
+def _run_judge_once(
+    prompt: str, config: Config, token: str | None, secrets: list[str]
+) -> tuple[int | None, str, str, dict[str, Any]]:
     """Invoke the judge Copilot once.
 
     Returns ``(score, reason, outcome, sample_meta)`` where ``outcome`` is one of
@@ -460,8 +541,13 @@ def _run_judge_once(prompt: str, config: Config, token: str | None,
     judge_env = {**os.environ, "GITHUB_TOKEN": token or "", "COPILOT_OTEL_ENABLED": "false"}
     sample_meta: dict[str, Any] = {}
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=config.runner.judge_timeout_seconds, env=judge_env)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=config.runner.judge_timeout_seconds,
+            env=judge_env,
+        )
     except subprocess.TimeoutExpired:
         return None, f"timeout after {config.runner.judge_timeout_seconds}s", "timeout", sample_meta
     except FileNotFoundError:
@@ -488,9 +574,14 @@ def _run_judge_once(prompt: str, config: Config, token: str | None,
     return None, "parse_error", "parse_error", sample_meta
 
 
-def run_judge(ev: Evaluator, conversation: str, config: Config, token: str | None,
-              output_files_text: str | None = None,
-              extra_meta: dict[str, Any] | None = None) -> EvalScore:
+def run_judge(
+    ev: Evaluator,
+    conversation: str,
+    config: Config,
+    token: str | None,
+    output_files_text: str | None = None,
+    extra_meta: dict[str, Any] | None = None,
+) -> EvalScore:
     """Run a judge evaluator against captured conversation + output files.
 
     Shared by the `analyze` command. Builds the judge prompt and samples the
@@ -546,9 +637,18 @@ def run_judge(ev: Evaluator, conversation: str, config: Config, token: str | Non
         meta = {**base_meta, **per_sample[idx][3], "outcome": dominant}
         reason = per_sample[idx][1] if n == 1 else dominant
         return EvalScore(
-            name=ev.name, type="judge", score=None, reason=reason, passed=False,
-            samples=samples, score_stddev=None, n_samples=n, outcomes=outcomes,
-            judge_model=config.runner.judge_model, judge_version=version, meta=meta,
+            name=ev.name,
+            type="judge",
+            score=None,
+            reason=reason,
+            passed=False,
+            samples=samples,
+            score_stddev=None,
+            n_samples=n,
+            outcomes=outcomes,
+            judge_model=config.runner.judge_model,
+            judge_version=version,
+            meta=meta,
         )
 
     agg = _aggregate_scores(samples, config.runner.judge_aggregate)
@@ -561,13 +661,23 @@ def run_judge(ev: Evaluator, conversation: str, config: Config, token: str | Non
         reason = f"[{config.runner.judge_aggregate} of {len(samples)}/{n}, σ={stddev:.2f}] {reason}"
     meta = {**base_meta, **rep[3], "outcome": rep[2]}
     return EvalScore(
-        name=ev.name, type="judge", score=agg, reason=reason,
-        samples=samples, score_stddev=round(stddev, 4), n_samples=n, outcomes=outcomes,
-        judge_model=config.runner.judge_model, judge_version=version, meta=meta,
+        name=ev.name,
+        type="judge",
+        score=agg,
+        reason=reason,
+        samples=samples,
+        score_stddev=round(stddev, 4),
+        n_samples=n,
+        outcomes=outcomes,
+        judge_model=config.runner.judge_model,
+        judge_version=version,
+        meta=meta,
     )
 
 
-def _eval_script(ev: Evaluator, config: Config, task: Task, variant: Variant, log_file: Path) -> EvalScore | None:
+def _eval_script(
+    ev: Evaluator, config: Config, task: Task, variant: Variant, log_file: Path
+) -> EvalScore | None:
     if not ev.script:
         return None
     resolved = (config.config_dir / ev.script).resolve()
@@ -577,11 +687,21 @@ def _eval_script(ev: Evaluator, config: Config, task: Task, variant: Variant, lo
         return None
     print(f"    Evaluating: {ev.name} (script)...")
     merged_vars = config.resolve_vars(task, variant)
-    env = {**os.environ, **_load_env_file(config.env_file), **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()}}
+    env = {
+        **os.environ,
+        **_load_env_file(config.env_file),
+        **{f"EVAL_{k.upper()}": v for k, v in merged_vars.items()},
+    }
     with open(log_file, "a") as lf:
         proc = subprocess.run([str(resolved)], stdout=lf, stderr=subprocess.STDOUT, env=env)
     passed = proc.returncode == 0
-    return EvalScore(name=ev.name, type="script", score=1 if passed else 0, reason="PASS" if passed else "FAIL", passed=passed)
+    return EvalScore(
+        name=ev.name,
+        type="script",
+        score=1 if passed else 0,
+        reason="PASS" if passed else "FAIL",
+        passed=passed,
+    )
 
 
 def _eval_contains(ev: Evaluator, log_file: Path) -> EvalScore | None:
@@ -589,7 +709,13 @@ def _eval_contains(ev: Evaluator, log_file: Path) -> EvalScore | None:
         return None
     output = _read_log(log_file)
     found = ev.value in (output or "")
-    return EvalScore(name=ev.name, type="contains", score=1 if found else 0, reason=f"{'found' if found else 'not found'}", passed=found)
+    return EvalScore(
+        name=ev.name,
+        type="contains",
+        score=1 if found else 0,
+        reason=f"{'found' if found else 'not found'}",
+        passed=found,
+    )
 
 
 def _eval_regex(ev: Evaluator, log_file: Path) -> EvalScore | None:
@@ -597,7 +723,13 @@ def _eval_regex(ev: Evaluator, log_file: Path) -> EvalScore | None:
         return None
     output = _read_log(log_file)
     match = bool(re.search(ev.value, output or ""))
-    return EvalScore(name=ev.name, type="regex", score=1 if match else 0, reason=f"{'matched' if match else 'no match'}", passed=match)
+    return EvalScore(
+        name=ev.name,
+        type="regex",
+        score=1 if match else 0,
+        reason=f"{'matched' if match else 'no match'}",
+        passed=match,
+    )
 
 
 def read_files_from_dir(directory: Path | None, max_chars: int = 8000) -> str | None:
@@ -623,7 +755,10 @@ def read_files_from_dir(directory: Path | None, max_chars: int = 8000) -> str | 
             remaining = max_chars - total
             if remaining > 0:
                 parts.append(f"=== {rel.as_posix()} ===\n{content[:remaining]}")
-            omitted = [g.relative_to(directory).as_posix() for g in files[i + (1 if remaining > 0 else 0):]]
+            omitted = [
+                g.relative_to(directory).as_posix()
+                for g in files[i + (1 if remaining > 0 else 0) :]
+            ]
             if omitted:
                 parts.append(f"[omitted {len(omitted)} file(s): {', '.join(omitted)}]")
             parts.append("... (truncated)")
@@ -643,7 +778,9 @@ def _read_output_files(work_dir: Path | None, max_chars: int = 8000) -> str | No
 def _read_log(log_file: Path, max_chars: int = 0) -> str | None:
     try:
         text = log_file.read_text()
-        return text[:max_chars] + "\n... (truncated)" if max_chars and len(text) > max_chars else text
+        return (
+            text[:max_chars] + "\n... (truncated)" if max_chars and len(text) > max_chars else text
+        )
     except OSError:
         return None
 
@@ -686,7 +823,7 @@ def _parse_json(text: str, require_keys: tuple[str, ...] | None = None) -> dict[
     # First brace .. last brace (multiline object embedded in prose)
     start, end = stripped.find("{"), stripped.rfind("}")
     if start != -1 and end > start:
-        candidates.append(stripped[start:end + 1])
+        candidates.append(stripped[start : end + 1])
     # Single-line JSON objects
     for line in stripped.splitlines():
         line = line.strip()

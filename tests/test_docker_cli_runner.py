@@ -1,4 +1,5 @@
 """Tests for the DockerCLIRunner abstraction."""
+
 from __future__ import annotations
 
 import subprocess
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from eval.config import Config, Hooks, RunnerConfig, Task, Variant
+from eval.config import Config, RunnerConfig, Task, Variant
 from eval.protocols import RunContext, RunStatus
 from eval.runners import DockerCLIRunner, create_runner
 from eval.runners import docker_cli_runner as docker_runner_mod
@@ -306,9 +307,7 @@ class TestMalformedRunScript:
             return SimpleNamespace(returncode=0)
 
         runner = DockerCLIRunner("token", run_command=fake_run)
-        ctx = _make_run_context(
-            tmp_path, variant_kwargs={"run_script": "../../../etc/passwd"}
-        )
+        ctx = _make_run_context(tmp_path, variant_kwargs={"run_script": "../../../etc/passwd"})
 
         with patch.dict("os.environ", {"COPILOT_HOME": str(tmp_path / "nonexistent")}):
             runner.run(ctx)
@@ -392,11 +391,7 @@ class TestWorkDirErrors:
         with patch.dict("os.environ", {"COPILOT_HOME": str(tmp_path / "nonexistent")}):
             runner.run(ctx)
 
-        volume_args = [
-            captured_cmd[i + 1]
-            for i, a in enumerate(captured_cmd[:-1])
-            if a == "-v"
-        ]
+        volume_args = [captured_cmd[i + 1] for i, a in enumerate(captured_cmd[:-1]) if a == "-v"]
         workspace_mounts = [v for v in volume_args if ":/workspace" in v]
         assert len(workspace_mounts) == 1
         assert str(ctx.work_dir) in workspace_mounts[0]

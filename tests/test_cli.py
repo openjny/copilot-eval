@@ -1,4 +1,5 @@
 """Tests for CLI scheduling helpers (variant ordering for bias reduction)."""
+
 import random
 from pathlib import Path
 
@@ -36,9 +37,7 @@ def test_counterbalance_rotates_by_epoch():
 def test_counterbalance_balances_positions_across_cycle():
     vs = _variants("a", "b", "c")
     rng = random.Random(0)
-    first_positions = [
-        _names(order_variants(vs, e, "counterbalance", rng))[0] for e in range(1, 4)
-    ]
+    first_positions = [_names(order_variants(vs, e, "counterbalance", rng))[0] for e in range(1, 4)]
     assert sorted(first_positions) == ["a", "b", "c"]
 
 
@@ -72,6 +71,7 @@ def test_single_variant_is_noop():
 
 
 # --- _ordering_rng (per-context, thread-safe, reproducible) ---
+
 
 def test_ordering_rng_seeded_is_reproducible_per_context():
     vs = _variants("a", "b", "c", "d")

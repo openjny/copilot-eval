@@ -1,4 +1,5 @@
 """Shared test helpers."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,15 +10,26 @@ from eval.config import load_config
 from eval.trace import RunMetrics, Span, Trace
 
 
-def make_metrics(scenario: str, variant: str, epoch: str, duration: float = 1.0,
-                 **kwargs) -> RunMetrics:
+def make_metrics(
+    scenario: str, variant: str, epoch: str, duration: float = 1.0, **kwargs
+) -> RunMetrics:
     """Build a RunMetrics with sensible defaults for report tests."""
     defaults = dict(
-        scenario=scenario, variant=variant, epoch=epoch, test_id="t" + epoch,
-        total_spans=1, duration=duration, turn_count=1, tool_count=0,
-        tool_names=[], tool_duration=0.0,
-        total_input_tokens=0, total_output_tokens=0, total_cache_tokens=0,
-        model="m", cost="0",
+        scenario=scenario,
+        variant=variant,
+        epoch=epoch,
+        test_id="t" + epoch,
+        total_spans=1,
+        duration=duration,
+        turn_count=1,
+        tool_count=0,
+        tool_names=[],
+        tool_duration=0.0,
+        total_input_tokens=0,
+        total_output_tokens=0,
+        total_cache_tokens=0,
+        model="m",
+        cost="0",
     )
     defaults.update(kwargs)
     return RunMetrics(**defaults)

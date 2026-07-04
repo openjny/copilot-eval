@@ -1,4 +1,5 @@
 """Tests for trace collectors."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -26,7 +27,11 @@ def _write_trace_fixture(run_dir: Path) -> Path:
     return trace_file
 
 
-def _fixture_payload(run_id: str = "spike-run", test_id: str = "spike-001", trace_id: str = "c5b55d939c5df4939aa20c7090a13cc9") -> str:
+def _fixture_payload(
+    run_id: str = "spike-run",
+    test_id: str = "spike-001",
+    trace_id: str = "c5b55d939c5df4939aa20c7090a13cc9",
+) -> str:
     return (
         FIXTURE.read_text(encoding="utf-8")
         .replace("spike-run", run_id)
@@ -52,7 +57,9 @@ def test_file_collector_collects_multiple_trace_files(tmp_path: Path):
     trace_dir.mkdir()
     (trace_dir / "task_a_epoch1.jsonl").write_text(_fixture_payload(), encoding="utf-8")
     (trace_dir / "task_b_epoch1.jsonl").write_text(
-        _fixture_payload(run_id="run-2", test_id="test-2", trace_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        _fixture_payload(
+            run_id="run-2", test_id="test-2", trace_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ),
         encoding="utf-8",
     )
 

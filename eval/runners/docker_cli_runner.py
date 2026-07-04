@@ -1,4 +1,5 @@
 """Docker-based Copilot CLI runner."""
+
 from __future__ import annotations
 
 import os
@@ -66,19 +67,19 @@ class DockerCLIRunner:
         image = config.image_name(variant)
         timeout = task.timeout_seconds or config.runner.timeout_seconds
 
-        otel_attrs = ",".join([
-            f"eval.test_id={run_context.test_id}",
-            f"eval.scenario={task.name}",
-            f"eval.variant={variant.name}",
-            f"eval.epoch={run_context.epoch}",
-            f"eval.run_id={run_context.run_id}",
-        ])
+        otel_attrs = ",".join(
+            [
+                f"eval.test_id={run_context.test_id}",
+                f"eval.scenario={task.name}",
+                f"eval.variant={variant.name}",
+                f"eval.epoch={run_context.epoch}",
+                f"eval.run_id={run_context.run_id}",
+            ]
+        )
 
         env_values = {
             "COPILOT_OTEL_ENABLED": "true",
-            "COPILOT_OTEL_CAPTURE_CONTENT": (
-                "true" if config.runner.capture_content else "false"
-            ),
+            "COPILOT_OTEL_CAPTURE_CONTENT": ("true" if config.runner.capture_content else "false"),
             "OTEL_RESOURCE_ATTRIBUTES": otel_attrs,
             "OTEL_SERVICE_NAME": "github-copilot",
             **run_context.extra_env,
@@ -108,12 +109,14 @@ class DockerCLIRunner:
             if variant.run_script:
                 run_script_path = (config.project_dir / variant.run_script).resolve()
                 if run_script_path.exists():
-                    cmd.extend([
-                        "-v",
-                        f"{run_script_path}:{_CONTAINER_RUN_SCRIPT}:ro",
-                        "-e",
-                        f"EVAL_SETUP_SCRIPT={_CONTAINER_RUN_SCRIPT}",
-                    ])
+                    cmd.extend(
+                        [
+                            "-v",
+                            f"{run_script_path}:{_CONTAINER_RUN_SCRIPT}:ro",
+                            "-e",
+                            f"EVAL_SETUP_SCRIPT={_CONTAINER_RUN_SCRIPT}",
+                        ]
+                    )
 
             copilot_args = ["copilot", "-p", prompt, "--yolo"]
             model = variant.model or config.runner.model

@@ -4,6 +4,7 @@ Covers status mapping, JSON parsing, env-file parsing (including quote
 stripping), directory reading, RunResult serialization, secret collection,
 and secret masking.
 """
+
 from __future__ import annotations
 
 import sys
@@ -33,26 +34,35 @@ from eval.runner import (
 
 def _config(tmp_path: Path) -> Config:
     return Config(
-        vars={}, runner=RunnerConfig(), tasks=[], variants=[],
-        project_dir=tmp_path, config_dir=tmp_path,
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[],
+        variants=[],
+        project_dir=tmp_path,
+        config_dir=tmp_path,
     )
 
 
 # --- status_from_exit_code ---
 
-@pytest.mark.parametrize("code,expected", [
-    (0, "completed"),
-    (124, "timeout"),
-    (1, "failed"),
-    (2, "failed"),
-    (137, "failed"),
-    (-1, "failed"),
-])
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        (0, "completed"),
+        (124, "timeout"),
+        (1, "failed"),
+        (2, "failed"),
+        (137, "failed"),
+        (-1, "failed"),
+    ],
+)
 def test_status_from_exit_code(code, expected):
     assert status_from_exit_code(code) == expected
 
 
 # --- _parse_json ---
+
 
 def test_parse_json_single_line():
     assert _parse_json('{"score": 5, "reason": "ok"}') == {"score": 5, "reason": "ok"}
@@ -95,10 +105,7 @@ def test_parse_json_only_first_fence_is_considered():
     # later (valid) fenced block is never extracted (the brace/single-line
     # fallbacks can't isolate a multiline object after noise), the result is
     # None. This documents the current first-fence-only behavior.
-    text = (
-        '```json\n{"note": "thinking"}\n```\n'
-        '```json\n{\n  "score": 5\n}\n```'
-    )
+    text = '```json\n{"note": "thinking"}\n```\n```json\n{\n  "score": 5\n}\n```'
     assert _parse_json(text, require_keys=("score",)) is None
 
 
@@ -110,10 +117,7 @@ def test_parse_json_require_keys_accepts_matching():
 def test_parse_json_require_keys_rejects_fragment_then_finds_valid():
     # A stray object without `score` precedes the real verdict; require_keys
     # should skip the fragment and accept the object that has the key.
-    text = (
-        '{"note": "thinking"}\n'
-        '{"score": 8, "reason": "valid"}'
-    )
+    text = '{"note": "thinking"}\n{"score": 8, "reason": "valid"}'
     assert _parse_json(text, require_keys=("score",)) == {"score": 8, "reason": "valid"}
 
 
@@ -137,14 +141,10 @@ def test_parse_json_unparsable_returns_none():
 
 # --- _load_env_file ---
 
+
 def test_load_env_file_basic(tmp_path: Path):
     env_file = tmp_path / ".env"
-    env_file.write_text(
-        "# comment\n"
-        "\n"
-        "FOO=bar\n"
-        "  BAZ = qux  \n"
-    )
+    env_file.write_text("# comment\n\nFOO=bar\n  BAZ = qux  \n")
     assert _load_env_file(env_file) == {"FOO": "bar", "BAZ": "qux"}
 
 
@@ -166,14 +166,7 @@ def test_load_env_file_missing_returns_empty(tmp_path: Path):
 
 def test_load_env_file_strips_quotes(tmp_path: Path):
     env = tmp_path / ".env"
-    env.write_text(
-        '# comment\n'
-        'PLAIN=value\n'
-        'DQ="quoted value"\n'
-        "SQ='single quoted'\n"
-        '\n'
-        'EMPTY=\n'
-    )
+    env.write_text("# comment\nPLAIN=value\nDQ=\"quoted value\"\nSQ='single quoted'\n\nEMPTY=\n")
     parsed = _load_env_file(env)
     assert parsed == {
         "PLAIN": "value",
@@ -184,6 +177,7 @@ def test_load_env_file_strips_quotes(tmp_path: Path):
 
 
 # --- _strip_quotes ---
+
 
 def test_strip_quotes_removes_matching_pairs():
     assert _strip_quotes('"value"') == "value"
@@ -198,6 +192,7 @@ def test_strip_quotes_leaves_unmatched_or_bare():
 
 
 # --- read_files_from_dir ---
+
 
 def test_read_files_from_dir_none_or_not_dir(tmp_path: Path):
     assert read_files_from_dir(None) is None
@@ -261,10 +256,18 @@ def test_read_files_from_dir_stops_when_no_remaining_budget(tmp_path: Path):
 
 # --- RunResult.passed / to_dict ---
 
+
 def _make_result(status: str, scores: list[EvalScore], exit_code: int = 0) -> RunResult:
     return RunResult(
-        task="t", variant="v", epoch=1, test_id="tid", run_id="rid",
-        log_file=Path("/tmp/x.log"), exit_code=exit_code, status=status, scores=scores,
+        task="t",
+        variant="v",
+        epoch=1,
+        test_id="tid",
+        run_id="rid",
+        log_file=Path("/tmp/x.log"),
+        exit_code=exit_code,
+        status=status,
+        scores=scores,
     )
 
 
@@ -317,10 +320,18 @@ def test_to_dict_structure():
 
 def test_to_dict_includes_schedule_fields():
     r = RunResult(
-        task="t", variant="v", epoch=2, test_id="tid", run_id="rid",
-        log_file=Path("/tmp/x.log"), exit_code=0, status="completed",
-        order_index=3, started_at="2026-01-01T00:00:00",
-        finished_at="2026-01-01T00:01:00", duration_seconds=60.0,
+        task="t",
+        variant="v",
+        epoch=2,
+        test_id="tid",
+        run_id="rid",
+        log_file=Path("/tmp/x.log"),
+        exit_code=0,
+        status="completed",
+        order_index=3,
+        started_at="2026-01-01T00:00:00",
+        finished_at="2026-01-01T00:01:00",
+        duration_seconds=60.0,
     )
     d = r.to_dict()
     assert d["order_index"] == 3
@@ -330,6 +341,7 @@ def test_to_dict_includes_schedule_fields():
 
 
 # --- collect_secrets / mask_secrets ---
+
 
 def test_collect_secrets_filters_short_values(tmp_path, monkeypatch):
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -390,6 +402,7 @@ def test_write_sanitized_env_file_handles_missing_env(tmp_path):
 
 # --- run_one failure isolation & hook policy ---
 
+
 def _stub_no_docker(monkeypatch, runner_mod, *, docker_rc: int = 0):
     """Stub out everything in run_one that touches Docker / external tools so the
     function can be driven end-to-end in a unit test."""
@@ -421,8 +434,13 @@ def test_run_one_setup_exception_returns_setup_failed(tmp_path, monkeypatch):
 
     task = Task(name="t", prompt="p")
     result = runner_mod.run_one(
-        task, Variant(name="v"), epoch=1, config=config, run_id="r",
-        run_dir=run_dir, github_token="tok",
+        task,
+        Variant(name="v"),
+        epoch=1,
+        config=config,
+        run_id="r",
+        run_dir=run_dir,
+        github_token="tok",
     )
 
     assert result.status == "setup_failed"
@@ -442,8 +460,13 @@ def test_run_one_before_run_fail_aborts(tmp_path, monkeypatch):
 
     task = Task(name="t", prompt="p", hooks=Hooks(before_run="b.sh", on_failure="fail"))
     result = runner_mod.run_one(
-        task, Variant(name="v"), epoch=1, config=config, run_id="r",
-        run_dir=run_dir, github_token="tok",
+        task,
+        Variant(name="v"),
+        epoch=1,
+        config=config,
+        run_id="r",
+        run_dir=run_dir,
+        github_token="tok",
     )
 
     assert result.status == "setup_failed"
@@ -461,14 +484,20 @@ def test_run_one_before_run_warn_continues(tmp_path, monkeypatch):
     _stub_no_docker(monkeypatch, runner_mod, docker_rc=0)
     # before_run fails (1), after_run absent (0)
     monkeypatch.setattr(
-        runner_mod, "_run_hook",
+        runner_mod,
+        "_run_hook",
         lambda script, *a, **k: 1 if script == "b.sh" else 0,
     )
 
     task = Task(name="t", prompt="p", hooks=Hooks(before_run="b.sh", on_failure="warn"))
     result = runner_mod.run_one(
-        task, Variant(name="v"), epoch=1, config=config, run_id="r",
-        run_dir=run_dir, github_token="tok",
+        task,
+        Variant(name="v"),
+        epoch=1,
+        config=config,
+        run_id="r",
+        run_dir=run_dir,
+        github_token="tok",
     )
 
     assert result.status == "completed"
@@ -485,14 +514,20 @@ def test_run_one_after_run_failure_surfaces_in_scores(tmp_path, monkeypatch):
     run_dir.mkdir()
     _stub_no_docker(monkeypatch, runner_mod, docker_rc=0)
     monkeypatch.setattr(
-        runner_mod, "_run_hook",
+        runner_mod,
+        "_run_hook",
         lambda script, *a, **k: 3 if script == "a.sh" else 0,
     )
 
     task = Task(name="t", prompt="p", hooks=Hooks(after_run="a.sh"))
     result = runner_mod.run_one(
-        task, Variant(name="v"), epoch=1, config=config, run_id="r",
-        run_dir=run_dir, github_token="tok",
+        task,
+        Variant(name="v"),
+        epoch=1,
+        config=config,
+        run_id="r",
+        run_dir=run_dir,
+        github_token="tok",
     )
 
     assert result.status == "completed"
@@ -520,8 +555,13 @@ def test_run_one_post_processing_exception_preserves_run_status(tmp_path, monkey
     monkeypatch.setattr(runner_mod, "_run_evaluators", boom)
 
     result = runner_mod.run_one(
-        Task(name="t", prompt="p"), Variant(name="v"), epoch=1, config=config,
-        run_id="r", run_dir=run_dir, github_token="tok",
+        Task(name="t", prompt="p"),
+        Variant(name="v"),
+        epoch=1,
+        config=config,
+        run_id="r",
+        run_dir=run_dir,
+        github_token="tok",
     )
 
     assert result.status == "completed"  # docker exited 0
@@ -560,7 +600,12 @@ def test_run_one_masks_log_on_setup_failed(tmp_path, monkeypatch):
     task = Task(name="t", prompt="p", health_check="hc.sh")
     variant = Variant(name="v")
     result = runner_mod.run_one(
-        task, variant, epoch=1, config=config, run_id="r", run_dir=run_dir,
+        task,
+        variant,
+        epoch=1,
+        config=config,
+        run_id="r",
+        run_dir=run_dir,
         github_token="ghp_tokenvalue123",
     )
 
@@ -570,23 +615,30 @@ def test_run_one_masks_log_on_setup_failed(tmp_path, monkeypatch):
     assert "***REDACTED***" in text
     # No leftover temp env files.
     assert not list(Path(tempfile.gettempdir()).glob("eval-env-*"))
+
+
 # --- judge aggregation / self-consistency ---
 
-@pytest.mark.parametrize("samples,method,expected", [
-    ([8], "median", 8),
-    ([4, 8, 9], "median", 8),
-    ([4, 8, 9], "mean", 7),
-    ([5, 5, 9], "majority", 5),
-    ([5, 9], "majority", 5),
-    ([6, 7], "median", 7),
-    ([6, 7], "mean", 7),
-    ([7, 8], "mean", 8),
-])
+
+@pytest.mark.parametrize(
+    "samples,method,expected",
+    [
+        ([8], "median", 8),
+        ([4, 8, 9], "median", 8),
+        ([4, 8, 9], "mean", 7),
+        ([5, 5, 9], "majority", 5),
+        ([5, 9], "majority", 5),
+        ([6, 7], "median", 7),
+        ([6, 7], "mean", 7),
+        ([7, 8], "mean", 8),
+    ],
+)
 def test_aggregate_scores(samples, method, expected):
     assert _aggregate_scores(samples, method) == expected
 
 
 # --- host_copilot_version / run_judge runtime metadata ---
+
 
 class _FakeProc:
     def __init__(self, stdout="", stderr="", returncode=0):
@@ -597,26 +649,36 @@ class _FakeProc:
 
 def _judge_config(tmp_path: Path, **runner_kw) -> Config:
     return Config(
-        vars={}, runner=RunnerConfig(**runner_kw), tasks=[], variants=[],
-        project_dir=tmp_path, config_dir=tmp_path,
+        vars={},
+        runner=RunnerConfig(**runner_kw),
+        tasks=[],
+        variants=[],
+        project_dir=tmp_path,
+        config_dir=tmp_path,
     )
 
 
 def _reset_version_cache(monkeypatch):
     from eval import runner as runner_mod
+
     monkeypatch.setattr(runner_mod, "_host_copilot_version_cache", None, raising=False)
 
 
 def test_host_copilot_version_parses_first_line(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     _reset_version_cache(monkeypatch)
-    monkeypatch.setattr(runner_mod.subprocess, "run",
-                        lambda *a, **k: _FakeProc(stdout="copilot/1.0.18\nextra banner\n"))
+    monkeypatch.setattr(
+        runner_mod.subprocess,
+        "run",
+        lambda *a, **k: _FakeProc(stdout="copilot/1.0.18\nextra banner\n"),
+    )
     assert runner_mod.host_copilot_version() == "copilot/1.0.18"
 
 
 def test_host_copilot_version_caches(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     _reset_version_cache(monkeypatch)
     calls = {"n": 0}
 
@@ -632,6 +694,7 @@ def test_host_copilot_version_caches(tmp_path, monkeypatch):
 
 def test_host_copilot_version_none_on_failure(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     _reset_version_cache(monkeypatch)
 
     def boom(*a, **k):
@@ -643,6 +706,7 @@ def test_host_copilot_version_none_on_failure(tmp_path, monkeypatch):
 
 def _patch_judge(monkeypatch, proc=None, exc=None, version="copilot/1.0.18"):
     from eval import runner as runner_mod
+
     monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: version)
 
     def fake_run(*a, **k):
@@ -659,6 +723,7 @@ def _ev():
 
 def test_run_judge_ok_records_meta(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     _patch_judge(monkeypatch, proc=_FakeProc(stdout='{"score": 8, "reason": "good"}'))
     s = runner_mod.run_judge(_ev(), "conversation", _judge_config(tmp_path), token=None)
     assert s.score == 8
@@ -670,6 +735,7 @@ def test_run_judge_ok_records_meta(tmp_path, monkeypatch):
 
 def test_run_judge_parse_error(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     _patch_judge(monkeypatch, proc=_FakeProc(stdout="not json at all", returncode=0))
     s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
     assert s.score is None
@@ -679,6 +745,7 @@ def test_run_judge_parse_error(tmp_path, monkeypatch):
 
 def test_run_judge_error_returncode_surfaces_stderr(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     _patch_judge(monkeypatch, proc=_FakeProc(stdout="", stderr="boom failed", returncode=3))
     s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
     assert s.score is None
@@ -693,6 +760,7 @@ def test_run_judge_timeout(tmp_path, monkeypatch):
     import subprocess as sp
 
     from eval import runner as runner_mod
+
     _patch_judge(monkeypatch, exc=sp.TimeoutExpired(cmd="copilot", timeout=60))
     s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
     assert s.score is None
@@ -701,6 +769,7 @@ def test_run_judge_timeout(tmp_path, monkeypatch):
 
 def test_run_judge_not_found(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     _patch_judge(monkeypatch, exc=FileNotFoundError())
     s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
     assert s.score is None
@@ -709,25 +778,39 @@ def test_run_judge_not_found(tmp_path, monkeypatch):
 
 def test_run_judge_version_mismatch(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     _patch_judge(monkeypatch, proc=_FakeProc(stdout='{"score": 5}'), version="copilot/1.0.18")
     config = _judge_config(tmp_path, judge_copilot_version="copilot/9.9.9")
     s = runner_mod.run_judge(_ev(), "c", config, token=None)
-    assert s.meta["judge_version_mismatch"] == {"expected": "copilot/9.9.9", "actual": "copilot/1.0.18"}
+    assert s.meta["judge_version_mismatch"] == {
+        "expected": "copilot/9.9.9",
+        "actual": "copilot/1.0.18",
+    }
 
 
 def test_run_judge_passes_through_extra_meta(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     _patch_judge(monkeypatch, proc=_FakeProc(stdout='{"score": 7}'))
-    s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None,
-                             extra_meta={"truncation": {"conversation": 8000}})
+    s = runner_mod.run_judge(
+        _ev(),
+        "c",
+        _judge_config(tmp_path),
+        token=None,
+        extra_meta={"truncation": {"conversation": 8000}},
+    )
     assert s.meta["truncation"] == {"conversation": 8000}
 
 
 def test_evalscore_to_dict_includes_meta():
     s = EvalScore(name="j", type="judge", score=5, reason="ok", meta={"outcome": "ok"})
     assert s.to_dict() == {
-        "name": "j", "type": "judge", "score": 5, "reason": "ok",
-        "passed": True, "meta": {"outcome": "ok"},
+        "name": "j",
+        "type": "judge",
+        "score": 5,
+        "reason": "ok",
+        "passed": True,
+        "meta": {"outcome": "ok"},
     }
 
 
@@ -738,6 +821,7 @@ def test_evalscore_to_dict_omits_empty_meta():
 
 def test_run_judge_invalid_score_value(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     _patch_judge(monkeypatch, proc=_FakeProc(stdout='{"score": "N/A", "reason": "x"}'))
     s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
     assert s.score is None
@@ -746,6 +830,7 @@ def test_run_judge_invalid_score_value(tmp_path, monkeypatch):
 
 def test_run_judge_nonzero_exit_with_valid_json(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     _patch_judge(monkeypatch, proc=_FakeProc(stdout='{"score": 6}', returncode=1))
     s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
     assert s.score == 6
@@ -754,6 +839,7 @@ def test_run_judge_nonzero_exit_with_valid_json(tmp_path, monkeypatch):
 
 def test_run_judge_mismatch_when_version_unavailable(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     _patch_judge(monkeypatch, proc=_FakeProc(stdout='{"score": 5}'), version=None)
     config = _judge_config(tmp_path, judge_copilot_version="copilot/1.0.18")
     s = runner_mod.run_judge(_ev(), "c", config, token=None)
@@ -762,9 +848,12 @@ def test_run_judge_mismatch_when_version_unavailable(tmp_path, monkeypatch):
 
 def test_run_judge_masks_secrets_in_stderr(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     (tmp_path / ".env").write_text('SECRET="supersecretvalue"\n')
-    _patch_judge(monkeypatch, proc=_FakeProc(stdout="nope", stderr="boom supersecretvalue", returncode=2))
+    _patch_judge(
+        monkeypatch, proc=_FakeProc(stdout="nope", stderr="boom supersecretvalue", returncode=2)
+    )
     s = runner_mod.run_judge(_ev(), "c", _judge_config(tmp_path), token=None)
     assert "supersecretvalue" not in s.meta["stderr"]
     assert "supersecretvalue" not in s.reason
@@ -772,14 +861,16 @@ def test_run_judge_masks_secrets_in_stderr(tmp_path, monkeypatch):
 
 # --- judge self-consistency (repeated sampling) ---
 
+
 def test_run_judge_single_sample_legacy(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "1.2.3")
-    monkeypatch.setattr(runner_mod, "_run_judge_once",
-                        lambda *a, **k: (7, "solid", "ok", {"returncode": 0}))
-    s = run_judge(_ev(), "conversation",
-                  _judge_config(tmp_path, judge_model="test-model"), "tok")
+    monkeypatch.setattr(
+        runner_mod, "_run_judge_once", lambda *a, **k: (7, "solid", "ok", {"returncode": 0})
+    )
+    s = run_judge(_ev(), "conversation", _judge_config(tmp_path, judge_model="test-model"), "tok")
     assert s.score == 7
     assert s.reason == "solid"
     assert s.samples == [7]
@@ -793,12 +884,14 @@ def test_run_judge_single_sample_legacy(tmp_path, monkeypatch):
 
 def test_run_judge_repeated_sampling_median(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "v")
     results = iter([(4, "weak", "ok", {}), (8, "good", "ok", {}), (9, "great", "ok", {})])
     monkeypatch.setattr(runner_mod, "_run_judge_once", lambda *a, **k: next(results))
-    s = run_judge(_ev(), "conv",
-                  _judge_config(tmp_path, judge_model="test-model", judge_samples=3), "tok")
+    s = run_judge(
+        _ev(), "conv", _judge_config(tmp_path, judge_model="test-model", judge_samples=3), "tok"
+    )
     assert s.score == 8
     assert sorted(s.samples) == [4, 8, 9]
     assert s.n_samples == 3
@@ -809,12 +902,16 @@ def test_run_judge_repeated_sampling_median(tmp_path, monkeypatch):
 
 def test_run_judge_partial_failures(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "v")
-    results = iter([(6, "ok-ish", "ok", {}), (None, "timeout", "timeout", {}), (8, "good", "ok", {})])
+    results = iter(
+        [(6, "ok-ish", "ok", {}), (None, "timeout", "timeout", {}), (8, "good", "ok", {})]
+    )
     monkeypatch.setattr(runner_mod, "_run_judge_once", lambda *a, **k: next(results))
-    s = run_judge(_ev(), "conv",
-                  _judge_config(tmp_path, judge_model="test-model", judge_samples=3), "tok")
+    s = run_judge(
+        _ev(), "conv", _judge_config(tmp_path, judge_model="test-model", judge_samples=3), "tok"
+    )
     assert s.score == 7
     assert s.outcomes == {"ok": 2, "timeout": 1}
     assert "median of 2/3" in s.reason
@@ -822,14 +919,20 @@ def test_run_judge_partial_failures(tmp_path, monkeypatch):
 
 def test_run_judge_all_failures_returns_dominant_outcome(tmp_path, monkeypatch):
     from eval import runner as runner_mod
+
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "v")
-    results = iter([(None, "parse_error", "parse_error", {}),
-                    (None, "timeout", "timeout", {}),
-                    (None, "parse_error", "parse_error", {})])
+    results = iter(
+        [
+            (None, "parse_error", "parse_error", {}),
+            (None, "timeout", "timeout", {}),
+            (None, "parse_error", "parse_error", {}),
+        ]
+    )
     monkeypatch.setattr(runner_mod, "_run_judge_once", lambda *a, **k: next(results))
-    s = run_judge(_ev(), "conv",
-                  _judge_config(tmp_path, judge_model="test-model", judge_samples=3), "tok")
+    s = run_judge(
+        _ev(), "conv", _judge_config(tmp_path, judge_model="test-model", judge_samples=3), "tok"
+    )
     assert s.score is None
     assert s.passed is False
     assert s.reason == "parse_error"
@@ -837,9 +940,19 @@ def test_run_judge_all_failures_returns_dominant_outcome(tmp_path, monkeypatch):
 
 
 def test_score_to_dict_judge_includes_metadata():
-    s = EvalScore(name="q", type="judge", score=8, reason="r", passed=True,
-                  samples=[8, 8], score_stddev=0.0, n_samples=2,
-                  outcomes={"ok": 2}, judge_model="m", judge_version="v")
+    s = EvalScore(
+        name="q",
+        type="judge",
+        score=8,
+        reason="r",
+        passed=True,
+        samples=[8, 8],
+        score_stddev=0.0,
+        n_samples=2,
+        outcomes={"ok": 2},
+        judge_model="m",
+        judge_version="v",
+    )
     d = score_to_dict(s)
     assert d["samples"] == [8, 8]
     assert d["n_samples"] == 2
