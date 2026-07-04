@@ -57,8 +57,13 @@ Image-side keys like `installed_plugins` are preserved. If the merge fails, it f
 ## Docker build
 
 ```bash
-# Base image (shared by all variants)
-docker build -f docker/Dockerfile --build-arg COPILOT_VERSION=1.0.18 -t copilot-eval:base .
+# Preferred: the CLI injects the pinned version (eval.config.DEFAULT_COPILOT_VERSION)
+uv run copilot-eval build --config-dir <dir>
+
+# Manual base image build — derive the version instead of hardcoding it:
+docker build -f docker/Dockerfile \
+  --build-arg COPILOT_VERSION="$(uv run python -c 'from eval.config import DEFAULT_COPILOT_VERSION; print(DEFAULT_COPILOT_VERSION)')" \
+  -t copilot-eval:base .
 
 # Variant image (FROM copilot-eval:base)
 docker build -f examples/azure-skills/docker/Dockerfile.azure-skills \
