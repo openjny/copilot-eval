@@ -1,0 +1,24 @@
+# Example task: a first green run that proves Copilot CLI executes inside
+# the container and produces a checkable artifact. No wrapping `tasks:` key —
+# this file IS the task definition (file stem "hello-world" is the fallback
+# name, so `name` below is technically redundant but kept for clarity).
+# See docs/configuration.md#eval-configyaml for the full field reference.
+name: hello-world
+
+# The prompt sent to Copilot CLI inside the container. Supports {var}
+# interpolation from vars (global -> task -> variant).
+prompt: >-
+  Create a file named hello.txt in /workspace/output/ containing the text
+  "Hello, Copilot!". Reply with a short confirmation once it's created.
+
+# Directory under fixtures/ copied into /workspace before the prompt runs.
+# Defaults to the task name when omitted — fixtures/hello-world/ here.
+fixture: hello-world
+
+evaluators:
+  # Deterministic check (no LLM call): PASS iff this substring appears in the
+  # run's log/transcript. Good default for a first-green-run smoke test —
+  # see docs/configuration.md#evaluators for judge/script/regex alternatives.
+  - name: mentions-hello-file
+    type: contains
+    value: "hello.txt"

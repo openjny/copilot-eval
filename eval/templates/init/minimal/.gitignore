@@ -1,0 +1,10 @@
+# Secrets — never commit the real file
+.env
+.env.*
+!.env.example
+
+# Eval results (per-run data, regenerable)
+results/
+
+# OS / editor cruft
+.DS_Store

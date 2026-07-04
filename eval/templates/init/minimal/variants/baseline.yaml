@@ -1,0 +1,10 @@
+# Baseline (control) variant: plain Copilot CLI, no customizations. No
+# wrapping `variants:` key — this file IS the variant definition (file stem
+# "baseline" is the fallback name).
+description: "Plain Copilot CLI, no customizations"
+
+# No `build.dockerfile` here — copilot-eval tags the shared base image
+# (docker/Dockerfile) directly as this variant's image. Compare against
+# variants/experimental.yaml, which layers docker/Dockerfile.experimental on
+# top of that same base to add the thing you're evaluating (a plugin,
+# instructions file, MCP server, ...).

@@ -1,0 +1,11 @@
+# Experimental (treatment) variant: builds on the base image with the Copilot
+# customization you want to A/B test (a skill, custom agent, instructions
+# file, MCP server, ...). No wrapping `variants:` key — this file IS the
+# variant definition (file stem "experimental" is the fallback name).
+description: "Copilot CLI with the customization under test"
+
+build:
+  # Edit docker/Dockerfile.experimental to add the plugin/instructions/MCP
+  # server you're evaluating. It must start `FROM copilot-eval:base` so it
+  # layers on the same image the baseline variant reuses unmodified.
+  dockerfile: __DOCKERFILE_PATH__

@@ -37,6 +37,25 @@ generator's output, or if any config under `examples/` (or the root
 > shape. Configs that split tasks/variants into `tasks/*.yaml` /
 > `variants/*.yaml` files aren't schema-checked per-file (yet).
 
+## Scaffolding a new project (`init`)
+
+Starting from a blank `eval-config.yaml` is tedious — `init` generates a
+minimal, already-runnable eval instead:
+
+```bash
+uv run copilot-eval init --config-dir my-eval
+```
+
+This creates `my-eval/` with `eval-config.yaml` (pointing at the JSON Schema
+above), a `hello-world` task with one deterministic `contains` evaluator, a
+`baseline`/`experimental` variant pair (the latter with a
+`docker/Dockerfile.experimental` stub — layer the plugin/instructions/MCP
+server you're testing on top of `copilot-eval:base` there), a matching empty
+fixture, `.env.example`, and a `.gitignore` that excludes `results/` and
+`.env`. Pass `--force` to overwrite an existing directory's files. Run
+`validate`, then `run --dry-run`, to confirm it works before wiring up your
+own tasks and variants.
+
 ## Validation
 
 Before running an eval, catch config typos and missing references early with:

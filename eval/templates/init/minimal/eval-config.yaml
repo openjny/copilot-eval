@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=__SCHEMA_PATH__
+#
+# copilot-eval configuration. This file only holds global settings — tasks
+# and variants live in tasks/*.yaml and variants/*.yaml (loaded automatically
+# because those directories exist). See docs/configuration.md for the full
+# field reference.
+
+# Global template variables, merged into every task/variant prompt via
+# {var} interpolation (vars -> task.vars -> variant.vars, later wins). Empty
+# by default; add shared values here instead of repeating them per task.
+vars: {}
+
+runner:
+  # Repetitions per task x variant. Higher values reduce noise in judge
+  # scores at the cost of more time/tokens; 1 is enough to sanity-check a run.
+  epochs: 1
+  # Max seconds a single Copilot run is allowed before it's killed.
+  timeout_seconds: 300
+  # Base name for the Docker images copilot-eval builds/tags (":base" plus
+  # one tag per variant, e.g. ":baseline", ":experimental").
+  container_image_base: copilot-eval
+  # OTel collector endpoint the container sends traces to. The default
+  # (file collector, see below) doesn't need this reachable, but it must stay
+  # set for the container's OTel SDK to initialize without erroring.
+  otel_endpoint: http://host.docker.internal:4318
+  # Trace collection backend: "file" writes an OTel JSONL locally (default,
+  # zero infrastructure); "jaeger" queries a running Jaeger instance instead
+  # (docker-compose up -d) — see docs/configuration.md#trace-collector.
+  collector: file
+
+# Next steps:
+#   1. cp .env.example .env   (fill in COPILOT_GITHUB_TOKEN)
+#   2. uv run copilot-eval validate --config-dir <this-dir>
+#   3. uv run copilot-eval run --config-dir <this-dir> --dry-run
+#   4. uv run copilot-eval run --config-dir <this-dir>
