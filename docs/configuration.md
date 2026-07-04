@@ -92,6 +92,32 @@ Docker work, so a `run` fails fast with an actionable message instead of
 warnings are printed but the run proceeds. Pass `--skip-preflight` to bypass
 these checks entirely (e.g. in CI environments where they may be noisy).
 
+## Resuming a run
+
+`run --resume --run-id <ID>` re-runs only the matrix cells (task × variant ×
+epoch × fixture) that are **missing** or **failed** in an existing run,
+instead of starting a new run-id from scratch:
+
+```bash
+uv run copilot-eval run --config-dir <dir> --resume --run-id 20240101-120000-abc123
+```
+
+A cell counts as done only if the run's manifest (`results/<run-id>/results.json`)
+recorded it with status `completed`; anything else — `failed`, `timeout`,
+`setup_failed`, or simply absent (e.g. the process was killed mid-run) — is
+re-executed. New results are merged back into the same `results/<run-id>/`
+directory (the run-id never changes), so `analyze` continues to work against
+one manifest covering the whole matrix. Resuming a fully-successful run is a
+no-op. If `results.json` is missing or unreadable, resume conservatively
+treats every cell as missing and re-runs the whole matrix rather than risk
+silently skipping something it couldn't verify.
+
+`--resume` re-executes against the *current* config, so picking up a changed
+prompt/evaluator/variant mid-iteration is expected. Changing the scheduling
+strategy (`runner.parallel`, `variant_order`, `seed`) between the original
+run and a resume, however, only prints a warning — the merged manifest may
+then mix scheduling strategies across the original and resumed cells.
+
 ## eval-config.yaml
 
 Each eval set is defined by a single `eval-config.yaml` file. It contains global settings, variants, and tasks.

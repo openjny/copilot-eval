@@ -24,11 +24,24 @@ def write_manifest(
     run_dir: Path, run_id: str, results: list[RunResult], schedule: dict[str, Any] | None = None
 ) -> None:
     """Persist the full set of runs so `analyze` can detect missing/failed ones."""
+    write_manifest_dicts(run_dir, run_id, [r.to_dict() for r in results], schedule)
+
+
+def write_manifest_dicts(
+    run_dir: Path, run_id: str, runs: list[dict[str, Any]], schedule: dict[str, Any] | None = None
+) -> None:
+    """Same as :func:`write_manifest`, but takes already-serialized run dicts.
+
+    Used by `run --resume` (see ``eval.services.resume_service``), which merges
+    freshly executed :class:`RunResult` dicts with rows carried over verbatim
+    from the prior manifest -- there's no single ``list[RunResult]`` to hand
+    ``write_manifest`` in that case.
+    """
     manifest = {
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "schedule": schedule or {},
-        "runs": [r.to_dict() for r in results],
+        "runs": runs,
     }
     try:
         (run_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2, ensure_ascii=False))

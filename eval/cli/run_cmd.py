@@ -31,6 +31,16 @@ from eval.services.orchestrator import run_command
     is_flag=True,
     help="Disable live progress reporting (progress bar / per-cell status)",
 )
+@click.option(
+    "--resume",
+    is_flag=True,
+    help="Re-run only failed/missing matrix cells from an existing run (requires --run-id)",
+)
+@click.option(
+    "--run-id",
+    default=None,
+    help="Existing run id to resume (with --resume); new results merge into its directory",
+)
 @click.option("--config-dir", default=None, type=click.Path(exists=True), help="Project directory")
 def run(
     task: str | None,
@@ -39,6 +49,8 @@ def run(
     no_build: bool,
     skip_preflight: bool,
     no_progress: bool,
+    resume: bool,
+    run_id: str | None,
     config_dir: str | None,
 ) -> None:
     """Run A/B eval for one or more tasks."""
@@ -52,4 +64,6 @@ def run(
         skip_preflight=skip_preflight,
         config_dir=config_dir,
         no_progress=no_progress,
+        resume=resume,
+        run_id=run_id,
     )
