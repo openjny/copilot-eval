@@ -31,6 +31,15 @@ from eval.trace import (
     fetch_traces,
     filter_by_run,
 )
+from eval.validation import (
+    CheckResult,
+    any_failed,
+    check_config_schema,
+    check_fixtures,
+    check_script_references,
+    check_var_interpolation,
+    validate_readiness,
+)
 
 logger = getLogger(__name__)
 
@@ -134,6 +143,14 @@ def _load_manifest(results_dir: Path) -> list[dict[str, Any]] | None:
         return None
     runs = data.get("runs") if isinstance(data, dict) else None
     return runs if isinstance(runs, list) else None
+
+
+def _print_check_results(results: list[CheckResult], title: str) -> None:
+    """Print a validation/readiness report, one line per check, to stderr."""
+    passed = sum(1 for r in results if r.passed)
+    click.echo(f"{title}: {passed}/{len(results)} passed", err=True)
+    for r in results:
+        click.echo(r.format(), err=True)
 
 
 @click.group()
@@ -287,6 +304,15 @@ def run(
             f"fixtures for each task ({total} runs total)."
         )
         return
+
+    # Pre-flight: fail fast on missing Docker/auth/fixtures/disk space before
+    # doing any Docker work (build, pull, or jaeger startup).
+    preflight = validate_readiness(config, tasks=tasks, check_build=not no_build)
+    if any_failed(preflight):
+        _print_check_results(preflight, "Pre-flight checks")
+        raise click.ClickException(
+            "Pre-flight validation failed. Fix the issues above and re-run."
+        )
 
     if config.runner.collector == "jaeger":
         _ensure_jaeger(config)
@@ -1181,3 +1207,30 @@ def list_tasks(config_dir: str | None) -> None:
         has_build = "✓" if v.dockerfile else "−"
         has_run = "✓" if v.run_script else "−"
         click.echo(f"  {v.name:<25} {has_build:<8} {has_run:<8} {v.description[:40]}")
+
+
+@main.command()
+@click.option("--config-dir", default=None, type=click.Path(exists=True), help="Project directory")
+def validate(config_dir: str | None) -> None:
+    """Validate an eval-config.yaml: schema, fixtures, script/variant references, and vars.
+
+    Checks (independent of Docker/auth, unlike `run`'s pre-flight checks):
+    - YAML syntax and schema validity
+    - Referenced fixture directories exist on disk
+    - Variant/task script references (Dockerfile, run script, hooks,
+      health_check, script evaluators) exist on disk
+    - {var} prompt/output_instruction placeholders resolve for every variant
+
+    Exits 0 if all checks pass, 1 otherwise.
+    """
+    config, schema_result = check_config_schema(Path(config_dir) if config_dir else None)
+    results: list[CheckResult] = [schema_result]
+    if config is not None:
+        results += check_fixtures(config)
+        results += check_script_references(config)
+        results += check_var_interpolation(config)
+
+    _print_check_results(results, "Validation")
+    if any_failed(results):
+        raise click.exceptions.Exit(1)
+    click.echo("All checks passed.", err=True)

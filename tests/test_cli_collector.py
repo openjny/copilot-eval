@@ -41,6 +41,7 @@ class TestRunCollectorSwitching:
             patch("eval.cli._ensure_jaeger") as mock_ensure,
             patch("eval.cli.get_github_token", return_value="fake-token"),
             patch("eval.cli._ensure_images"),
+            patch("eval.cli.validate_readiness", return_value=[]),
             patch("eval.cli.run_one") as mock_run_one,
         ):
             mock_run_one.return_value = MagicMock(
@@ -71,6 +72,7 @@ class TestRunCollectorSwitching:
             patch("eval.cli._ensure_jaeger") as mock_ensure,
             patch("eval.cli.get_github_token", return_value="fake-token"),
             patch("eval.cli._ensure_images"),
+            patch("eval.cli.validate_readiness", return_value=[]),
             patch("eval.cli.run_one") as mock_run_one,
         ):
             mock_run_one.return_value = MagicMock(

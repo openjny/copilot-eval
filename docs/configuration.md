@@ -1,5 +1,27 @@
 # Configuration Guide
 
+## Validation
+
+Before running an eval, catch config typos and missing references early with:
+
+```bash
+uv run copilot-eval validate --config-dir <dir>
+```
+
+This checks YAML syntax/schema validity, that every referenced fixture directory
+exists on disk, that variant/task script references (Dockerfiles, run scripts,
+hooks, health checks, script evaluators) point to real files, and that every
+`{var}` placeholder in a prompt or `output_instruction` resolves for each
+variant. Every failure includes a remediation hint; the command exits `0` when
+all checks pass and `1` otherwise.
+
+`copilot-eval run` also performs its own pre-flight readiness checks (Docker
+daemon reachable, `GITHUB_TOKEN`/`COPILOT_GITHUB_TOKEN` set or `gh auth`
+available, fixture directories present, sufficient disk space, and — unless
+`--no-build` is passed — that the base Docker image exists) before doing any
+Docker work, so a `run` fails fast with an actionable message instead of
+20+ minutes in.
+
 ## eval-config.yaml
 
 Each eval set is defined by a single `eval-config.yaml` file. It contains global settings, variants, and tasks.
