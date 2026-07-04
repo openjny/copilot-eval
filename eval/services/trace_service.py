@@ -12,7 +12,9 @@ import click
 from eval.collectors import create_collector
 from eval.config import Config, Task, Variant
 from eval.protocols import RunContext, RunStatus
-from eval.trace import Trace, fetch_traces, filter_by_run
+from eval.services.manifest import load_manifest
+from eval.services.orchestrator import _ensure_jaeger
+from eval.trace import RunMetrics, Trace, extract_metrics, fetch_traces, filter_by_run
 
 
 def _fetch_traces_for_run(
@@ -69,6 +71,29 @@ def _collect_file_traces(config: Config, run_id: str, results_dir: Path) -> list
             config=config,
         )
     )
+
+
+def load_run_metrics(
+    config: Config, run_id: str, jaeger_url: str | None = None
+) -> list[RunMetrics]:
+    """Fetch traces for a completed run and extract `RunMetrics`, using the
+    same Jaeger-vs-file-collector selection as `analyze`. Used by `baseline
+    save`, which only needs the numeric metrics (not judge scores) to snapshot
+    a run for later cross-run comparison.
+    """
+    results_dir = config.results_dir / run_id
+    manifest_runs = load_manifest(results_dir)
+
+    collector_type = "jaeger" if jaeger_url else config.runner.collector
+    traces: list[Trace]
+    if collector_type == "jaeger":
+        jaeger = jaeger_url or config.runner.jaeger_url
+        _ensure_jaeger(config, jaeger)
+        traces = _fetch_traces_for_run(config, jaeger, run_id, manifest_runs)
+    else:
+        traces = _collect_file_traces(config, run_id, results_dir)
+
+    return [m for m in (extract_metrics(t) for t in traces) if m is not None]
 
 
 def _report_run_coverage(manifest_runs: list[dict[str, Any]], traces: list[Trace]) -> None:

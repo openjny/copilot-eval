@@ -68,6 +68,25 @@ from eval.services.analyze_service import run_analysis
     is_flag=True,
     help="Disable live progress reporting for judge scoring",
 )
+@click.option(
+    "--baseline",
+    "baseline_name",
+    default=None,
+    help=(
+        "Compare against a named baseline snapshot (see `baseline save`) "
+        "using unpaired bootstrap resampling across runs, in addition to the "
+        "within-run A/B comparison above."
+    ),
+)
+@click.option(
+    "--fail-on-regression/--no-fail-on-regression",
+    default=None,
+    help=(
+        "With --baseline: exit non-zero when a statistically significant "
+        "regression is detected. Defaults to enabled when the CI env var is "
+        "set, disabled otherwise."
+    ),
+)
 def analyze(
     run_id: str,
     output: str,
@@ -80,6 +99,8 @@ def analyze(
     no_mc_correction: bool,
     compact: bool,
     no_progress: bool,
+    baseline_name: str | None,
+    fail_on_regression: bool | None,
 ) -> None:
     """Analyze traces from a previous eval run."""
     run_analysis(
@@ -94,4 +115,6 @@ def analyze(
         mc_correction="none" if no_mc_correction else "holm",
         compact=compact,
         no_progress=no_progress,
+        baseline_name=baseline_name,
+        fail_on_regression=fail_on_regression,
     )

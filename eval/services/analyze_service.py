@@ -5,6 +5,8 @@ on metric thresholds.
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 import click
@@ -12,8 +14,12 @@ import click
 from eval.config import load_config
 from eval.progress import create_reporter
 from eval.report import (
+    BaselineComparison,
     Report,
+    baseline_comparisons_json,
+    build_baseline_comparisons,
     build_report,
+    format_baseline_table,
     format_gha_summary,
     format_html,
     format_json,
@@ -23,6 +29,7 @@ from eval.report import (
     format_table,
     write_gha_summary,
 )
+from eval.services.baseline_service import load_baseline
 from eval.services.judge_service import (
     _report_judge_reliability,
     _run_judges,
@@ -73,6 +80,8 @@ def run_analysis(
     mc_correction: str = "holm",
     compact: bool = False,
     no_progress: bool = False,
+    baseline_name: str | None = None,
+    fail_on_regression: bool | None = None,
 ) -> None:
     """Analyze traces from a previous eval run and print the A/B report."""
     config = load_config(Path(config_dir) if config_dir else None)
@@ -144,14 +153,35 @@ def run_analysis(
         click.echo("No reports generated.", err=True)
         return
 
+    # Cross-run baseline comparison (issue #65): compares this run's raw
+    # metrics against a previously saved snapshot (`baseline save`) via
+    # unpaired bootstrap, since the two runs share no epoch to pair on.
+    baseline_comparisons: list[BaselineComparison] = []
+    baseline_missing: list[str] = []
+    if baseline_name:
+        baseline_data = load_baseline(config, baseline_name)
+        baseline_comparisons, baseline_missing = build_baseline_comparisons(
+            metrics, baseline_data, variant_order, mc_correction
+        )
+
     formatter = (
         format_markdown_compact if (compact and output == "markdown") else _FORMATTERS[output]
     )
-    content = formatter(reports)
-    if output == "gha-summary" and write_gha_summary(content):
-        click.echo("Report appended to $GITHUB_STEP_SUMMARY.", err=True)
+    if output == "json":
+        payload = json.loads(formatter(reports))
+        if baseline_name:
+            payload["baseline"] = baseline_comparisons_json(baseline_comparisons, baseline_missing)
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
-        click.echo(content)
+        content = formatter(reports)
+        if baseline_name:
+            content = (
+                f"{content}\n\n{format_baseline_table(baseline_comparisons, baseline_missing)}"
+            )
+        if output == "gha-summary" and write_gha_summary(content):
+            click.echo("Report appended to $GITHUB_STEP_SUMMARY.", err=True)
+        else:
+            click.echo(content)
 
     gate_failures: list[str] = []
 
@@ -170,6 +200,20 @@ def run_analysis(
                 f"Insufficient epochs (< {min_epochs}) for reliable conclusions: "
                 f"{', '.join(underpowered)}"
             )
+
+    if baseline_name:
+        # Default to gating in CI (the $CI env var GitHub Actions and most
+        # other CI providers set) unless the user passed an explicit
+        # --fail-on-regression/--no-fail-on-regression override.
+        resolved_fail_on_regression = (
+            fail_on_regression if fail_on_regression is not None else bool(os.environ.get("CI"))
+        )
+        if resolved_fail_on_regression:
+            regressed = [f"{c.task}/{c.variant}" for c in baseline_comparisons if c.has_regression]
+            if regressed:
+                gate_failures.append(
+                    f"Regression vs baseline {baseline_name!r}: {', '.join(regressed)}"
+                )
 
     if gate_failures:
         raise click.ClickException("\n".join(gate_failures))

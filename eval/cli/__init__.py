@@ -48,6 +48,7 @@ def main(log_level: str | None, log_format: str | None) -> None:
 
 
 from eval.cli.analyze_cmd import analyze  # noqa: E402
+from eval.cli.baseline_cmd import baseline  # noqa: E402
 from eval.cli.build_cmd import build  # noqa: E402
 from eval.cli.init_cmd import init  # noqa: E402
 from eval.cli.list_cmd import list_tasks  # noqa: E402
@@ -56,6 +57,7 @@ from eval.cli.validate_cmd import validate  # noqa: E402
 
 main.add_command(run)
 main.add_command(analyze)
+main.add_command(baseline)
 main.add_command(build)
 main.add_command(init)
 main.add_command(list_tasks)

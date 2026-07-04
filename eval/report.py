@@ -418,6 +418,277 @@ def _apply_mc_correction(rows: list[SummaryRow], method: str) -> int:
     return len(testable)
 
 
+# --- Cross-run baseline comparison (issue #65) ---
+#
+# Within-run `analyze` pairs variants on a shared epoch key (`_paired_deltas`).
+# A saved baseline is a snapshot from a *different* run, so there is no shared
+# epoch to pair on (different run, possibly a different epoch count). These
+# comparisons instead resample each sample independently ("unpaired bootstrap")
+# to build a CI for the (current - baseline) difference.
+
+
+def _unpaired_bootstrap_stats(
+    baseline_vals: list[float],
+    current_vals: list[float],
+    confidence: float = _CI_CONFIDENCE,
+    iterations: int = _BOOTSTRAP_ITERATIONS,
+    seed: int = _BOOTSTRAP_SEED,
+) -> tuple[float, float, float] | None:
+    """Bootstrap CI + two-sided p-value proxy for the unpaired median difference
+    (current - baseline).
+
+    Returns ``(ci_low, ci_high, p_value)``, or None when either sample has
+    fewer than two values. Mirrors `_bootstrap_stats`'s percentile-CI /
+    doubled-tail-proportion p-value, but resamples the baseline and current
+    samples independently (with replacement) rather than resampling shared
+    paired deltas -- the two runs share no epoch to pair on.
+    """
+    nb, nc = len(baseline_vals), len(current_vals)
+    if nb < 2 or nc < 2:
+        return None
+    rng = random.Random(seed)
+    diffs: list[float] = []
+    for _ in range(iterations):
+        b_sample = [baseline_vals[rng.randrange(nb)] for _ in range(nb)]
+        c_sample = [current_vals[rng.randrange(nc)] for _ in range(nc)]
+        diffs.append(float(median(c_sample) - median(b_sample)))
+    diffs.sort()
+    lo_idx = int((1 - confidence) / 2 * iterations)
+    hi_idx = min(iterations - 1, int((1 + confidence) / 2 * iterations))
+    frac_le = sum(1 for d in diffs if d <= 0) / iterations
+    frac_ge = sum(1 for d in diffs if d >= 0) / iterations
+    p_value = min(1.0, 2 * min(frac_le, frac_ge))
+    return diffs[lo_idx], diffs[hi_idx], p_value
+
+
+@dataclass
+class BaselineRow:
+    """One metric's baseline-vs-current comparison for a (task, variant)."""
+
+    metric: str
+    baseline_value: float
+    current_value: float
+    baseline_n: int
+    current_n: int
+    delta: str = ""
+    ci_low: float | None = None
+    ci_high: float | None = None
+    p_value: float | None = None
+    # True/False once a CI is available and the family-wise correction has been
+    # applied; None when either sample is too small (see MIN_RELIABLE_N).
+    significant: bool | None = None
+    # True when `significant` and the current run is *worse* than baseline.
+    # Every OTel metric tracked here (duration, tokens, cost, tool/turn counts)
+    # is "lower is better", so worse == current median higher than baseline's.
+    regression: bool = False
+    # True when `significant` and the current run is *better* than baseline.
+    improved: bool = False
+    precision: int = 1
+
+
+@dataclass
+class BaselineComparison:
+    """Baseline-vs-current comparison for one (task, variant) pair."""
+
+    task: str
+    variant: str
+    baseline_name: str
+    baseline_run_id: str
+    rows: list[BaselineRow] = field(default_factory=list)
+    has_regression: bool = False
+    mc_correction: str = "none"
+    mc_tests: int = 0
+
+
+def _apply_baseline_mc_correction(rows: list[BaselineRow], method: str) -> int:
+    """`_apply_mc_correction`, adapted for `BaselineRow` (gates on the smaller
+    of the two unpaired sample sizes rather than a shared paired_n). Mutates
+    `rows` in place; also resets `regression`/`improved` when correction takes
+    a `*` away, since both depend on `significant`.
+    """
+    testable = [
+        r
+        for r in rows
+        if r.p_value is not None and min(r.baseline_n, r.current_n) >= MIN_RELIABLE_N
+    ]
+    if method == "none" or not testable:
+        return 0
+    fn = _MC_METHODS.get(method)
+    if fn is None:
+        raise ValueError(f"Unknown mc_correction method: {method!r}")
+    p_values = [r.p_value for r in testable if r.p_value is not None]
+    decisions = fn(p_values)
+    for row, reject in zip(testable, decisions, strict=True):
+        if row.significant is True and not reject:
+            row.significant = False
+            row.regression = False
+            row.improved = False
+    return len(testable)
+
+
+def build_baseline_comparisons(
+    metrics: list[RunMetrics],
+    baseline_data: dict[str, Any],
+    variant_order: list[str] | None = None,
+    mc_correction: str = "holm",
+) -> tuple[list[BaselineComparison], list[str]]:
+    """Compare `metrics` (the current run's extracted RunMetrics) against a
+    saved baseline snapshot (see `eval.services.baseline_service.save_baseline`),
+    per (task, variant) pair.
+
+    Returns ``(comparisons, missing)`` where `missing` lists task/variant
+    combinations present in the current run but absent from the baseline
+    (e.g. a new task, or a variant renamed since the baseline was captured) --
+    surfaced as a warning rather than silently dropped.
+    """
+    baseline_name = str(baseline_data.get("name", ""))
+    baseline_run_id = str(baseline_data.get("run_id", ""))
+    baseline_tasks: dict[str, Any] = baseline_data.get("tasks", {}) or {}
+
+    by_task_variant: dict[tuple[str, str], list[RunMetrics]] = defaultdict(list)
+    for r in metrics:
+        by_task_variant[(r.scenario, r.variant)].append(r)
+
+    tasks = sorted({task for (task, _v) in by_task_variant})
+    comparisons: list[BaselineComparison] = []
+    missing: list[str] = []
+
+    for task in tasks:
+        variants_here = sorted({v for (t, v) in by_task_variant if t == task})
+        if variant_order:
+            variants_here = [v for v in variant_order if v in variants_here]
+        baseline_task = baseline_tasks.get(task)
+        if baseline_task is None:
+            missing.append(task)
+            continue
+        baseline_variants: dict[str, Any] = baseline_task.get("variants", {}) or {}
+
+        for variant in variants_here:
+            baseline_variant = baseline_variants.get(variant)
+            if baseline_variant is None:
+                missing.append(f"{task}/{variant}")
+                continue
+            baseline_runs: list[dict[str, Any]] = baseline_variant.get("runs", []) or []
+            current_runs = by_task_variant[(task, variant)]
+
+            rows: list[BaselineRow] = []
+            for label, key, precision in _METRIC_DEFS:
+                baseline_vals = [float(r[key]) for r in baseline_runs if key in r]
+                current_vals = [float(getattr(r, key)) for r in current_runs]
+                row = BaselineRow(
+                    metric=label,
+                    baseline_value=_median(baseline_vals),
+                    current_value=_median(current_vals),
+                    baseline_n=len(baseline_vals),
+                    current_n=len(current_vals),
+                    precision=precision,
+                )
+                if baseline_vals and row.baseline_value > 0:
+                    pct = (row.current_value - row.baseline_value) / row.baseline_value * 100
+                    row.delta = f"{pct:+.1f}%"
+                stats = _unpaired_bootstrap_stats(baseline_vals, current_vals)
+                if stats is not None:
+                    row.ci_low, row.ci_high, row.p_value = stats
+                    min_n = min(row.baseline_n, row.current_n)
+                    row.significant = (
+                        _ci_significant((row.ci_low, row.ci_high))
+                        if min_n >= MIN_RELIABLE_N
+                        else None
+                    )
+                    if row.significant:
+                        row.regression = row.ci_low > 0
+                        row.improved = row.ci_high < 0
+                rows.append(row)
+
+            mc_tests = _apply_baseline_mc_correction(rows, mc_correction)
+            comparisons.append(
+                BaselineComparison(
+                    task=task,
+                    variant=variant,
+                    baseline_name=baseline_name,
+                    baseline_run_id=baseline_run_id,
+                    rows=rows,
+                    has_regression=any(r.regression for r in rows),
+                    mc_correction=mc_correction if mc_tests else "none",
+                    mc_tests=mc_tests,
+                )
+            )
+
+    return comparisons, missing
+
+
+def format_baseline_table(
+    comparisons: list[BaselineComparison], missing: list[str] | None = None
+) -> str:
+    """Human-readable text report for a set of baseline comparisons (used for
+    both the `table` and `markdown` output formats -- appended after the
+    within-run report)."""
+    if not comparisons and not missing:
+        return ""
+    lines: list[str] = ["", "=== Baseline comparison ==="]
+    for c in comparisons:
+        lines.append(
+            f"\n{c.task} [{c.variant}] vs baseline '{c.baseline_name}' ({c.baseline_run_id}):"
+        )
+        header = f"  {'Metric':<18} {'Baseline':>12} {'Current':>12} {'Delta':>10}"
+        lines.append(header)
+        for row in c.rows:
+            marker = ""
+            if row.regression:
+                marker = "  REGRESSION"
+            elif row.improved:
+                marker = "  * improved"
+            elif row.significant is False:
+                marker = "  ns"
+            bval = f"{row.baseline_value:.{row.precision}f}"
+            cval = f"{row.current_value:.{row.precision}f}"
+            lines.append(f"  {row.metric:<18} {bval:>12} {cval:>12} {row.delta:>10}{marker}")
+        if c.has_regression:
+            lines.append("  \u26a0\ufe0f  Regression detected vs baseline.")
+    if missing:
+        lines.append("\nNo baseline data for: " + ", ".join(missing))
+    return "\n".join(lines)
+
+
+def baseline_comparisons_json(
+    comparisons: list[BaselineComparison], missing: list[str] | None = None
+) -> dict[str, Any]:
+    """JSON-serializable payload for a set of baseline comparisons, merged into
+    `analyze -o json` output under the `"baseline"` key."""
+    return {
+        "comparisons": [
+            {
+                "task": c.task,
+                "variant": c.variant,
+                "baseline_name": c.baseline_name,
+                "baseline_run_id": c.baseline_run_id,
+                "has_regression": c.has_regression,
+                "mc_correction": c.mc_correction,
+                "mc_tests": c.mc_tests,
+                "metrics": [
+                    {
+                        "metric": r.metric,
+                        "baseline_value": r.baseline_value,
+                        "current_value": r.current_value,
+                        "baseline_n": r.baseline_n,
+                        "current_n": r.current_n,
+                        "delta": r.delta,
+                        "ci_low": r.ci_low,
+                        "ci_high": r.ci_high,
+                        "p_value": r.p_value,
+                        "significant": r.significant,
+                        "regression": r.regression,
+                        "improved": r.improved,
+                    }
+                    for r in c.rows
+                ],
+            }
+            for c in comparisons
+        ],
+        "missing": missing or [],
+    }
+
+
 def _build_summary_row(
     metric: str,
     vals_by_variant: dict[str, dict[str, float]],
