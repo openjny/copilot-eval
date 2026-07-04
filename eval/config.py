@@ -14,6 +14,12 @@ class ConfigError(ValueError):
     """Raised when an eval configuration is invalid."""
 
 
+# Single source of truth for the pinned Copilot CLI version. Referenced by the
+# config defaults below and injected into the Docker build via the
+# COPILOT_VERSION build-arg (see cli._build_images). Update this in one place to
+# bump the version everywhere.
+DEFAULT_COPILOT_VERSION = "1.0.18"
+
 EVALUATOR_TYPES = ("judge", "script", "contains", "regex")
 PARALLEL_MODES = ("off", "per_task", "full")
 VARIANT_ORDER_MODES = ("fixed", "counterbalance", "random")
@@ -54,7 +60,7 @@ class RunnerConfig:
     # Empty string disables it; supports {var} interpolation like prompts.
     output_instruction: str = DEFAULT_OUTPUT_INSTRUCTION
     container_image_base: str = "copilot-eval"
-    copilot_version: str = "1.0.18"
+    copilot_version: str = DEFAULT_COPILOT_VERSION
     otel_endpoint: str = "http://host.docker.internal:4318"
     jaeger_url: str = "http://localhost:16686"
     collector: str = "file"  # file | jaeger
@@ -280,7 +286,7 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         capture_content=runner_raw.get("capture_content", True),
         output_instruction=output_instruction,
         container_image_base=runner_raw.get("container_image_base", "copilot-eval"),
-        copilot_version=runner_raw.get("copilot_version", "1.0.18"),
+        copilot_version=runner_raw.get("copilot_version", DEFAULT_COPILOT_VERSION),
         otel_endpoint=runner_raw.get("otel_endpoint", "http://host.docker.internal:4318"),
         jaeger_url=runner_raw.get("jaeger_url", "http://localhost:16686"),
         collector=collector,

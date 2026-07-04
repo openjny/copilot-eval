@@ -1,6 +1,12 @@
 FROM node:20-slim
 
-ARG COPILOT_VERSION=1.0.18
+# Copilot CLI version to pin. Injected by cli._build_images from
+# RunnerConfig.copilot_version (single source: eval/config.DEFAULT_COPILOT_VERSION).
+# Required — pass --build-arg COPILOT_VERSION=... for manual builds.
+ARG COPILOT_VERSION
+
+RUN test -n "$COPILOT_VERSION" || \
+      { echo "ERROR: COPILOT_VERSION build-arg is required" >&2; exit 1; }
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \

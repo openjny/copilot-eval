@@ -66,7 +66,7 @@ runner:
   capture_content: true          # Capture prompt/response content in OTel spans (needed by judge)
   output_instruction: Save all output files under /workspace/output/.  # Appended to every prompt; "" disables; supports {var} interpolation
   container_image_base: copilot-eval
-  copilot_version: "1.0.18"
+  copilot_version: "1.x.x"       # Optional: Copilot CLI version pinned in the eval container; omit to inherit eval.config.DEFAULT_COPILOT_VERSION
   collector: file                 # file (default) | jaeger — trace collection backend
   # When collector: jaeger, these are used:
   jaeger_url: "http://localhost:16686"              # Jaeger query UI/API (host side)
