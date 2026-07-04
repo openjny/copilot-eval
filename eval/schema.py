@@ -30,7 +30,9 @@ from eval.config import (
 # private symbol; keep in sync if that pattern ever changes.
 _NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 
-SCHEMA_ID = "https://raw.githubusercontent.com/openjny/copilot-eval/main/schemas/eval-config.schema.json"
+SCHEMA_ID = (
+    "https://raw.githubusercontent.com/openjny/copilot-eval/main/schemas/eval-config.schema.json"
+)
 
 
 def _collector_types() -> tuple[str, ...]:
@@ -231,7 +233,9 @@ def _variant_schema() -> dict[str, Any]:
         "required": ["name"],
         "properties": {
             "name": _name_schema("Unique variant identifier, used as the image tag."),
-            "description": _string(description="Human-readable summary of this variant.", default=""),
+            "description": _string(
+                description="Human-readable summary of this variant.", default=""
+            ),
             "build": {
                 "type": "object",
                 "description": "Image build settings.",
@@ -266,7 +270,9 @@ def _hooks_schema() -> dict[str, Any]:
         "description": "Setup/teardown scripts run around a task's Copilot invocation.",
         "additionalProperties": False,
         "properties": {
-            "before_run": _string(description="Script run before Copilot (e.g. environment reset)."),
+            "before_run": _string(
+                description="Script run before Copilot (e.g. environment reset)."
+            ),
             "after_run": _string(description="Script run after Copilot (e.g. cleanup)."),
             "on_failure": {
                 "type": "string",
@@ -307,7 +313,9 @@ def _evaluator_schema() -> dict[str, Any]:
                 "key) to an anchor description. Requires 'criterion'.",
                 "additionalProperties": {"type": "string"},
             },
-            "script": _string(description="type=script: path to an executable that scores the run."),
+            "script": _string(
+                description="type=script: path to an executable that scores the run."
+            ),
             "value": {
                 "description": "type=contains/regex: substring or regex pattern to match. "
                 "type=metric: the numeric threshold to compare against (YAML key is still 'value').",

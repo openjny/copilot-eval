@@ -155,9 +155,7 @@ def check_json_schema(config_dir: Path | None) -> CheckResult:
     try:
         schema = json.loads(schema_path.read_text())
     except OSError as exc:
-        return _warn(
-            "json_schema", f"Skipped: could not read schema file: {exc}", str(schema_path)
-        )
+        return _warn("json_schema", f"Skipped: could not read schema file: {exc}", str(schema_path))
 
     directory = config_dir if config_dir is not None else schema_path.parent.parent
     config_path = directory / "eval-config.yaml"
