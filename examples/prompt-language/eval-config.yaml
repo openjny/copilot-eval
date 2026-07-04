@@ -11,7 +11,6 @@ runner:
   judge_samples: 3
   judge_aggregate: median
   container_image_base: copilot-eval
-  copilot_version: "1.0.18"
   otel_endpoint: http://host.docker.internal:4318
   # Tasks specify their own output path and a fixed English sentence would
   # confound the language-sensitive comparison, so disable the appended instruction.
