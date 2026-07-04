@@ -52,7 +52,13 @@ above), a `hello-world` task with one deterministic `contains` evaluator, a
 `docker/Dockerfile.experimental` stub — layer the plugin/instructions/MCP
 server you're testing on top of `copilot-eval:base` there), a matching empty
 fixture, `.env.example`, and a `.gitignore` that excludes `results/` and
-`.env`. Pass `--force` to overwrite an existing directory's files. Run
+`.env`. Pass `--force` to overwrite an existing directory's files.
+
+`.env.example` documents `COPILOT_GITHUB_TOKEN`, but export it in your shell
+(or run `gh auth login`) rather than copying the file to `.env` — the
+host-side checks that gate `run`/`build` read the process environment
+directly (see [Secrets & `.env`](#secrets--env) below for what an actual
+`.env` file *is* used for: hooks and the container's environment). Then run
 `validate`, then `run --dry-run`, to confirm it works before wiring up your
 own tasks and variants.
 

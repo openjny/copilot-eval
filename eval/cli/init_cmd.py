@@ -12,21 +12,51 @@ Copies a static template tree (``eval/templates/init/<template>/``) to
 
 No templating engine is used deliberately (issue #81): plain string
 replacement keeps this dependency-free and the templates readable as-is.
+
+Template/schema lookup uses :mod:`importlib.resources` rather than
+``__file__``-relative paths, so it keeps working if copilot-eval is ever
+installed as a wheel instead of run from a source checkout: the templates
+live inside the ``eval`` package (packaged automatically), and the schema
+(normally a repo-root sibling of ``eval/``) is additionally bundled inside
+the package via the ``force-include`` mapping in ``pyproject.toml``.
 """
 
 from __future__ import annotations
 
+import importlib.resources
 import os
 from pathlib import Path
 
 import click
 
-# eval/cli/init_cmd.py -> eval/cli -> eval -> repo root.
-_PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
-_TEMPLATES_ROOT = _PROJECT_DIR / "eval" / "templates" / "init"
-_SCHEMA_PATH = _PROJECT_DIR / "schemas" / "eval-config.schema.json"
+import eval.config as _eval_config_module
 
 _SUPPORTED_TEMPLATES = ("minimal",)
+
+# Mirrors eval.config.load_config's `project_dir` (always the repo checkout
+# root, never --config-dir) exactly, so `build.dockerfile` paths we generate
+# resolve the same way `eval.validation`/`eval.services.build_service` do.
+_PROJECT_DIR = Path(_eval_config_module.__file__).resolve().parent.parent
+
+
+def _templates_root() -> Path:
+    """Location of the packaged ``eval/templates/init/`` tree."""
+    return Path(str(importlib.resources.files("eval"))) / "templates" / "init"
+
+
+def _schema_path() -> Path:
+    """Location of ``schemas/eval-config.schema.json``.
+
+    Source checkout: a repo-root sibling of the ``eval`` package. Installed
+    wheel: bundled inside the package instead (wheels don't include arbitrary
+    top-level directories) — see the ``force-include`` mapping in
+    ``pyproject.toml``.
+    """
+    eval_pkg_dir = Path(str(importlib.resources.files("eval")))
+    repo_root_candidate = eval_pkg_dir.parent / "schemas" / "eval-config.schema.json"
+    if repo_root_candidate.is_file():
+        return repo_root_candidate
+    return eval_pkg_dir / "schemas" / "eval-config.schema.json"
 
 
 @click.command()
@@ -58,13 +88,13 @@ def init(config_dir: Path, template: str, force: bool) -> None:
 
     \b
         uv run copilot-eval init --config-dir my-eval
-        cp my-eval/.env.example my-eval/.env   # then edit it
+        export COPILOT_GITHUB_TOKEN=...   # or: gh auth login
         uv run copilot-eval validate --config-dir my-eval
         uv run copilot-eval run --config-dir my-eval --dry-run
 
     Fails if any target file already exists, unless --force is given.
     """
-    template_dir = _TEMPLATES_ROOT / template
+    template_dir = _templates_root() / template
     if not template_dir.is_dir():
         raise click.ClickException(f"Unknown template '{template}' (looked in {template_dir}).")
 
@@ -85,7 +115,7 @@ def init(config_dir: Path, template: str, force: bool) -> None:
             )
 
     substitutions = {
-        "__SCHEMA_PATH__": _posix_relpath(_SCHEMA_PATH, target_dir),
+        "__SCHEMA_PATH__": _posix_relpath(_schema_path(), target_dir),
         "__DOCKERFILE_PATH__": _posix_relpath(
             target_dir / "docker" / "Dockerfile.experimental", _PROJECT_DIR
         ),
@@ -107,9 +137,7 @@ def init(config_dir: Path, template: str, force: bool) -> None:
         click.echo(f"  {path.relative_to(target_dir)}")
 
     click.echo("\nNext steps:")
-    click.echo(
-        f"  1. cp {config_dir}/.env.example {config_dir}/.env   (then add COPILOT_GITHUB_TOKEN)"
-    )
+    click.echo("  1. export COPILOT_GITHUB_TOKEN=...   (or: gh auth login — see .env.example)")
     click.echo(f"  2. uv run copilot-eval validate --config-dir {config_dir}")
     click.echo(f"  3. uv run copilot-eval run --config-dir {config_dir} --dry-run")
     click.echo(f"  4. uv run copilot-eval run --config-dir {config_dir}")
