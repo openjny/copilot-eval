@@ -57,7 +57,7 @@ class RunMetrics:
     total_output_tokens: int
     total_cache_tokens: int
     model: str
-    cost: str
+    cost: float
 
 
 def fetch_traces(
@@ -118,6 +118,17 @@ def extract_metrics(trace: Trace) -> RunMetrics | None:
         v = span.tags.get(key, 0)
         return int(v) if v else 0
 
+    def float_tag(span: Span, key: str) -> float:
+        # Cost may be absent or the "?" sentinel on partial traces; fall back to 0.0
+        # so it flows through the numeric aggregation path like every other metric.
+        v = span.tags.get(key)
+        if v is None:
+            return 0.0
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
     return RunMetrics(
         scenario=trace.resource_tags.get("eval.scenario", "?"),
         variant=trace.resource_tags.get("eval.variant", "?"),
@@ -133,7 +144,7 @@ def extract_metrics(trace: Trace) -> RunMetrics | None:
         total_output_tokens=sum(int_tag(c, "gen_ai.usage.output_tokens") for c in chats),
         total_cache_tokens=sum(int_tag(c, "gen_ai.usage.cache_read.input_tokens") for c in chats),
         model=str(root.tags.get("gen_ai.request.model", "?")),
-        cost=str(root.tags.get("github.copilot.cost", "?")),
+        cost=float_tag(root, "github.copilot.cost"),
     )
 
 

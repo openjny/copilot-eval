@@ -37,6 +37,20 @@ def _root():
     )
 
 
+def _root_with_cost(cost):
+    return Span(
+        name="invoke_agent",
+        duration_s=12.5,
+        span_id="root",
+        parent_id=None,
+        tags={
+            "github.copilot.turn_count": 3,
+            "gen_ai.request.model": "gpt-x",
+            "github.copilot.cost": cost,
+        },
+    )
+
+
 def _tool(span_id, name, dur=0.5):
     return Span(
         name="execute_tool",
@@ -83,6 +97,25 @@ def test_extract_metrics_aggregates_tokens_and_tools():
 def test_extract_metrics_no_root_returns_none():
     t = Trace(trace_id="x", spans=[_chat("c1")], resource_tags={})
     assert extract_metrics(t) is None
+
+
+def test_extract_metrics_parses_cost_as_float():
+    t = Trace(trace_id="x", spans=[_root_with_cost(15.0)], resource_tags={})
+    m = extract_metrics(t)
+    assert m is not None
+    assert m.cost == 15.0
+    assert isinstance(m.cost, float)
+
+
+def test_extract_metrics_cost_falls_back_when_missing_or_sentinel():
+    # Tag absent entirely
+    m_absent = extract_metrics(Trace(trace_id="x", spans=[_root()], resource_tags={}))
+    assert m_absent is not None and m_absent.cost == 0.0
+    # Non-numeric "?" sentinel
+    m_sentinel = extract_metrics(
+        Trace(trace_id="y", spans=[_root_with_cost("?")], resource_tags={})
+    )
+    assert m_sentinel is not None and m_sentinel.cost == 0.0
 
 
 def test_extract_conversation_orders_by_span_id():

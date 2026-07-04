@@ -72,6 +72,51 @@ def test_build_report_paired_delta_with_missing_epoch():
     assert dur_row.delta == "+10.0%"
 
 
+def test_build_report_surfaces_cost_metric():
+    results = [
+        make_metrics("t1", "a", "1", cost=10.0),
+        make_metrics("t1", "a", "2", cost=20.0),
+        make_metrics("t1", "b", "1", cost=12.0),
+        make_metrics("t1", "b", "2", cost=24.0),
+    ]
+    reports = build_report(results, variant_order=["a", "b"], aggregate="paired")
+    cost_row = next(r for r in reports[0].summary if r.metric == "Cost ($)")
+    assert cost_row.values["a"] == 15.0  # median(10, 20)
+    assert cost_row.values["b"] == 18.0  # median(12, 24)
+    assert cost_row.precision == 4  # small fractional costs need extra decimals
+    # paired deltas: (12-10)=2, (24-20)=4 -> median 3; baseline median([10,20])=15 -> +20.0%
+    assert cost_row.delta == "+20.0%"
+
+
+def test_cost_renders_with_higher_precision():
+    # Realistic sub-dollar costs would collapse to "0.0" at 1-decimal precision;
+    # they must survive into the summary and per-run tables with real digits.
+    from eval.report import format_markdown, format_table
+
+    results = [
+        make_metrics("t1", "a", "1", cost=0.0412),
+        make_metrics("t1", "a", "2", cost=0.0388),
+        make_metrics("t1", "b", "1", cost=0.0611),
+        make_metrics("t1", "b", "2", cost=0.0589),
+    ]
+    reports = build_report(results, variant_order=["a", "b"], aggregate="paired")
+
+    table = format_table(reports)
+    cost_line = next(line for line in table.splitlines() if line.startswith("Cost ($)"))
+    assert "0.0400" in cost_line  # median(0.0412, 0.0388), not "0.0"
+    assert "0.0600" in cost_line  # median(0.0611, 0.0589)
+
+    md = format_markdown(reports)
+    cost_md = next(line for line in md.splitlines() if line.startswith("| Cost ($)"))
+    assert "0.0400" in cost_md and "0.0600" in cost_md
+
+    # Per-run tables (table + markdown) carry a Cost($) column with real digits.
+    assert "Cost($)" in table
+    assert any("0.0412" in line for line in table.splitlines())
+    assert "Cost($)" in md
+    assert any("0.0412" in line for line in md.splitlines())
+
+
 # --- Numeric epoch ordering ---
 
 
