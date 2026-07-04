@@ -207,6 +207,7 @@ def run_one(
                     log_file=log_file,
                     exit_code=-1,
                     status=RunStatus.SETUP_FAILED,
+                    **_timing(),
                 )
             print(
                 f"    WARNING: before_run hook failed (exit {before_rc}) — continuing (on_failure=warn)"
@@ -325,6 +326,7 @@ def run_one(
                 exit_code=-1,
                 status=RunStatus.SETUP_FAILED,
                 scores=scores,
+                **_timing(),
             )
         print(f"    ✗ Run errored during post-processing: {exc}")
         _append_log(log_file, f"run_one raised during post-processing: {exc!r}")
@@ -347,6 +349,7 @@ def run_one(
             exit_code=artifacts.exit_code,
             status=artifacts.status,
             scores=scores,
+            **_timing(),
         )
     finally:
         if work_dir is not None:

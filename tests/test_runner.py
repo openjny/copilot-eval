@@ -446,6 +446,11 @@ def test_run_one_setup_exception_returns_setup_failed(tmp_path, monkeypatch):
     assert result.status == "setup_failed"
     assert result.exit_code == -1
     assert "docker binary missing" in result.log_file.read_text()
+    # The exception path must still emit timing so error manifests stay
+    # structurally uniform with every other run_one() return.
+    assert result.started_at is not None
+    assert result.finished_at is not None
+    assert result.duration_seconds is not None
 
 
 def test_run_one_unsupported_collector_raises_config_error(tmp_path, monkeypatch):
@@ -498,6 +503,11 @@ def test_run_one_before_run_fail_aborts(tmp_path, monkeypatch):
 
     assert result.status == "setup_failed"
     assert result.exit_code == -1
+    # Timing must be populated on this early return so manifests stay consistent
+    # with every other run_one() exit path.
+    assert result.started_at is not None
+    assert result.finished_at is not None
+    assert result.duration_seconds is not None
 
 
 def test_run_one_before_run_warn_continues(tmp_path, monkeypatch):
@@ -595,6 +605,10 @@ def test_run_one_post_processing_exception_preserves_run_status(tmp_path, monkey
     assert result.exit_code == 0
     assert not result.passed  # infra failure score
     assert any(s.type == "infra" and not s.passed for s in result.scores)
+    # The post-processing exception path must also emit timing.
+    assert result.started_at is not None
+    assert result.finished_at is not None
+    assert result.duration_seconds is not None
 
 
 def test_mask_log_file_redacts_in_place(tmp_path):
