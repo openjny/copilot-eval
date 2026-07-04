@@ -42,6 +42,8 @@ class SummaryRow:
     ci_high: float | None = None
     # True/False when a CI is available (excludes/includes 0); None otherwise.
     significant: bool | None = None
+    # Decimal places used when rendering this metric's value/stddev/CI.
+    precision: int = 1
 
 
 @dataclass
@@ -80,15 +82,20 @@ class Report:
     warnings: list[str] = field(default_factory=list)
 
 
+# Each entry is (label, RunMetrics attribute, decimal precision). Precision drives
+# how the aggregated value, its ±stddev, and the paired CI render. Cost needs more
+# decimals than the rest because typical per-run costs are small fractions of a
+# dollar (e.g. $0.04) that would collapse to "0.0" at 1-decimal precision.
 _METRIC_DEFS = [
-    ("Duration (s)", "duration"),
-    ("Turn count", "turn_count"),
-    ("Total spans", "total_spans"),
-    ("Tool calls", "tool_count"),
-    ("Input tokens", "total_input_tokens"),
-    ("Output tokens", "total_output_tokens"),
-    ("Cache tokens", "total_cache_tokens"),
-    ("Tool duration (s)", "tool_duration"),
+    ("Duration (s)", "duration", 1),
+    ("Turn count", "turn_count", 1),
+    ("Total spans", "total_spans", 1),
+    ("Tool calls", "tool_count", 1),
+    ("Input tokens", "total_input_tokens", 1),
+    ("Output tokens", "total_output_tokens", 1),
+    ("Cache tokens", "total_cache_tokens", 1),
+    ("Tool duration (s)", "tool_duration", 1),
+    ("Cost ($)", "cost", 4),
 ]
 
 
@@ -217,11 +224,15 @@ def _ci_significant(ci: tuple[float, float] | None) -> bool | None:
 
 
 def _build_summary_row(
-    metric: str, vals_by_variant: dict[str, dict[str, float]], variants: list[str], aggregate: str
+    metric: str,
+    vals_by_variant: dict[str, dict[str, float]],
+    variants: list[str],
+    aggregate: str,
+    precision: int = 1,
 ) -> SummaryRow:
     """Aggregate one metric and attach n, dispersion, and (paired) CI."""
     agg, delta = _aggregate_values(vals_by_variant, variants, aggregate)
-    row = SummaryRow(metric=metric, values=agg, delta=delta)
+    row = SummaryRow(metric=metric, values=agg, delta=delta, precision=precision)
     for v in variants:
         vals = list(vals_by_variant.get(v, {}).values())
         row.n[v] = len(vals)
@@ -294,11 +305,11 @@ def build_report(
 
         # OTel metrics summary (with n, dispersion, and paired CI)
         summary = []
-        for label, key in _METRIC_DEFS:
+        for label, key, precision in _METRIC_DEFS:
             vals_by_v = {
                 v: {r.epoch: float(getattr(r, key)) for r in by_variant[v]} for v in variants
             }
-            summary.append(_build_summary_row(label, vals_by_v, variants, aggregate))
+            summary.append(_build_summary_row(label, vals_by_v, variants, aggregate, precision))
 
         # Tool patterns
         tool_patterns: dict[str, dict[str, int]] = {}
@@ -500,9 +511,10 @@ def _fmt_value(row: SummaryRow, v: str) -> str:
         return "\u2014"  # no traces for this variant
     val = row.values.get(v, 0.0)
     sd = row.stddev.get(v, 0.0)
+    p = row.precision
     if row.n.get(v, 0) >= 2 and sd > 0:
-        return f"{val:.1f} \u00b1{sd:.1f}"
-    return f"{val:.1f}"
+        return f"{val:.{p}f} \u00b1{sd:.{p}f}"
+    return f"{val:.{p}f}"
 
 
 def _fmt_delta(row: SummaryRow) -> str:
@@ -513,7 +525,8 @@ def _fmt_delta(row: SummaryRow) -> str:
     if row.ci_low is not None and row.ci_high is not None:
         # CI is in absolute metric units, not percentage points — labelled to
         # avoid being misread against the % delta it sits beside.
-        out += f" [CI {row.ci_low:+.1f},{row.ci_high:+.1f} abs]"
+        p = row.precision
+        out += f" [CI {row.ci_low:+.{p}f},{row.ci_high:+.{p}f} abs]"
         if row.significant is True:
             out += "*"
         elif row.significant is False:
@@ -563,9 +576,10 @@ def format_table(reports: list[Report]) -> str:
         jhdr = "".join(f" {n[:8]:>8}" for n in jnames)
         lines.append(
             f"\n{'Variant':<18} {'Epoch':>5} {'Dur(s)':>7} {'Turns':>5} {'Spans':>5} "
-            f"{'Tools':>5} {'In Tok':>8} {'Out Tok':>8} {'Cache':>8} {'TDur(s)':>7}{jhdr}"
+            f"{'Tools':>5} {'In Tok':>8} {'Out Tok':>8} {'Cache':>8} {'TDur(s)':>7} "
+            f"{'Cost($)':>9}{jhdr}"
         )
-        lines.append("-" * (80 + 9 * len(jnames)))
+        lines.append("-" * (90 + 9 * len(jnames)))
         for r in report.runs:
             jvals = ""
             for n in jnames:
@@ -575,7 +589,7 @@ def format_table(reports: list[Report]) -> str:
                 f"{r.variant:<18} {r.epoch:>5} {r.duration:>7.1f} {r.turn_count:>5} "
                 f"{r.total_spans:>5} {r.tool_count:>5} "
                 f"{r.total_input_tokens:>8} {r.total_output_tokens:>8} "
-                f"{r.total_cache_tokens:>8} {r.tool_duration:>7.1f}{jvals}"
+                f"{r.total_cache_tokens:>8} {r.tool_duration:>7.1f} {r.cost:>9.4f}{jvals}"
             )
 
         # Summary
@@ -661,6 +675,7 @@ def format_json(reports: list[Report]) -> str:
                         "tool_duration": r.tool_duration,
                         "tool_names": r.tool_names,
                         "model": r.model,
+                        "cost": r.cost,
                         "judges": report.epoch_judges.get((r.variant, r.epoch), {}),
                         "judge_stddevs": report.epoch_stddevs.get((r.variant, r.epoch), {}),
                     }
@@ -744,10 +759,10 @@ def format_markdown(reports: list[Report]) -> str:
         jhdr = "".join(f" {n} |" for n in jnames)
         jsep = "".join("------:|" for _ in jnames)
         lines.append(
-            f"| Variant | Epoch | Dur(s) | Turns | Spans | Tools | In Tok | Out Tok | Cache | TDur(s) |{jhdr}"
+            f"| Variant | Epoch | Dur(s) | Turns | Spans | Tools | In Tok | Out Tok | Cache | TDur(s) | Cost($) |{jhdr}"
         )
         lines.append(
-            f"|---------|------:|-------:|------:|------:|------:|-------:|--------:|------:|--------:|{jsep}"
+            f"|---------|------:|-------:|------:|------:|------:|-------:|--------:|------:|--------:|--------:|{jsep}"
         )
         for r in report.runs:
             jvals = ""
@@ -763,7 +778,8 @@ def format_markdown(reports: list[Report]) -> str:
             lines.append(
                 f"| {r.variant} | {r.epoch} | {r.duration:.1f} | {r.turn_count} | "
                 f"{r.total_spans} | {r.tool_count} | {r.total_input_tokens} | "
-                f"{r.total_output_tokens} | {r.total_cache_tokens} | {r.tool_duration:.1f} |{jvals}"
+                f"{r.total_output_tokens} | {r.total_cache_tokens} | {r.tool_duration:.1f} | "
+                f"{r.cost:.4f} |{jvals}"
             )
 
         # Judge reasons

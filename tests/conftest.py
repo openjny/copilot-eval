@@ -29,7 +29,7 @@ def make_metrics(
         total_output_tokens=0,
         total_cache_tokens=0,
         model="m",
-        cost="0",
+        cost=0.0,
     )
     defaults.update(kwargs)
     return RunMetrics(**defaults)

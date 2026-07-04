@@ -189,7 +189,7 @@ filters defensively by `eval.run_id` / `eval.test_id` as a safety net.
 
 1. Groups results by task
 2. Fetches traces via the configured collector for each run
-3. Computes metrics (duration, turns, tokens, tool calls)
+3. Computes metrics (duration, turns, tokens, tool calls, cost)
 4. Supports three aggregation modes:
    - **paired** (default): Per-epoch delta → median
    - **median**: Independent median per variant
