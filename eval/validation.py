@@ -40,16 +40,26 @@ class CheckResult:
     """Outcome of a single validation/readiness check.
 
     `remediation` is only meaningful when `passed` is False; every failing
-    check should suggest a concrete fix.
+    check should suggest a concrete fix. `blocking` distinguishes hard errors
+    (fail `validate`/`run` pre-flight) from warnings (surfaced but never
+    abort) — used for checks whose runtime counterpart tolerates the same
+    condition (e.g. a missing fixture dir, or an undefined `{var}` in a
+    prompt, are both silently accepted at run time).
     """
 
     name: str
     passed: bool
     message: str
     remediation: str | None = None
+    blocking: bool = True
 
     def format(self) -> str:
-        icon = "✓" if self.passed else "✗"
+        if self.passed:
+            icon = "✓"
+        elif self.blocking:
+            icon = "✗"
+        else:
+            icon = "⚠"
         line = f"  {icon} {self.name}: {self.message}"
         if not self.passed and self.remediation:
             line += f"\n      → {self.remediation}"
@@ -64,8 +74,22 @@ def _fail(name: str, message: str, remediation: str) -> CheckResult:
     return CheckResult(name=name, passed=False, message=message, remediation=remediation)
 
 
+def _warn(name: str, message: str, remediation: str) -> CheckResult:
+    """A non-blocking check result: reported, but never fails `validate`/`run`.
+
+    Use for conditions the runtime itself tolerates (e.g. a missing fixture
+    directory or an undefined prompt `{var}` — both silently pass through
+    rather than erroring), so `validate`/pre-flight never abort a run that
+    would otherwise succeed.
+    """
+    return CheckResult(
+        name=name, passed=False, message=message, remediation=remediation, blocking=False
+    )
+
+
 def any_failed(results: list[CheckResult]) -> bool:
-    return any(not r.passed for r in results)
+    """True when at least one *blocking* check failed. Warnings don't count."""
+    return any(not r.passed and r.blocking for r in results)
 
 
 def format_results(results: list[CheckResult]) -> str:
@@ -106,7 +130,15 @@ def check_config_schema(config_dir: Path | None) -> tuple[Config | None, CheckRe
 
 
 def check_fixtures(config: Config, tasks: list[Task] | None = None) -> list[CheckResult]:
-    """Verify every fixture referenced by `tasks` (default: all tasks) exists on disk."""
+    """Verify every fixture referenced by `tasks` (default: all tasks) exists on disk.
+
+    Non-blocking: `eval.runner.run_one` only copies a fixture directory when it
+    exists (`if fixture_dir.is_dir(): ...`) and silently runs without one
+    otherwise, so a missing fixture never fails a run today. Flagging it here
+    as a hard error would abort runs that currently succeed (e.g. a task that
+    relies solely on a `before_run` hook, with no fixture directory at all).
+    Reported as a warning so typos are still surfaced without blocking `run`.
+    """
     tasks = config.tasks if tasks is None else tasks
     fixtures_dir = config.config_dir / "fixtures"
     results: list[CheckResult] = []
@@ -121,9 +153,9 @@ def check_fixtures(config: Config, tasks: list[Task] | None = None) -> list[Chec
                 results.append(_ok(f"fixture:{fixture}", f"Found at {path}"))
             else:
                 results.append(
-                    _fail(
+                    _warn(
                         f"fixture:{fixture}",
-                        f"Fixture '{fixture}' not found",
+                        f"Fixture '{fixture}' not found (run will proceed without it)",
                         f"Expected at: {path}",
                     )
                 )
@@ -219,7 +251,14 @@ def check_script_references(config: Config) -> list[CheckResult]:
 
 def check_var_interpolation(config: Config) -> list[CheckResult]:
     """Verify every `{var}` placeholder in a task's prompt (and the global
-    output_instruction) resolves for every variant it could run under."""
+    output_instruction) resolves for every variant it could run under.
+
+    Non-blocking: `Config.resolve_prompt()` interpolates with plain
+    `str.replace` and leaves any unresolved `{token}` in the prompt text
+    as-is rather than erroring (e.g. a prompt asking the model to "emit JSON
+    like {status}" is valid and runs fine today). Reported as a warning so
+    genuine typos in var names are still surfaced without blocking `run`.
+    """
     results: list[CheckResult] = []
     for task in config.tasks:
         placeholders: set[str] = set(_VAR_PATTERN.findall(task.prompt))
@@ -233,11 +272,12 @@ def check_var_interpolation(config: Config) -> list[CheckResult]:
             check_name = f"vars:{task.name}/{variant.name}"
             if missing:
                 results.append(
-                    _fail(
+                    _warn(
                         check_name,
                         f"Task '{task.name}' references undefined var(s) {missing} for "
-                        f"variant '{variant.name}'",
-                        f"Define {', '.join(missing)} in vars:, task.vars, or variant.vars.",
+                        f"variant '{variant.name}' (left as literal text at run time)",
+                        f"Define {', '.join(missing)} in vars:, task.vars, or variant.vars — "
+                        "or ignore if this is intentional literal text (e.g. JSON braces).",
                     )
                 )
             else:

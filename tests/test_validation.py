@@ -95,6 +95,9 @@ def test_check_fixtures_missing(tmp_path: Path):
     results = check_fixtures(config)
     assert len(results) == 1
     assert not results[0].passed
+    # Non-blocking: eval.runner tolerates a missing fixture dir, so this must
+    # never fail `validate`/`run` pre-flight on its own.
+    assert not results[0].blocking
     assert "missing-app" in results[0].message
     assert "fixtures/missing-app" in results[0].remediation
 
@@ -216,6 +219,10 @@ def test_check_var_interpolation_missing_var(tmp_path: Path):
     results = check_var_interpolation(config)
     assert len(results) == 1
     assert not results[0].passed
+    # Non-blocking: Config.resolve_prompt() leaves unresolved {tokens} as
+    # literal text rather than erroring, so this must be a warning, not a
+    # hard failure of `validate`/`run` pre-flight.
+    assert not results[0].blocking
     assert "missing_var" in results[0].message
     assert "missing_var" in results[0].remediation
 
@@ -247,6 +254,23 @@ def test_check_var_interpolation_per_variant(tmp_path: Path):
     results = {r.name: r for r in check_var_interpolation(config)}
     assert results["vars:t1/a"].passed
     assert not results["vars:t1/b"].passed
+
+
+def test_check_var_interpolation_brace_literal_is_warning_not_error(tmp_path: Path):
+    """A prompt asking for literal-looking braces (e.g. JSON) runs fine today
+    (Config.resolve_prompt leaves unresolved tokens as-is) — must not block."""
+    write_config(
+        tmp_path,
+        {"tasks": [{"name": "t1", "prompt": "Emit JSON like {status}"}]},
+    )
+    from eval.config import load_config
+
+    config = load_config(tmp_path)
+    results = check_var_interpolation(config)
+    assert len(results) == 1
+    assert not results[0].passed
+    assert not results[0].blocking
+    assert any_failed(results) is False
 
 
 # --- readiness checks ---
@@ -392,10 +416,13 @@ def test_validate_readiness_collects_all_and_skips_build_check(tmp_path: Path):
         results = validate_readiness(config, check_build=False)
 
         mock_base.assert_not_called()
-    # docker + token (both failing) + 0 fixtures (no fixture configured, task
-    # falls back to task name -> missing) + disk_space = 4 results.
+    # docker + token (both blocking failures) + 1 fixture (no fixture
+    # configured, task falls back to task name -> missing, but that's a
+    # non-blocking warning) + disk_space = 4 results.
     assert len(results) == 4
     assert any_failed(results)
+    fixture_result = next(r for r in results if r.name == "fixture:t1")
+    assert not fixture_result.blocking
 
 
 def test_validate_readiness_includes_base_image_when_check_build_true(tmp_path: Path):
@@ -459,7 +486,11 @@ def test_cli_validate_passes_for_valid_config(tmp_path: Path):
     assert "passed" in result.output.lower()
 
 
-def test_cli_validate_fails_for_missing_fixture(tmp_path: Path):
+def test_cli_validate_warns_but_passes_for_missing_fixture(tmp_path: Path):
+    """A missing fixture dir is surfaced as a warning, not a blocking failure —
+    `eval.runner.run_one` tolerates it, so `validate` must exit 0 (regression
+    test for the azure-skills `compliance-audit` task, which has no fixture
+    dir at all and relies solely on a `before_run` hook)."""
     config_dir = tmp_path / "cfg"
     _write_yaml_config(
         config_dir,
@@ -467,8 +498,9 @@ def test_cli_validate_fails_for_missing_fixture(tmp_path: Path):
     )
     runner = CliRunner()
     result = runner.invoke(main, ["validate", "--config-dir", str(config_dir)])
-    assert result.exit_code == 1
+    assert result.exit_code == 0, result.output
     assert "missing" in result.output
+    assert "warning" in result.output.lower()
 
 
 def test_cli_validate_fails_for_bad_schema(tmp_path: Path):
@@ -524,4 +556,77 @@ def test_cli_run_dry_run_skips_preflight(tmp_path: Path):
 
     assert result.exit_code == 0, result.output
     mock_validate.assert_not_called()
+
+
+def test_cli_run_proceeds_despite_missing_fixture_warning(tmp_path: Path):
+    """Regression test for the reviewer-flagged azure-skills `compliance-audit`
+    scenario: a task with no fixture dir on disk (relying solely on a
+    `before_run` hook) must still be allowed to run — a missing fixture is a
+    warning, not a blocking pre-flight failure."""
+    config_dir = tmp_path / "cfg"
+    _write_yaml_config(
+        config_dir, {"tasks": [{"name": "compliance-audit", "prompt": "audit"}]}
+    )
+    runner = CliRunner()
+
+    with (
+        patch("eval.validation.check_docker_daemon", return_value=MagicMock(passed=True)),
+        patch("eval.validation.check_github_token", return_value=MagicMock(passed=True)),
+        patch("eval.validation.check_disk_space", return_value=MagicMock(passed=True)),
+        patch("eval.cli.get_github_token", return_value="fake-token"),
+        patch("eval.cli._ensure_images"),
+        patch("eval.cli.run_one") as mock_run_one,
+    ):
+        mock_run_one.return_value = MagicMock(
+            status=MagicMock(value="success"),
+            task="compliance-audit",
+            variant="baseline",
+            epoch=1,
+            passed=True,
+            to_dict=lambda: {"status": "success"},
+        )
+        result = runner.invoke(
+            main,
+            [
+                "run",
+                "--config-dir",
+                str(config_dir),
+                "--task",
+                "compliance-audit",
+                "--no-build",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "warning" in result.output.lower()
+    mock_run_one.assert_called_once()
+
+
+def test_cli_run_skip_preflight_bypasses_checks_entirely(tmp_path: Path):
+    config_dir = tmp_path / "cfg"
+    _write_yaml_config(config_dir, {"tasks": [{"name": "t1", "prompt": "hi"}]})
+    runner = CliRunner()
+
+    with (
+        patch("eval.cli.validate_readiness") as mock_validate,
+        patch("eval.cli.get_github_token", return_value="fake-token"),
+        patch("eval.cli._ensure_images"),
+        patch("eval.cli.run_one") as mock_run_one,
+    ):
+        mock_run_one.return_value = MagicMock(
+            status=MagicMock(value="success"),
+            task="t1",
+            variant="baseline",
+            epoch=1,
+            passed=True,
+            to_dict=lambda: {"status": "success"},
+        )
+        result = runner.invoke(
+            main,
+            ["run", "--config-dir", str(config_dir), "--task", "t1", "--skip-preflight"],
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_validate.assert_not_called()
+    assert "skipped" in result.output.lower()
 
