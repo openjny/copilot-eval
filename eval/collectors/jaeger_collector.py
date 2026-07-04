@@ -1,4 +1,5 @@
 """Collect traces from Jaeger."""
+
 from __future__ import annotations
 
 from eval.protocols import RunContext

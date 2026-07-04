@@ -7,6 +7,7 @@ and are marked with @pytest.mark.integration so they can be skipped in fast CI.
 Run with:
     uv run pytest -m integration
 """
+
 from __future__ import annotations
 
 import json
@@ -34,9 +35,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "file-exporter-sample.jsonl"
 def _docker_available() -> bool:
     """Check whether Docker daemon is reachable."""
     try:
-        result = subprocess.run(
-            ["docker", "info"], capture_output=True, timeout=10
-        )
+        result = subprocess.run(["docker", "info"], capture_output=True, timeout=10)
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return False
@@ -151,9 +150,7 @@ class TestDockerCLIRunnerIntegration:
         assert "-e" in cmd
         assert "GITHUB_TOKEN" in cmd
         # Verify workspace volume mount
-        volume_args = [
-            cmd[i + 1] for i in range(len(cmd)) if cmd[i] == "-v"
-        ]
+        volume_args = [cmd[i + 1] for i in range(len(cmd)) if cmd[i] == "-v"]
         workspace_volumes = [v for v in volume_args if "/workspace" in v]
         assert len(workspace_volumes) >= 1
         # Verify image name
@@ -246,9 +243,7 @@ class TestDockerCLIRunnerIntegration:
             captured_cmd.append(cmd)
             return SimpleNamespace(returncode=0)
 
-        ctx = _make_run_context(
-            tmp_path, run_id="run-abc", epoch=3
-        )
+        ctx = _make_run_context(tmp_path, run_id="run-abc", epoch=3)
 
         runner = DockerCLIRunner("token", run_command=fake_run)
         runner.run(ctx)
@@ -482,9 +477,7 @@ class TestFullPipelineIntegration:
         run_dir.mkdir()
 
         # Simulate Docker writing traces to the workspace
-        fixture_content = FIXTURE.read_text(encoding="utf-8").replace(
-            "spike-run", "pipeline-run"
-        )
+        fixture_content = FIXTURE.read_text(encoding="utf-8").replace("spike-run", "pipeline-run")
         (trace_dir / "traces.jsonl").write_text(fixture_content, encoding="utf-8")
 
         def fake_docker_run(cmd, **kwargs):
@@ -506,9 +499,7 @@ class TestFullPipelineIntegration:
         assert artifacts.status == RunStatus.SUCCESS
 
         # Step 2: Collector reads traces from work_dir (simulating post-run)
-        collector_context = SimpleNamespace(
-            run_dir=work_dir, run_id="pipeline-run"
-        )
+        collector_context = SimpleNamespace(run_dir=work_dir, run_id="pipeline-run")
         collector = FileCollector()
         traces = collector.collect(collector_context)
 
@@ -532,9 +523,7 @@ class TestFullPipelineIntegration:
             captured_cmd.append(cmd)
             return SimpleNamespace(returncode=0)
 
-        run_context = _make_run_context(
-            tmp_path, config=config, task=task, variant=variant
-        )
+        run_context = _make_run_context(tmp_path, config=config, task=task, variant=variant)
         # Inject exporter env as extra_env
         run_context.extra_env = exporter_env
 
@@ -592,9 +581,7 @@ class TestFullPipelineIntegration:
         # Override the image to use alpine instead of copilot-eval
         config.runner.container_image_base = "alpine"
 
-        run_context = _make_run_context(
-            tmp_path, config=config, task=task, variant=variant
-        )
+        run_context = _make_run_context(tmp_path, config=config, task=task, variant=variant)
 
         # Use real subprocess.run but with a simple alpine echo command
         # We override the runner's run by constructing a minimal docker call

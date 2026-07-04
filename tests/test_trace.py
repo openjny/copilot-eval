@@ -1,4 +1,5 @@
 """Tests for OTel trace parsing and metric extraction."""
+
 from __future__ import annotations
 
 import json
@@ -27,13 +28,23 @@ def _chat(span_id, in_tok=0, out_tok=0, cache=0, output_msgs=None):
 
 
 def _root():
-    return Span(name="invoke_agent", duration_s=12.5, span_id="root", parent_id=None,
-                tags={"github.copilot.turn_count": 3, "gen_ai.request.model": "gpt-x"})
+    return Span(
+        name="invoke_agent",
+        duration_s=12.5,
+        span_id="root",
+        parent_id=None,
+        tags={"github.copilot.turn_count": 3, "gen_ai.request.model": "gpt-x"},
+    )
 
 
 def _tool(span_id, name, dur=0.5):
-    return Span(name="execute_tool", duration_s=dur, span_id=span_id, parent_id="root",
-                tags={"gen_ai.tool.name": name})
+    return Span(
+        name="execute_tool",
+        duration_s=dur,
+        span_id=span_id,
+        parent_id="root",
+        tags={"gen_ai.tool.name": name},
+    )
 
 
 def test_extract_metrics_aggregates_tokens_and_tools():
@@ -44,10 +55,16 @@ def test_extract_metrics_aggregates_tokens_and_tools():
         _tool("t1", "bash", dur=0.5),
         _tool("t2", "view", dur=1.5),
     ]
-    t = Trace(trace_id="x", spans=spans, resource_tags={
-        "eval.scenario": "s", "eval.variant": "v", "eval.epoch": "1",
-        "eval.test_id": "abcdef123456",
-    })
+    t = Trace(
+        trace_id="x",
+        spans=spans,
+        resource_tags={
+            "eval.scenario": "s",
+            "eval.variant": "v",
+            "eval.epoch": "1",
+            "eval.test_id": "abcdef123456",
+        },
+    )
     m = extract_metrics(t)
     assert m is not None
     assert m.scenario == "s" and m.variant == "v" and m.epoch == "1"
@@ -85,11 +102,13 @@ def test_extract_conversation_none_when_no_content():
 
 
 def test_parse_messages_text_list_and_tool_calls():
-    raw = json.dumps([
-        {"role": "assistant", "content": "hello"},
-        {"role": "assistant", "content": [{"text": "world"}]},
-        {"role": "assistant", "tool_calls": [{"function": {"name": "bash"}}]},
-    ])
+    raw = json.dumps(
+        [
+            {"role": "assistant", "content": "hello"},
+            {"role": "assistant", "content": [{"text": "world"}]},
+            {"role": "assistant", "tool_calls": [{"function": {"name": "bash"}}]},
+        ]
+    )
     assert _parse_messages(raw) == "hello\nworld\n[tool_call: bash]"
 
 
@@ -105,17 +124,28 @@ def test_filter_by_run():
 
 def test_fetch_traces_parses_jaeger_json(monkeypatch):
     payload = {
-        "data": [{
-            "traceID": "T1",
-            "processes": {"p1": {"tags": [{"key": "eval.run_id", "value": "r1"}]}},
-            "spans": [
-                {"operationName": "invoke_agent", "duration": 2_000_000,
-                 "spanID": "s1", "references": [], "tags": []},
-                {"operationName": "chat", "duration": 1_000_000, "spanID": "s2",
-                 "references": [{"refType": "CHILD_OF", "spanID": "s1"}],
-                 "tags": [{"key": "gen_ai.usage.input_tokens", "value": 42}]},
-            ],
-        }]
+        "data": [
+            {
+                "traceID": "T1",
+                "processes": {"p1": {"tags": [{"key": "eval.run_id", "value": "r1"}]}},
+                "spans": [
+                    {
+                        "operationName": "invoke_agent",
+                        "duration": 2_000_000,
+                        "spanID": "s1",
+                        "references": [],
+                        "tags": [],
+                    },
+                    {
+                        "operationName": "chat",
+                        "duration": 1_000_000,
+                        "spanID": "s2",
+                        "references": [{"refType": "CHILD_OF", "spanID": "s1"}],
+                        "tags": [{"key": "gen_ai.usage.input_tokens", "value": 42}],
+                    },
+                ],
+            }
+        ]
     }
 
     class FakeResp:

@@ -1,4 +1,5 @@
 """Fetch and parse OTel traces from Jaeger."""
+
 from __future__ import annotations
 
 import json
@@ -59,8 +60,9 @@ class RunMetrics:
     cost: str
 
 
-def fetch_traces(jaeger_url: str, service: str = "github-copilot", limit: int = 2000,
-                 run_id: str | None = None) -> list[Trace]:
+def fetch_traces(
+    jaeger_url: str, service: str = "github-copilot", limit: int = 2000, run_id: str | None = None
+) -> list[Trace]:
     url = f"{jaeger_url}/api/traces"
     params: dict[str, str | int] = {"service": service, "limit": limit}
     # Server-side filter by run_id (stored as a process/resource tag) so large
@@ -85,14 +87,16 @@ def fetch_traces(jaeger_url: str, service: str = "github-copilot", limit: int = 
                 if ref["refType"] == "CHILD_OF":
                     parent_id = ref["spanID"]
             span_tags = {tg["key"]: tg["value"] for tg in s.get("tags", [])}
-            spans.append(Span(
-                name=s["operationName"],
-                duration_s=s["duration"] / 1_000_000,
-                span_id=s["spanID"],
-                parent_id=parent_id,
-                start_time=s.get("startTime", 0),
-                tags=span_tags,
-            ))
+            spans.append(
+                Span(
+                    name=s["operationName"],
+                    duration_s=s["duration"] / 1_000_000,
+                    span_id=s["spanID"],
+                    parent_id=parent_id,
+                    start_time=s.get("startTime", 0),
+                    tags=span_tags,
+                )
+            )
         traces.append(Trace(trace_id=t["traceID"], spans=spans, resource_tags=resource_tags))
 
     return traces

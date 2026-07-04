@@ -1,4 +1,5 @@
 """CLI entry point for the eval framework."""
+
 from __future__ import annotations
 
 import json
@@ -40,9 +41,12 @@ def _ensure_jaeger(config: Config, jaeger_url: str | None = None) -> None:
     click.echo("Jaeger not running. Starting via docker compose...", err=True)
     compose_file = config.project_dir / "docker-compose.yml"
     if not compose_file.exists():
-        raise click.ClickException("Jaeger not running and docker-compose.yml not found. Start Jaeger manually.")
-    subprocess.run(["docker", "compose", "-f", str(compose_file), "up", "-d"],
-                   check=True, capture_output=True)
+        raise click.ClickException(
+            "Jaeger not running and docker-compose.yml not found. Start Jaeger manually."
+        )
+    subprocess.run(
+        ["docker", "compose", "-f", str(compose_file), "up", "-d"], check=True, capture_output=True
+    )
     # Wait for Jaeger to be ready
     for _ in range(10):
         try:
@@ -58,7 +62,10 @@ MANIFEST_NAME = "results.json"
 
 
 def order_variants(
-    variants: list[Variant], epoch: int, strategy: str, rng: random.Random,
+    variants: list[Variant],
+    epoch: int,
+    strategy: str,
+    rng: random.Random,
 ) -> list[Variant]:
     """Order variants for a given epoch to reduce order-effect bias.
 
@@ -95,8 +102,9 @@ def _ordering_rng(seed: int | None, *parts: object) -> random.Random:
     return random.Random("|".join(str(p) for p in (seed, *parts)))
 
 
-def _write_manifest(run_dir: Path, run_id: str, results: list[RunResult],
-                    schedule: dict[str, Any] | None = None) -> None:
+def _write_manifest(
+    run_dir: Path, run_id: str, results: list[RunResult], schedule: dict[str, Any] | None = None
+) -> None:
     """Persist the full set of runs so `analyze` can detect missing/failed ones."""
     manifest = {
         "run_id": run_id,
@@ -129,8 +137,13 @@ def main() -> None:
 
 
 def _safe_run_one(
-    task: Task, variant: Variant, epoch: int,
-    config: Config, run_id: str, run_dir: Path, github_token: str,
+    task: Task,
+    variant: Variant,
+    epoch: int,
+    config: Config,
+    run_id: str,
+    run_dir: Path,
+    github_token: str,
     order_index: int | None = None,
 ) -> RunResult:
     """Run a single eval, guaranteeing the batch is never aborted by one run.
@@ -145,20 +158,33 @@ def _safe_run_one(
     except Exception as exc:  # noqa: BLE001 - isolate per-run failures from the batch
         click.echo(f"    ✗ [{task.name}] epoch={epoch} variant={variant.name} errored: {exc}")
         return RunResult(
-            task=task.name, variant=variant.name, epoch=epoch,
-            test_id=uuid.uuid4().hex, run_id=run_id,
+            task=task.name,
+            variant=variant.name,
+            epoch=epoch,
+            test_id=uuid.uuid4().hex,
+            run_id=run_id,
             log_file=run_dir / f"{task.name}_{variant.name}_epoch{epoch}.log",
-            exit_code=-1, status=RunStatus.SETUP_FAILED, order_index=order_index,
+            exit_code=-1,
+            status=RunStatus.SETUP_FAILED,
+            order_index=order_index,
         )
 
 
 @main.command()
 @click.option("--task", "-p", default=None, help="Run a specific task (overrides enabled flag)")
-@click.option("--epochs", "-n", default=None, type=int, help="Number of epochs (default: from config, typically 1)")
+@click.option(
+    "--epochs",
+    "-n",
+    default=None,
+    type=int,
+    help="Number of epochs (default: from config, typically 1)",
+)
 @click.option("--dry-run", is_flag=True, help="Show plan without executing")
 @click.option("--no-build", is_flag=True, help="Skip auto-build of Docker images")
 @click.option("--config-dir", default=None, type=click.Path(exists=True), help="Project directory")
-def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, config_dir: str | None) -> None:
+def run(
+    task: str | None, epochs: int | None, dry_run: bool, no_build: bool, config_dir: str | None
+) -> None:
     """Run A/B eval for one or more tasks."""
     config = load_config(Path(config_dir) if config_dir else None)
     epochs = epochs or config.runner.epochs
@@ -167,7 +193,9 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
     if task:
         p = config.get_task(task)
         if not p:
-            raise click.ClickException(f"Task '{task}' not found. Use 'list' to see available tasks.")
+            raise click.ClickException(
+                f"Task '{task}' not found. Use 'list' to see available tasks."
+            )
         tasks = [p]
     else:
         tasks = config.enabled_tasks()
@@ -207,7 +235,9 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
     click.echo("=" * 50)
 
     if dry_run:
-        click.echo(f"[dry-run] Would run {epochs} epoch(s) × {len(config.variants)} variants for each task.")
+        click.echo(
+            f"[dry-run] Would run {epochs} epoch(s) × {len(config.variants)} variants for each task."
+        )
         return
 
     if config.runner.collector == "jaeger":
@@ -233,10 +263,14 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
             for e in range(1, epochs + 1)
             for v in order_variants(config.variants, e, order, _ordering_rng(seed, t.name, e))
         ]
-        click.echo(f"Running {len(work)} runs in full parallel (max_workers={config.runner.max_workers})")
+        click.echo(
+            f"Running {len(work)} runs in full parallel (max_workers={config.runner.max_workers})"
+        )
         with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
             futures = {
-                pool.submit(_safe_run_one, t, v, e, config, run_id, run_dir, github_token, i): f"{t.name}/{v.name}/e{e}"
+                pool.submit(
+                    _safe_run_one, t, v, e, config, run_id, run_dir, github_token, i
+                ): f"{t.name}/{v.name}/e{e}"
                 for i, (t, v, e) in enumerate(work)
             }
             for future in as_completed(futures):
@@ -252,10 +286,14 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
             for epoch in range(1, epochs + 1):
                 # Each worker thread uses its own RNG (random.Random is not
                 # thread-safe); derived from the seed for reproducibility.
-                ordered = order_variants(config.variants, epoch, order, _ordering_rng(seed, task.name, epoch))
+                ordered = order_variants(
+                    config.variants, epoch, order, _ordering_rng(seed, task.name, epoch)
+                )
                 for variant in ordered:
                     task_results.append(
-                        _safe_run_one(task, variant, epoch, config, run_id, run_dir, github_token, order_index)
+                        _safe_run_one(
+                            task, variant, epoch, config, run_id, run_dir, github_token, order_index
+                        )
                     )
                     order_index += 1
             return task_results
@@ -273,8 +311,12 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
             click.echo(f">>> Prompt:  {prompt}\n")
 
             for epoch in range(1, epochs + 1):
-                for variant in order_variants(config.variants, epoch, order, _ordering_rng(seed, p.name, epoch)):
-                    result = _safe_run_one(p, variant, epoch, config, run_id, run_dir, github_token, order_index)
+                for variant in order_variants(
+                    config.variants, epoch, order, _ordering_rng(seed, p.name, epoch)
+                ):
+                    result = _safe_run_one(
+                        p, variant, epoch, config, run_id, run_dir, github_token, order_index
+                    )
                     results.append(result)
                     order_index += 1
 
@@ -312,14 +354,35 @@ def run(task: str | None, epochs: int | None, dry_run: bool, no_build: bool, con
 
 @main.command()
 @click.option("--run-id", required=True, help="Run ID to analyze")
-@click.option("--output", "-o", type=click.Choice(["table", "json", "markdown"]), default="table", help="Output format")
-@click.option("--aggregate", "-a", type=click.Choice(["paired", "median", "mean"]), default="paired", help="Aggregation method")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Choice(["table", "json", "markdown"]),
+    default="table",
+    help="Output format",
+)
+@click.option(
+    "--aggregate",
+    "-a",
+    type=click.Choice(["paired", "median", "mean"]),
+    default="paired",
+    help="Aggregation method",
+)
 @click.option("--jaeger-url", default=None, help="Jaeger URL override (forces jaeger collector)")
 @click.option("--config-dir", default=None, type=click.Path(exists=True))
 @click.option("--skip-eval", is_flag=True, help="Skip judge evaluation, use existing scores")
-@click.option("--re-eval", is_flag=True, help="Force re-run judge evaluation (ignore cached scores)")
-def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
-            config_dir: str | None, skip_eval: bool, re_eval: bool) -> None:
+@click.option(
+    "--re-eval", is_flag=True, help="Force re-run judge evaluation (ignore cached scores)"
+)
+def analyze(
+    run_id: str,
+    output: str,
+    aggregate: str,
+    jaeger_url: str | None,
+    config_dir: str | None,
+    skip_eval: bool,
+    re_eval: bool,
+) -> None:
     """Analyze traces from a previous eval run."""
     config = load_config(Path(config_dir) if config_dir else None)
     results_dir = config.results_dir / run_id
@@ -343,7 +406,9 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
     if manifest_runs is not None:
         _report_run_coverage(manifest_runs, traces)
     elif not metrics:
-        click.echo("No traces found for this run ID, and no manifest to reconcile against.", err=True)
+        click.echo(
+            "No traces found for this run ID, and no manifest to reconcile against.", err=True
+        )
         return
 
     # With no surviving traces we can't show metrics, but a manifest still lets us
@@ -367,8 +432,12 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
     raw_tids = {t.resource_tags.get("eval.test_id") for t in traces}
     trace_test_ids = {t for t in raw_tids if t is not None}
     reports = build_report(
-        metrics, results_dir if results_dir.exists() else None, variant_order, aggregate,
-        manifest_runs=manifest_runs, trace_test_ids=trace_test_ids,
+        metrics,
+        results_dir if results_dir.exists() else None,
+        variant_order,
+        aggregate,
+        manifest_runs=manifest_runs,
+        trace_test_ids=trace_test_ids,
     )
     if not reports:
         click.echo("No reports generated.", err=True)
@@ -378,8 +447,9 @@ def analyze(run_id: str, output: str, aggregate: str, jaeger_url: str | None,
     click.echo(formatters[output](reports))
 
 
-def _fetch_traces_for_run(config: Config, jaeger: str, run_id: str,
-                          manifest_runs: list[dict[str, Any]] | None) -> list[Trace]:
+def _fetch_traces_for_run(
+    config: Config, jaeger: str, run_id: str, manifest_runs: list[dict[str, Any]] | None
+) -> list[Trace]:
     """Fetch traces for a run, retrying while ingestion catches up.
 
     Uses a server-side tag filter on eval.run_id and a high limit so large runs
@@ -415,8 +485,9 @@ def _fetch_traces_for_run(config: Config, jaeger: str, run_id: str,
     return traces
 
 
-def _fetch_traces_from_files(config: Config, run_id: str, results_dir: Path,
-                             manifest_runs: list[dict[str, Any]] | None) -> list[Trace]:
+def _fetch_traces_from_files(
+    config: Config, run_id: str, results_dir: Path, manifest_runs: list[dict[str, Any]] | None
+) -> list[Trace]:
     """Deprecated compatibility wrapper for file trace collection."""
     del manifest_runs
     return _collect_file_traces(config, run_id, results_dir)
@@ -427,15 +498,17 @@ def _collect_file_traces(config: Config, run_id: str, results_dir: Path) -> list
     task = config.tasks[0] if config.tasks else Task(name="analyze", prompt="")
     variant = config.variants[0] if config.variants else Variant(name="analyze")
     collector = create_collector("file")
-    return collector.collect(RunContext(
-        run_id=run_id,
-        test_id="",
-        epoch=0,
-        run_dir=results_dir,
-        task=task,
-        variant=variant,
-        config=config,
-    ))
+    return collector.collect(
+        RunContext(
+            run_id=run_id,
+            test_id="",
+            epoch=0,
+            run_dir=results_dir,
+            task=task,
+            variant=variant,
+            config=config,
+        )
+    )
 
 
 def _report_run_coverage(manifest_runs: list[dict[str, Any]], traces: list[Trace]) -> None:
@@ -460,11 +533,16 @@ def _report_run_coverage(manifest_runs: list[dict[str, Any]], traces: list[Trace
 
     total = len(manifest_runs)
     ok = total - len(missing) - len(failed)
-    click.echo(f"Run coverage: {ok}/{total} ok, {len(failed)} failed/timeout, {len(missing)} missing trace.", err=True)
+    click.echo(
+        f"Run coverage: {ok}/{total} ok, {len(failed)} failed/timeout, {len(missing)} missing trace.",
+        err=True,
+    )
     if failed:
         click.echo(f"  Failed/timeout runs (excluded from metrics): {', '.join(failed)}", err=True)
     if missing:
-        click.echo(f"  WARNING: completed runs with no ingested trace: {', '.join(missing)}", err=True)
+        click.echo(
+            f"  WARNING: completed runs with no ingested trace: {', '.join(missing)}", err=True
+        )
 
 
 def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path) -> None:
@@ -516,7 +594,9 @@ def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path
     if versions:
         click.echo(f"  Judge host Copilot version(s): {', '.join(sorted(versions))}", err=True)
     if mismatches:
-        click.echo(f"  WARNING: judge Copilot version mismatch — {'; '.join(sorted(mismatches))}", err=True)
+        click.echo(
+            f"  WARNING: judge Copilot version mismatch — {'; '.join(sorted(mismatches))}", err=True
+        )
     if truncated:
         click.echo(
             f"  WARNING: {len(truncated)} judge(s) saw truncated context "
@@ -525,7 +605,10 @@ def _warn_unscored_judges(config: Config, traces: list[Trace], results_dir: Path
             err=True,
         )
     if problems:
-        click.echo(f"  WARNING: {len(problems)} judge score(s) unavailable: {', '.join(problems)}", err=True)
+        click.echo(
+            f"  WARNING: {len(problems)} judge score(s) unavailable: {', '.join(problems)}",
+            err=True,
+        )
 
 
 def _report_judge_reliability(results_dir: Path) -> None:
@@ -537,8 +620,8 @@ def _report_judge_reliability(results_dir: Path) -> None:
     failure-prone judges are visible alongside the metrics.
     """
     outcomes: dict[str, int] = {"ok": 0, "parse_error": 0, "timeout": 0, "error": 0}
-    judge_evals = 0          # number of judge score records
-    sampled_evals = 0        # records that ran >1 sample
+    judge_evals = 0  # number of judge score records
+    sampled_evals = 0  # records that ran >1 sample
     stddevs: list[float] = []
     no_score = 0
 
@@ -573,9 +656,11 @@ def _report_judge_reliability(results_dir: Path) -> None:
         err=True,
     )
     if total_samples:
+
         def rate(k: str) -> str:
             c = outcomes.get(k, 0)
             return f"{c} ({c / total_samples * 100:.0f}%)"
+
         click.echo(
             f"  Sample outcomes: ok {rate('ok')}, parse_error {rate('parse_error')}, "
             f"timeout {rate('timeout')}, error {rate('error')}.",
@@ -594,7 +679,9 @@ def _is_truncated(text: str | None) -> bool:
     return bool(text and text.rstrip().endswith("(truncated)"))
 
 
-def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: bool = False) -> None:
+def _run_judges(
+    config: Config, traces: list[Trace], results_dir: Path, force: bool = False
+) -> None:
     """Run judge evaluators using OTel traces + output files.
 
     Skips judge evaluators that already have a recorded score (judge presence,
@@ -640,9 +727,11 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
             except (json.JSONDecodeError, OSError):
                 existing_scores = []
         existing_judge_names = {s.get("name") for s in existing_scores if s.get("type") == "judge"}
-        pending = judge_evaluators if force else [
-            ev for ev in judge_evaluators if ev.name not in existing_judge_names
-        ]
+        pending = (
+            judge_evaluators
+            if force
+            else [ev for ev in judge_evaluators if ev.name not in existing_judge_names]
+        )
         if not pending:
             continue  # all judge scores already present
 
@@ -656,7 +745,9 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
             log_file = results_dir / f"{scenario}_{variant}_epoch{epoch}.log"
             if log_file.exists():
                 text = log_file.read_text()
-                conversation = text[:conv_limit] + "\n... (truncated)" if len(text) > conv_limit else text
+                conversation = (
+                    text[:conv_limit] + "\n... (truncated)" if len(text) > conv_limit else text
+                )
 
         # Read output files from persisted outputs. The judge can score on output
         # files alone (e.g. file-writing tasks), so only skip when neither the
@@ -697,7 +788,8 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
         """Merge a trace's collected judge scores with kept scores and persist."""
         rerun_names = ctx["pending_names"]
         kept = [
-            s for s in ctx["existing_scores"]
+            s
+            for s in ctx["existing_scores"]
             if s.get("type") != "judge" or s.get("name") not in rerun_names
         ]
         scores = sorted(ctx["scores"], key=lambda s: ctx["order"].get(s.get("name"), 0))
@@ -716,8 +808,14 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
             err=True,
         )
         extra_meta = {"truncation": ctx["truncation"]} if ctx["truncation"] else None
-        s = run_judge(ev, ctx["conversation"], config, github_token, ctx["output_files_text"],
-                      extra_meta=extra_meta)
+        s = run_judge(
+            ev,
+            ctx["conversation"],
+            config,
+            github_token,
+            ctx["output_files_text"],
+            extra_meta=extra_meta,
+        )
         if s.score is not None:
             click.echo(f"    ✓ {ev.name}: {s.score} — {s.reason[:60]}", err=True)
         else:
@@ -733,11 +831,19 @@ def _run_judges(config: Config, traces: list[Trace], results_dir: Path, force: b
             except Exception as exc:  # never let one judge abort the whole batch
                 click.echo(f"    ! {ev.name}: error — {exc}", err=True)
                 n = max(1, config.runner.judge_samples)
-                score = {"name": ev.name, "type": "judge", "score": None,
-                         "reason": f"error: {exc}", "passed": False,
-                         "samples": [], "score_stddev": None, "n_samples": n,
-                         "outcomes": {"ok": 0, "parse_error": 0, "timeout": 0, "error": n},
-                         "judge_model": config.runner.judge_model, "judge_version": None}
+                score = {
+                    "name": ev.name,
+                    "type": "judge",
+                    "score": None,
+                    "reason": f"error: {exc}",
+                    "passed": False,
+                    "samples": [],
+                    "score_stddev": None,
+                    "n_samples": n,
+                    "outcomes": {"ok": 0, "parse_error": 0, "timeout": 0, "error": n},
+                    "judge_model": config.runner.judge_model,
+                    "judge_version": None,
+                }
             ctx = contexts[key]
             ctx["scores"].append(score)
             ctx["remaining"] -= 1
@@ -770,10 +876,14 @@ def _build_images(config: Config, variants: list[Variant], token: str) -> None:
     # Step 1: Build base image
     click.echo(f"Building {base_image}...")
     cmd = [
-        "docker", "build",
-        "-f", str(base_dockerfile),
-        "--build-arg", f"COPILOT_VERSION={config.runner.copilot_version}",
-        "-t", base_image,
+        "docker",
+        "build",
+        "-f",
+        str(base_dockerfile),
+        "--build-arg",
+        f"COPILOT_VERSION={config.runner.copilot_version}",
+        "-t",
+        base_image,
         str(config.project_dir),
     ]
     result = subprocess.run(cmd, env=env)
@@ -798,10 +908,14 @@ def _build_images(config: Config, variants: list[Variant], token: str) -> None:
             continue
 
         cmd = [
-            "docker", "build",
-            "-f", str(df),
-            "--secret", "id=github_token,env=GITHUB_TOKEN",
-            "-t", image,
+            "docker",
+            "build",
+            "-f",
+            str(df),
+            "--secret",
+            "id=github_token,env=GITHUB_TOKEN",
+            "-t",
+            image,
             str(config.project_dir),
         ]
         result = subprocess.run(cmd, env=env)
@@ -818,16 +932,14 @@ def _ensure_images(config: Config, token: str) -> None:
     base_image = f"{config.runner.container_image_base}:base"
 
     # Check base image
-    result = subprocess.run(["docker", "image", "inspect", base_image],
-                           capture_output=True)
+    result = subprocess.run(["docker", "image", "inspect", base_image], capture_output=True)
     if result.returncode != 0:
         missing.append("base")
 
     # Check variant images
     for v in config.variants:
         image = config.image_name(v)
-        result = subprocess.run(["docker", "image", "inspect", image],
-                               capture_output=True)
+        result = subprocess.run(["docker", "image", "inspect", image], capture_output=True)
         if result.returncode != 0:
             missing.append(v.name)
 
@@ -849,7 +961,9 @@ def list_tasks(config_dir: str | None) -> None:
     click.echo("  " + "-" * 75)
     for p in config.tasks:
         prompt_preview = p.prompt[:40] + "..." if len(p.prompt) > 40 else p.prompt
-        click.echo(f"  {p.name:<25} {'✓' if p.enabled else '−':<8} {len(p.evaluators):>5} {prompt_preview}")
+        click.echo(
+            f"  {p.name:<25} {'✓' if p.enabled else '−':<8} {len(p.evaluators):>5} {prompt_preview}"
+        )
 
     click.echo("\nVariants:")
     click.echo(f"  {'Name':<25} {'Build':<8} {'Run':<8} Description")

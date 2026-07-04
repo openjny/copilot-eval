@@ -1,4 +1,5 @@
 """A/B comparison report generation with multiple output formats."""
+
 from __future__ import annotations
 
 import json
@@ -93,6 +94,7 @@ _METRIC_DEFS = [
 
 # --- Aggregation helpers ---
 
+
 def _median(vals: list[float]) -> float:
     if not vals:
         return 0
@@ -105,8 +107,9 @@ def _mean_agg(vals: list[float]) -> float:
     return float(_mean(vals))
 
 
-def _aggregate_values(vals_by_variant: dict[str, dict[str, float]], variants: list[str],
-                      method: str) -> tuple[dict[str, float], str]:
+def _aggregate_values(
+    vals_by_variant: dict[str, dict[str, float]], variants: list[str], method: str
+) -> tuple[dict[str, float], str]:
     """Aggregate per-variant values and compute delta string.
 
     Values are keyed by epoch (variant -> epoch -> value) so that paired
@@ -155,6 +158,7 @@ def _calc_delta(values: dict[str, float], variants: list[str]) -> str:
 
 # --- Dispersion + significance helpers ---
 
+
 def _stddev(vals: list[float]) -> float:
     """Sample standard deviation; 0 when fewer than two samples."""
     if len(vals) < 2:
@@ -178,10 +182,12 @@ def _paired_deltas(m0: dict[str, float], m1: dict[str, float]) -> list[float]:
     return [m1[k] - m0[k] for k in common]
 
 
-def _bootstrap_ci(deltas: list[float],
-                  confidence: float = _CI_CONFIDENCE,
-                  iterations: int = _BOOTSTRAP_ITERATIONS,
-                  seed: int = _BOOTSTRAP_SEED) -> tuple[float, float] | None:
+def _bootstrap_ci(
+    deltas: list[float],
+    confidence: float = _CI_CONFIDENCE,
+    iterations: int = _BOOTSTRAP_ITERATIONS,
+    seed: int = _BOOTSTRAP_SEED,
+) -> tuple[float, float] | None:
     """Bootstrap CI for the median of paired deltas.
 
     Returns None when there are fewer than two deltas (a CI would be
@@ -210,8 +216,9 @@ def _ci_significant(ci: tuple[float, float] | None) -> bool | None:
     return lo > 0 or hi < 0
 
 
-def _build_summary_row(metric: str, vals_by_variant: dict[str, dict[str, float]],
-                       variants: list[str], aggregate: str) -> SummaryRow:
+def _build_summary_row(
+    metric: str, vals_by_variant: dict[str, dict[str, float]], variants: list[str], aggregate: str
+) -> SummaryRow:
     """Aggregate one metric and attach n, dispersion, and (paired) CI."""
     agg, delta = _aggregate_values(vals_by_variant, variants, aggregate)
     row = SummaryRow(metric=metric, values=agg, delta=delta)
@@ -237,11 +244,15 @@ def _build_summary_row(metric: str, vals_by_variant: dict[str, dict[str, float]]
 
 # --- Report building ---
 
-def build_report(results: list[RunMetrics], results_dir: Path | None = None,
-                 variant_order: list[str] | None = None,
-                 aggregate: str = "paired",
-                 manifest_runs: list[dict[str, Any]] | None = None,
-                 trace_test_ids: set[str] | None = None) -> list[Report]:
+
+def build_report(
+    results: list[RunMetrics],
+    results_dir: Path | None = None,
+    variant_order: list[str] | None = None,
+    aggregate: str = "paired",
+    manifest_runs: list[dict[str, Any]] | None = None,
+    trace_test_ids: set[str] | None = None,
+) -> list[Report]:
     """Build per-task A/B comparison reports.
 
     ``manifest_runs`` (the persisted full set of attempted runs) and
@@ -284,7 +295,9 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None,
         # OTel metrics summary (with n, dispersion, and paired CI)
         summary = []
         for label, key in _METRIC_DEFS:
-            vals_by_v = {v: {r.epoch: float(getattr(r, key)) for r in by_variant[v]} for v in variants}
+            vals_by_v = {
+                v: {r.epoch: float(getattr(r, key)) for r in by_variant[v]} for v in variants
+            }
             summary.append(_build_summary_row(label, vals_by_v, variants, aggregate))
 
         # Tool patterns
@@ -327,26 +340,42 @@ def build_report(results: list[RunMetrics], results_dir: Path | None = None,
             paired_n = len(e0 & e1)
 
         reliability = _build_reliability(
-            task_name, variants, by_variant, manifest_runs, trace_test_ids,
+            task_name,
+            variants,
+            by_variant,
+            manifest_runs,
+            trace_test_ids,
             epoch_judges if judge_names else None,
         )
         warnings = _build_warnings(variants, variant_n, paired_n, aggregate)
 
-        reports.append(Report(
-            task=task_name, runs=task_runs, variants=variants,
-            summary=summary, tool_patterns=tool_patterns,
-            judge_scores=judge_rows, epoch_judges=epoch_judges,
-            epoch_reasons=epoch_reasons, epoch_stddevs=epoch_stddevs,
-            judge_names=judge_names, judge_runtime=judge_runtime, aggregate=aggregate,
-            variant_n=variant_n, paired_n=paired_n,
-            reliability=reliability, warnings=warnings,
-        ))
+        reports.append(
+            Report(
+                task=task_name,
+                runs=task_runs,
+                variants=variants,
+                summary=summary,
+                tool_patterns=tool_patterns,
+                judge_scores=judge_rows,
+                epoch_judges=epoch_judges,
+                epoch_reasons=epoch_reasons,
+                epoch_stddevs=epoch_stddevs,
+                judge_names=judge_names,
+                judge_runtime=judge_runtime,
+                aggregate=aggregate,
+                variant_n=variant_n,
+                paired_n=paired_n,
+                reliability=reliability,
+                warnings=warnings,
+            )
+        )
 
     return reports
 
 
-def _build_warnings(variants: list[str], variant_n: dict[str, int],
-                    paired_n: int, aggregate: str) -> list[str]:
+def _build_warnings(
+    variants: list[str], variant_n: dict[str, int], paired_n: int, aggregate: str
+) -> list[str]:
     """Flag insufficient-data conditions so small deltas aren't over-read."""
     warnings: list[str] = []
     low_variants = [v for v in variants if variant_n.get(v, 0) < MIN_RELIABLE_N]
@@ -366,27 +395,32 @@ def _build_warnings(variants: list[str], variant_n: dict[str, int],
     return warnings
 
 
-def _build_reliability(task: str, variants: list[str],
-                       by_variant: dict[str, list[RunMetrics]],
-                       manifest_runs: list[dict[str, Any]] | None,
-                       trace_test_ids: set[str] | None,
-                       epoch_judges: dict[tuple[str, str], dict[str, int]] | None,
-                       ) -> list[ReliabilityRow]:
+def _build_reliability(
+    task: str,
+    variants: list[str],
+    by_variant: dict[str, list[RunMetrics]],
+    manifest_runs: list[dict[str, Any]] | None,
+    trace_test_ids: set[str] | None,
+    epoch_judges: dict[tuple[str, str], dict[str, int]] | None,
+) -> list[ReliabilityRow]:
     """Compute per-variant success/failure rates as first-class metrics.
 
     Without a manifest the full set of attempted runs is unknown, so only the
     surviving trace count is reported (success/failure rates need the manifest
     to avoid survivorship bias).
     """
+
     def pct(num: int, den: int) -> str:
         return f"{(num / den) * 100:.1f}%" if den else "—"
 
     if manifest_runs is None:
         rows = [ReliabilityRow("Runs (traces)", {v: str(len(by_variant[v])) for v in variants})]
-        rows.append(ReliabilityRow(
-            "Success/failure rates",
-            {v: "n/a (no manifest)" for v in variants},
-        ))
+        rows.append(
+            ReliabilityRow(
+                "Success/failure rates",
+                {v: "n/a (no manifest)" for v in variants},
+            )
+        )
         return rows
 
     tids = trace_test_ids or set()
@@ -414,21 +448,33 @@ def _build_reliability(task: str, variants: list[str],
 
     rows = [
         ReliabilityRow("Runs (attempted)", {v: str(counts[v]["total"]) for v in variants}),
-        ReliabilityRow("Success rate", {v: pct(counts[v]["success"], counts[v]["total"]) for v in variants}),
-        ReliabilityRow("Timeout rate", {v: pct(counts[v]["timeout"], counts[v]["total"]) for v in variants}),
-        ReliabilityRow("Failed rate", {v: pct(counts[v]["failed"], counts[v]["total"]) for v in variants}),
-        ReliabilityRow("Missing-trace rate", {v: pct(counts[v]["missing"], counts[v]["total"]) for v in variants}),
+        ReliabilityRow(
+            "Success rate", {v: pct(counts[v]["success"], counts[v]["total"]) for v in variants}
+        ),
+        ReliabilityRow(
+            "Timeout rate", {v: pct(counts[v]["timeout"], counts[v]["total"]) for v in variants}
+        ),
+        ReliabilityRow(
+            "Failed rate", {v: pct(counts[v]["failed"], counts[v]["total"]) for v in variants}
+        ),
+        ReliabilityRow(
+            "Missing-trace rate",
+            {v: pct(counts[v]["missing"], counts[v]["total"]) for v in variants},
+        ),
     ]
     if epoch_judges is not None:
-        rows.append(ReliabilityRow(
-            "Judge-score coverage",
-            {v: _judge_coverage(v, epoch_judges, counts[v]["success"]) for v in variants},
-        ))
+        rows.append(
+            ReliabilityRow(
+                "Judge-score coverage",
+                {v: _judge_coverage(v, epoch_judges, counts[v]["success"]) for v in variants},
+            )
+        )
     return rows
 
 
-def _judge_coverage(variant: str, epoch_judges: dict[tuple[str, str], dict[str, int]],
-                    success_n: int) -> str:
+def _judge_coverage(
+    variant: str, epoch_judges: dict[tuple[str, str], dict[str, int]], success_n: int
+) -> str:
     """Share of successful runs that yielded a usable judge score.
 
     Judge scores are written to ``*.scores.json`` during ``analyze`` (not into
@@ -446,6 +492,7 @@ def _judge_coverage(variant: str, epoch_judges: dict[tuple[str, str], dict[str, 
 
 
 # --- Format functions ---
+
 
 def _fmt_value(row: SummaryRow, v: str) -> str:
     """Aggregate value with ±stddev when a spread is meaningful."""
@@ -561,11 +608,13 @@ def format_table(reports: list[Report]) -> str:
         sections.append("\n".join(lines))
     body = "\n".join(sections)
     if _significance_legend(reports):
-        body += ("\n\nLegend: value \u00b1stddev; Delta is a percentage, [CI low,high abs] is a "
-                 "bootstrap interval of the paired delta in absolute metric units; "
-                 "* = CI excludes 0 (statistically supported), ns = not supported "
-                 f"(observed only), low-n = fewer than {MIN_RELIABLE_N} paired samples "
-                 "(significance not assessed). No multiple-comparison correction applied.")
+        body += (
+            "\n\nLegend: value \u00b1stddev; Delta is a percentage, [CI low,high abs] is a "
+            "bootstrap interval of the paired delta in absolute metric units; "
+            "* = CI excludes 0 (statistically supported), ns = not supported "
+            f"(observed only), low-n = fewer than {MIN_RELIABLE_N} paired samples "
+            "(significance not assessed). No multiple-comparison correction applied."
+        )
     return body
 
 
@@ -595,14 +644,23 @@ def format_json(reports: list[Report]) -> str:
                 "variant_n": report.variant_n,
                 "paired_n": report.paired_n,
                 "warnings": report.warnings,
-                "reliability": [{"metric": rr.metric, "values": rr.values} for rr in report.reliability],
+                "reliability": [
+                    {"metric": rr.metric, "values": rr.values} for rr in report.reliability
+                ],
                 "runs": [
                     {
-                        "variant": r.variant, "epoch": r.epoch, "duration": r.duration,
-                        "turn_count": r.turn_count, "total_spans": r.total_spans,
-                        "tool_count": r.tool_count, "input_tokens": r.total_input_tokens,
-                        "output_tokens": r.total_output_tokens, "cache_tokens": r.total_cache_tokens,
-                        "tool_duration": r.tool_duration, "tool_names": r.tool_names, "model": r.model,
+                        "variant": r.variant,
+                        "epoch": r.epoch,
+                        "duration": r.duration,
+                        "turn_count": r.turn_count,
+                        "total_spans": r.total_spans,
+                        "tool_count": r.tool_count,
+                        "input_tokens": r.total_input_tokens,
+                        "output_tokens": r.total_output_tokens,
+                        "cache_tokens": r.total_cache_tokens,
+                        "tool_duration": r.tool_duration,
+                        "tool_names": r.tool_names,
+                        "model": r.model,
                         "judges": report.epoch_judges.get((r.variant, r.epoch), {}),
                         "judge_stddevs": report.epoch_stddevs.get((r.variant, r.epoch), {}),
                     }
@@ -685,8 +743,12 @@ def format_markdown(reports: list[Report]) -> str:
         lines.append("\n### Per-Run Details\n")
         jhdr = "".join(f" {n} |" for n in jnames)
         jsep = "".join("------:|" for _ in jnames)
-        lines.append(f"| Variant | Epoch | Dur(s) | Turns | Spans | Tools | In Tok | Out Tok | Cache | TDur(s) |{jhdr}")
-        lines.append(f"|---------|------:|-------:|------:|------:|------:|-------:|--------:|------:|--------:|{jsep}")
+        lines.append(
+            f"| Variant | Epoch | Dur(s) | Turns | Spans | Tools | In Tok | Out Tok | Cache | TDur(s) |{jhdr}"
+        )
+        lines.append(
+            f"|---------|------:|-------:|------:|------:|------:|-------:|--------:|------:|--------:|{jsep}"
+        )
         for r in report.runs:
             jvals = ""
             for n in jnames:
@@ -698,9 +760,11 @@ def format_markdown(reports: list[Report]) -> str:
                     jvals += f" {s} (±{sd:.2f}) |"
                 else:
                     jvals += f" {s} |"
-            lines.append(f"| {r.variant} | {r.epoch} | {r.duration:.1f} | {r.turn_count} | "
-                         f"{r.total_spans} | {r.tool_count} | {r.total_input_tokens} | "
-                         f"{r.total_output_tokens} | {r.total_cache_tokens} | {r.tool_duration:.1f} |{jvals}")
+            lines.append(
+                f"| {r.variant} | {r.epoch} | {r.duration:.1f} | {r.turn_count} | "
+                f"{r.total_spans} | {r.tool_count} | {r.total_input_tokens} | "
+                f"{r.total_output_tokens} | {r.total_cache_tokens} | {r.tool_duration:.1f} |{jvals}"
+            )
 
         # Judge reasons
         if report.epoch_reasons:
@@ -719,19 +783,27 @@ def format_markdown(reports: list[Report]) -> str:
         sections.append("\n".join(lines))
     body = "\n\n---\n\n".join(sections)
     if _significance_legend(reports):
-        body += ("\n\n---\n\n_Legend: value ±stddev; Delta is a percentage, `[CI low,high abs]` "
-                 "is a bootstrap interval of the paired delta in **absolute metric units**; "
-                 "`*` = CI excludes 0 (statistically supported), `ns` = observed only "
-                 f"(not supported), `low-n` = fewer than {MIN_RELIABLE_N} paired samples "
-                 "(significance not assessed). No multiple-comparison correction applied._")
+        body += (
+            "\n\n---\n\n_Legend: value ±stddev; Delta is a percentage, `[CI low,high abs]` "
+            "is a bootstrap interval of the paired delta in **absolute metric units**; "
+            "`*` = CI excludes 0 (statistically supported), `ns` = observed only "
+            f"(not supported), `low-n` = fewer than {MIN_RELIABLE_N} paired samples "
+            "(significance not assessed). No multiple-comparison correction applied._"
+        )
     return body
 
 
 # --- Judge score loading ---
 
-def _load_judge_raw(results_dir: Path, variants: list[str], task: str
-                    ) -> tuple[dict[tuple[str, str], dict[str, int]], dict[tuple[str, str], dict[str, str]],
-                               list[str], dict[tuple[str, str], dict[str, float]]]:
+
+def _load_judge_raw(
+    results_dir: Path, variants: list[str], task: str
+) -> tuple[
+    dict[tuple[str, str], dict[str, int]],
+    dict[tuple[str, str], dict[str, str]],
+    list[str],
+    dict[tuple[str, str], dict[str, float]],
+]:
     """Load per-epoch judge scores, reasons, and spread.
 
     Returns (epoch_data, epoch_reasons, evaluator_names, epoch_stddevs).

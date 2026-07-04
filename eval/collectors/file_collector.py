@@ -1,4 +1,5 @@
 """Collect OTel spans from the Copilot file exporter JSONL output."""
+
 from __future__ import annotations
 
 import json
@@ -36,7 +37,8 @@ class FileCollector:
             traces.extend(parse_file_traces(trace_path))
         if run_context.run_id:
             return [
-                trace for trace in traces
+                trace
+                for trace in traces
                 if trace.resource_tags.get("eval.run_id") == run_context.run_id
             ]
         return traces
