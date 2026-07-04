@@ -59,7 +59,14 @@ class SummaryRow:
     paired_n: int = 0
     ci_low: float | None = None
     ci_high: float | None = None
-    # True/False when a CI is available (excludes/includes 0); None otherwise.
+    # Two-sided bootstrap p-value proxy for the paired delta (None when not
+    # computable). Feeds the multiple-comparison correction across a task's
+    # family of tests; see `_apply_mc_correction`.
+    p_value: float | None = None
+    # True/False when a CI is available (excludes/includes 0) *and* the delta
+    # survives the multiple-comparison correction; None otherwise (insufficient
+    # paired samples). A raw CI-excludes-zero delta that is knocked out by
+    # correction renders as False (`ns`), not True.
     significant: bool | None = None
     # Decimal places used when rendering this metric's value/stddev/CI.
     precision: int = 1
@@ -105,6 +112,12 @@ class Report:
     # Each entry is a structured warning: {"type": ..., "message": ..., ...}.
     # "type" is one of "small_sample_size", "no_paired_epochs", "low_power".
     warnings: list[dict[str, Any]] = field(default_factory=list)
+    # Multiple-comparison correction applied across this task's family of
+    # tests (OTel metrics + judge criteria): "holm", "benjamini-hochberg", or
+    # "none" (disabled via --no-mc-correction). `mc_tests` is the family size
+    # actually corrected (0 when correction is disabled or nothing was testable).
+    mc_correction: str = "none"
+    mc_tests: int = 0
 
 
 # Each entry is (label, RunMetrics attribute, decimal precision). Precision drives
@@ -246,17 +259,25 @@ def _paired_deltas(m0: dict[str, float], m1: dict[str, float]) -> list[float]:
     return [m1[k] - m0[k] for k in common]
 
 
-def _bootstrap_ci(
+def _bootstrap_stats(
     deltas: list[float],
     confidence: float = _CI_CONFIDENCE,
     iterations: int = _BOOTSTRAP_ITERATIONS,
     seed: int = _BOOTSTRAP_SEED,
-) -> tuple[float, float] | None:
-    """Bootstrap CI for the median of paired deltas.
+) -> tuple[float, float, float] | None:
+    """Bootstrap CI + a two-sided p-value proxy for the median of paired deltas.
 
-    Returns None when there are fewer than two deltas (a CI would be
-    meaningless). Uses a fixed seed so identical inputs yield an identical
-    interval, keeping report output reproducible.
+    Returns ``(ci_low, ci_high, p_value)``, or None when there are fewer than
+    two deltas (both would be meaningless). Uses a fixed seed so identical
+    inputs yield identical output, keeping report output reproducible.
+
+    The p-value is derived from the same resampled distribution as the CI: the
+    smaller of the two tail proportions crossing zero, doubled for a two-sided
+    test (the standard bootstrap-percentile p-value, e.g. Efron & Tibshirani
+    1993). It has no independent meaning beyond ranking/thresholding deltas for
+    the multiple-comparison correction (`_holm_bonferroni` /
+    `_benjamini_hochberg`) — the CI-excludes-zero check alone has no p-value to
+    adjust by family-wise error rate.
     """
     n = len(deltas)
     if n < 2:
@@ -269,15 +290,124 @@ def _bootstrap_ci(
     medians.sort()
     lo_idx = int((1 - confidence) / 2 * iterations)
     hi_idx = min(iterations - 1, int((1 + confidence) / 2 * iterations))
-    return medians[lo_idx], medians[hi_idx]
+    frac_le = sum(1 for m in medians if m <= 0) / iterations
+    frac_ge = sum(1 for m in medians if m >= 0) / iterations
+    p_value = min(1.0, 2 * min(frac_le, frac_ge))
+    return medians[lo_idx], medians[hi_idx], p_value
+
+
+def _bootstrap_ci(
+    deltas: list[float],
+    confidence: float = _CI_CONFIDENCE,
+    iterations: int = _BOOTSTRAP_ITERATIONS,
+    seed: int = _BOOTSTRAP_SEED,
+) -> tuple[float, float] | None:
+    """Bootstrap CI for the median of paired deltas (see `_bootstrap_stats`)."""
+    stats = _bootstrap_stats(deltas, confidence, iterations, seed)
+    return None if stats is None else (stats[0], stats[1])
 
 
 def _ci_significant(ci: tuple[float, float] | None) -> bool | None:
-    """A paired delta is statistically supported when its CI excludes 0."""
+    """A paired delta is statistically supported when its CI excludes 0.
+
+    This is the *raw*, uncorrected significance check for a single test. The
+    report's `*` marker additionally requires the delta to survive the
+    per-task multiple-comparison correction (`_apply_mc_correction`) — see
+    `SummaryRow.significant`.
+    """
     if ci is None:
         return None
     lo, hi = ci
     return lo > 0 or hi < 0
+
+
+# --- Multiple-comparison correction ---
+#
+# Each task independently bootstrap-tests ~9 OTel metrics plus one hypothesis
+# per judge criterion at alpha=0.05. Left uncorrected, the per-family
+# false-positive rate compounds fast — with m=11 independent tests,
+# P(>=1 false positive) = 1 - 0.95**11 ~= 43% — so a `*` marker doesn't mean
+# what it looks like it means (see GitHub issue #71). These corrections adjust
+# which deltas keep their `*` after all of a task's tests are considered
+# together; the CI itself is left untouched (still a plain 95% interval, shown
+# for descriptive purposes regardless of correction).
+
+_DEFAULT_ALPHA = 0.05
+
+
+def _holm_bonferroni(p_values: list[float], alpha: float = _DEFAULT_ALPHA) -> list[bool]:
+    """Holm-Bonferroni step-down correction (controls the family-wise error rate).
+
+    Returns a reject/fail-to-reject decision per p-value, aligned to the input
+    order. Sort ascending, then walk the sorted order comparing each p-value to
+    an increasingly lenient threshold (alpha / remaining-tests); the first
+    failure stops all further rejections, since Holm's guarantee only holds for
+    that contiguous prefix.
+    """
+    m = len(p_values)
+    reject = [False] * m
+    order = sorted(range(m), key=lambda i: p_values[i])
+    for rank, idx in enumerate(order):
+        if p_values[idx] <= alpha / (m - rank):
+            reject[idx] = True
+        else:
+            break
+    return reject
+
+
+def _benjamini_hochberg(p_values: list[float], alpha: float = _DEFAULT_ALPHA) -> list[bool]:
+    """Benjamini-Hochberg FDR correction (controls the false-discovery rate).
+
+    Less conservative than Holm — more power to detect real effects, at the
+    cost of tolerating a small expected fraction of false positives among the
+    rejected hypotheses, rather than bounding the probability of *any* false
+    positive. Finds the largest rank k with p(k) <= (k/m) * alpha and rejects
+    every hypothesis at or below that rank.
+    """
+    m = len(p_values)
+    order = sorted(range(m), key=lambda i: p_values[i])
+    largest_k = -1
+    for rank, idx in enumerate(order):
+        if p_values[idx] <= (rank + 1) / m * alpha:
+            largest_k = rank
+    reject = [False] * m
+    for rank in range(largest_k + 1):
+        reject[order[rank]] = True
+    return reject
+
+
+# Public correction methods accepted by `build_report(mc_correction=...)` / the
+# `analyze` CLI. "none" (from --no-mc-correction) skips correction entirely.
+_MC_METHODS = {
+    "holm": _holm_bonferroni,
+    "benjamini-hochberg": _benjamini_hochberg,
+    "bh": _benjamini_hochberg,
+}
+
+
+def _apply_mc_correction(rows: list[SummaryRow], method: str) -> int:
+    """Recompute each row's `significant` marker across the family after a
+    multiple-comparison correction. Mutates `rows` in place.
+
+    Returns the number of tests actually corrected (0 when correction is
+    disabled, or there is nothing testable in this family).
+
+    Correction can only take a `*` away, never grant one a raw CI-excludes-zero
+    check didn't already support: rows with `significant is False` (or `None`,
+    for insufficient paired samples) are left as-is.
+    """
+    testable = [r for r in rows if r.p_value is not None and r.paired_n >= MIN_RELIABLE_N]
+    if method == "none" or not testable:
+        return 0
+    fn = _MC_METHODS.get(method)
+    if fn is None:
+        raise ValueError(f"Unknown mc_correction method: {method!r}")
+    p_values = [r.p_value for r in testable if r.p_value is not None]
+    decisions = fn(p_values)
+    for row, reject in zip(testable, decisions, strict=True):
+        if row.significant is True and not reject:
+            row.significant = False
+    return len(testable)
 
 
 def _build_summary_row(
@@ -300,12 +430,16 @@ def _build_summary_row(
         v0, v1 = variants
         deltas = _paired_deltas(vals_by_variant.get(v0, {}), vals_by_variant.get(v1, {}))
         row.paired_n = len(deltas)
-        ci = _bootstrap_ci(deltas)
-        if ci is not None:
-            row.ci_low, row.ci_high = ci
+        stats = _bootstrap_stats(deltas)
+        ci = None
+        if stats is not None:
+            row.ci_low, row.ci_high, row.p_value = stats
+            ci = (row.ci_low, row.ci_high)
         # Only claim statistical support with enough paired samples. At tiny n a
         # bootstrap of the median can produce a degenerate CI that excludes 0,
-        # which would re-create the "looks decisive at n=3" failure mode.
+        # which would re-create the "looks decisive at n=3" failure mode. This is
+        # the *raw*, uncorrected decision -- `_apply_mc_correction` may still
+        # downgrade True to False once the whole task's family is considered.
         row.significant = _ci_significant(ci) if row.paired_n >= MIN_RELIABLE_N else None
     return row
 
@@ -363,9 +497,11 @@ def _build_pass_k_row(
         v0, v1 = variants
         deltas = _paired_deltas(rates_by_variant.get(v0, {}), rates_by_variant.get(v1, {}))
         row.paired_n = len(deltas)
-        ci = _bootstrap_ci(deltas)
-        if ci is not None:
-            row.ci_low, row.ci_high = ci
+        stats = _bootstrap_stats(deltas)
+        ci = None
+        if stats is not None:
+            row.ci_low, row.ci_high, row.p_value = stats
+            ci = (row.ci_low, row.ci_high)
         row.significant = _ci_significant(ci) if row.paired_n >= MIN_RELIABLE_N else None
     return row
 
@@ -415,6 +551,7 @@ def build_report(
     aggregate: str = "paired",
     manifest_runs: list[dict[str, Any]] | None = None,
     trace_test_ids: set[str] | None = None,
+    mc_correction: str = "holm",
 ) -> list[Report]:
     """Build per-task A/B comparison reports.
 
@@ -423,6 +560,13 @@ def build_report(
     reliability table and the trace-missing rate. Both are optional so reports
     for older runs without a manifest still render — reliability simply degrades
     to per-variant trace counts.
+
+    ``mc_correction`` controls the multiple-comparison correction applied to
+    the `*` significance marker across each task's family of tests (OTel
+    metrics + judge criteria + pass@k/pass^k rows): ``"holm"`` (default,
+    Holm-Bonferroni), ``"benjamini-hochberg"``/``"bh"`` (FDR, less
+    conservative), or ``"none"`` to disable (the `analyze` CLI's
+    ``--no-mc-correction`` flag).
     """
     if not results and not manifest_runs:
         return []
@@ -502,6 +646,11 @@ def build_report(
                 judge_rows.append(_build_summary_row(name, vals_by_v, variants, aggregate))
             pass_k_rows, min_k = _build_pass_k_rows(epoch_passed, variants, names, aggregate)
 
+        # Multiple-comparison correction: the `*` marker on any of this task's
+        # summary/judge/pass_k rows must reflect the whole family of tests, not
+        # each row's raw (uncorrected) CI-excludes-zero check in isolation.
+        mc_tests = _apply_mc_correction([*summary, *judge_rows, *pass_k_rows], mc_correction)
+
         # Sample sizes: per-variant trace count and shared paired-epoch count.
         variant_n = {v: len(by_variant[v]) for v in variants}
         paired_n = 0
@@ -551,6 +700,8 @@ def build_report(
                 paired_n=paired_n,
                 reliability=reliability,
                 warnings=warnings,
+                mc_correction=mc_correction if mc_tests else "none",
+                mc_tests=mc_tests,
             )
         )
 
@@ -812,6 +963,44 @@ def _significance_legend(reports: list[Report]) -> bool:
     )
 
 
+_MC_METHOD_LABELS = {
+    "holm": "Holm-Bonferroni",
+    "benjamini-hochberg": "Benjamini-Hochberg (FDR)",
+    "bh": "Benjamini-Hochberg (FDR)",
+}
+
+
+def _mc_correction_line(report: Report) -> str | None:
+    """One-line disclosure of the multiple-comparison correction applied (or
+    not) to this task's `*` markers -- the number of tests and the method, so
+    a reader can judge how conservative the significance claims are."""
+    if report.mc_correction == "none" or not report.mc_tests:
+        return None
+    label = _MC_METHOD_LABELS.get(report.mc_correction, report.mc_correction)
+    return f"Multiple-comparison correction: {label} across {report.mc_tests} test(s)."
+
+
+def _legend_marker_meaning(reports: list[Report]) -> tuple[str, str, str]:
+    """Plain-text (format-agnostic) description of what `*`/`ns` mean, plus a
+    trailing note -- swapped based on whether any report actually applied a
+    multiple-comparison correction (it's a single run-wide setting, so either
+    all reports agree or none did any correction at all)."""
+    if not any(r.mc_correction != "none" for r in reports):
+        return (
+            "CI excludes 0 (statistically supported)",
+            "not supported (observed only)",
+            "No multiple-comparison correction applied.",
+        )
+    method = next(r.mc_correction for r in reports if r.mc_correction != "none")
+    label = _MC_METHOD_LABELS.get(method, method)
+    return (
+        f"CI excludes 0 and remains significant after {label} multiple-comparison "
+        "correction (see the per-task line above for the test count)",
+        "not significant after correction, or CI included 0",
+        "",
+    )
+
+
 def format_table(reports: list[Report]) -> str:
     sections: list[str] = []
     for report in reports:
@@ -826,6 +1015,8 @@ def format_table(reports: list[Report]) -> str:
         if report.aggregate == "paired" and len(report.variants) == 2:
             sample_line += f"; paired epochs={report.paired_n}"
         lines.append("\n" + sample_line)
+        if mc_line := _mc_correction_line(report):
+            lines.append(mc_line)
         for w in report.warnings:
             if w["type"] == "low_power":
                 lines.append("")
@@ -900,12 +1091,12 @@ def format_table(reports: list[Report]) -> str:
         sections.append("\n".join(lines))
     body = "\n".join(sections)
     if _significance_legend(reports):
+        star_meaning, ns_meaning, trailing_note = _legend_marker_meaning(reports)
         body += (
             "\n\nLegend: value \u00b1stddev; Delta is a percentage, [CI low,high abs] is a "
             "bootstrap interval of the paired delta in absolute metric units; "
-            "* = CI excludes 0 (statistically supported), ns = not supported "
-            f"(observed only), low-n = fewer than {MIN_RELIABLE_N} paired samples "
-            "(significance not assessed). No multiple-comparison correction applied."
+            f"* = {star_meaning}, ns = {ns_meaning}, low-n = fewer than {MIN_RELIABLE_N} "
+            f"paired samples (significance not assessed).{' ' + trailing_note if trailing_note else ''}"
         )
     return body
 
@@ -922,6 +1113,7 @@ def _summary_row_json(r: SummaryRow, key_name: str) -> dict[str, Any]:
         "paired_n": r.paired_n,
         "ci_low": r.ci_low,
         "ci_high": r.ci_high,
+        "p_value": r.p_value,
         "significant": r.significant,
     }
 
@@ -936,6 +1128,8 @@ def format_json(reports: list[Report]) -> str:
                 "variant_n": report.variant_n,
                 "paired_n": report.paired_n,
                 "warnings": report.warnings,
+                "mc_correction": report.mc_correction,
+                "mc_tests": report.mc_tests,
                 "reliability": [
                     {"metric": rr.metric, "values": rr.values} for rr in report.reliability
                 ],
@@ -983,6 +1177,8 @@ def format_markdown(reports: list[Report]) -> str:
         if report.aggregate == "paired" and len(report.variants) == 2:
             sample_line += f"; paired epochs={report.paired_n}"
         lines.append(sample_line)
+        if mc_line := _mc_correction_line(report):
+            lines.append(f"**{mc_line}**")
         for w in report.warnings:
             if w["type"] == "low_power":
                 lines.append("")
@@ -1091,12 +1287,13 @@ def format_markdown(reports: list[Report]) -> str:
         sections.append("\n".join(lines))
     body = "\n\n---\n\n".join(sections)
     if _significance_legend(reports):
+        star_meaning, ns_meaning, trailing_note = _legend_marker_meaning(reports)
         body += (
             "\n\n---\n\n_Legend: value ±stddev; Delta is a percentage, `[CI low,high abs]` "
             "is a bootstrap interval of the paired delta in **absolute metric units**; "
-            "`*` = CI excludes 0 (statistically supported), `ns` = observed only "
-            f"(not supported), `low-n` = fewer than {MIN_RELIABLE_N} paired samples "
-            "(significance not assessed). No multiple-comparison correction applied._"
+            f"`*` = {star_meaning}, `ns` = {ns_meaning}, `low-n` = fewer than "
+            f"{MIN_RELIABLE_N} paired samples (significance not assessed)."
+            f"{' ' + trailing_note if trailing_note else ''}_"
         )
     return body
 

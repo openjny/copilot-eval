@@ -11,6 +11,8 @@
       },
       "paired_n": 0,
       "warnings": [],
+      "mc_correction": "none",
+      "mc_tests": 0,
       "reliability": [
         {
           "metric": "Runs (traces)",
@@ -149,6 +151,7 @@
           "paired_n": 0,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         },
         {
@@ -172,6 +175,7 @@
           "paired_n": 0,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         },
         {
@@ -195,6 +199,7 @@
           "paired_n": 0,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         },
         {
@@ -218,6 +223,7 @@
           "paired_n": 0,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         },
         {
@@ -241,6 +247,7 @@
           "paired_n": 0,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         },
         {
@@ -264,6 +271,7 @@
           "paired_n": 0,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         },
         {
@@ -287,6 +295,7 @@
           "paired_n": 0,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         },
         {
@@ -310,6 +319,7 @@
           "paired_n": 0,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         },
         {
@@ -333,6 +343,7 @@
           "paired_n": 0,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         }
       ],

@@ -13,6 +13,8 @@
       },
       "paired_n": 8,
       "warnings": [],
+      "mc_correction": "holm",
+      "mc_tests": 9,
       "reliability": [
         {
           "metric": "Runs (traces)",
@@ -376,6 +378,7 @@
           "paired_n": 8,
           "ci_low": -3.3000000000000007,
           "ci_high": -3.0,
+          "p_value": 0.0,
           "significant": true
         },
         {
@@ -404,6 +407,7 @@
           "paired_n": 8,
           "ci_low": -1.0,
           "ci_high": 0.0,
+          "p_value": 0.05,
           "significant": false
         },
         {
@@ -432,6 +436,7 @@
           "paired_n": 8,
           "ci_low": -2.0,
           "ci_high": -2.0,
+          "p_value": 0.0,
           "significant": true
         },
         {
@@ -460,6 +465,7 @@
           "paired_n": 8,
           "ci_low": -0.5,
           "ci_high": 0.0,
+          "p_value": 1.0,
           "significant": false
         },
         {
@@ -488,6 +494,7 @@
           "paired_n": 8,
           "ci_low": -404.0,
           "ci_high": -396.0,
+          "p_value": 0.0,
           "significant": true
         },
         {
@@ -516,6 +523,7 @@
           "paired_n": 8,
           "ci_low": -121.0,
           "ci_high": -119.0,
+          "p_value": 0.0,
           "significant": true
         },
         {
@@ -544,6 +552,7 @@
           "paired_n": 8,
           "ci_low": -30.0,
           "ci_high": -30.0,
+          "p_value": 0.0,
           "significant": true
         },
         {
@@ -572,6 +581,7 @@
           "paired_n": 8,
           "ci_low": -0.7999999999999998,
           "ci_high": -0.7999999999999998,
+          "p_value": 0.0,
           "significant": true
         },
         {
@@ -600,6 +610,7 @@
           "paired_n": 8,
           "ci_low": -0.006099999999999998,
           "ci_high": -0.005899999999999999,
+          "p_value": 0.0,
           "significant": true
         }
       ],

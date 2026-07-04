@@ -608,3 +608,41 @@ def test_analyze_min_epochs_omitted_does_not_gate(tmp_path: Path, monkeypatch):
     result = CliRunner().invoke(cli.main, ["analyze", "--run-id", run_id, "--skip-eval"])
 
     assert result.exit_code == 0, result.output
+
+
+# --- analyze --no-mc-correction (multiple-comparison correction opt-out) ---
+
+
+def test_analyze_default_applies_holm_correction(monkeypatch):
+    """By default, `analyze` must pass mc_correction="holm" through to the
+    report builder (issue #71's Holm-Bonferroni correction is on by default)."""
+    from click.testing import CliRunner
+
+    from eval.cli import analyze_cmd
+
+    captured = {}
+    monkeypatch.setattr(
+        analyze_cmd, "run_analysis", lambda **kwargs: captured.update(kwargs) or None
+    )
+
+    result = CliRunner().invoke(analyze_cmd.analyze, ["--run-id", "run-1"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["mc_correction"] == "holm"
+
+
+def test_analyze_no_mc_correction_flag_disables_correction(monkeypatch):
+    """--no-mc-correction must opt out of the correction entirely (mc_correction="none")."""
+    from click.testing import CliRunner
+
+    from eval.cli import analyze_cmd
+
+    captured = {}
+    monkeypatch.setattr(
+        analyze_cmd, "run_analysis", lambda **kwargs: captured.update(kwargs) or None
+    )
+
+    result = CliRunner().invoke(analyze_cmd.analyze, ["--run-id", "run-1", "--no-mc-correction"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["mc_correction"] == "none"

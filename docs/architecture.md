@@ -214,7 +214,19 @@ surfaces its own uncertainty:
   JSON), so a delta can be read against the spread it sits in.
 - **Confidence interval**: the paired delta carries a bootstrap CI (seeded, so
   output is reproducible). `*` marks a delta whose CI excludes 0 (statistically
-  supported); `ns` marks an *observed only* delta whose CI includes 0.
+  supported) *and* survives the multiple-comparison correction below; `ns`
+  marks an *observed only* delta whose CI includes 0, or one corrected away.
+- **Multiple-comparison correction**: each task independently bootstrap-tests
+  ~9 OTel metrics plus one hypothesis per judge criterion (and pass@k/pass^k
+  row) at alpha=0.05; left uncorrected, the per-family false-positive rate
+  compounds fast (11 independent tests → ~43% chance of at least one spurious
+  `*`). `build_report()` corrects the `*` marker across each task's family
+  using Holm-Bonferroni by default (`mc_correction="holm"`; also accepts
+  `"benjamini-hochberg"`/`"bh"` for the less-conservative FDR variant, or
+  `"none"`). The table/markdown reports print the method and test count used
+  (`Multiple-comparison correction: Holm-Bonferroni across N test(s).`) right
+  above each task's metrics. `analyze --no-mc-correction` disables it, falling
+  back to each metric's raw (uncorrected) significance check.
 - **Insufficient-data warnings**: when a variant's `n` or the paired epoch count
   is below `MIN_RELIABLE_N` (5), the report warns that deltas are observed, not
   statistically supported. Below that threshold, the report also renders a

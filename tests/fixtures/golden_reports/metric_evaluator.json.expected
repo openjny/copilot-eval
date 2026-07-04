@@ -13,6 +13,8 @@
       },
       "paired_n": 5,
       "warnings": [],
+      "mc_correction": "holm",
+      "mc_tests": 11,
       "reliability": [
         {
           "metric": "Runs (traces)",
@@ -278,6 +280,7 @@
           "paired_n": 5,
           "ci_low": -0.2999999999999998,
           "ci_high": 0.0,
+          "p_value": 0.125,
           "significant": false
         },
         {
@@ -306,6 +309,7 @@
           "paired_n": 5,
           "ci_low": 0.0,
           "ci_high": 0.0,
+          "p_value": 1.0,
           "significant": false
         },
         {
@@ -334,6 +338,7 @@
           "paired_n": 5,
           "ci_low": -1.0,
           "ci_high": -1.0,
+          "p_value": 0.0,
           "significant": true
         },
         {
@@ -362,6 +367,7 @@
           "paired_n": 5,
           "ci_low": 0.0,
           "ci_high": 0.0,
+          "p_value": 1.0,
           "significant": false
         },
         {
@@ -390,6 +396,7 @@
           "paired_n": 5,
           "ci_low": -34.0,
           "ci_high": -23.0,
+          "p_value": 0.0,
           "significant": true
         },
         {
@@ -418,6 +425,7 @@
           "paired_n": 5,
           "ci_low": -12.0,
           "ci_high": -6.0,
+          "p_value": 0.0,
           "significant": true
         },
         {
@@ -446,6 +454,7 @@
           "paired_n": 5,
           "ci_low": -3.0,
           "ci_high": -1.0,
+          "p_value": 0.0,
           "significant": true
         },
         {
@@ -474,6 +483,7 @@
           "paired_n": 5,
           "ci_low": -0.06,
           "ci_high": -0.010000000000000009,
+          "p_value": 0.0,
           "significant": true
         },
         {
@@ -502,6 +512,7 @@
           "paired_n": 5,
           "ci_low": -0.0005999999999999998,
           "ci_high": -0.00020000000000000052,
+          "p_value": 0.0,
           "significant": true
         }
       ],
@@ -540,6 +551,7 @@
           "paired_n": 5,
           "ci_low": -1.0,
           "ci_high": 0.0,
+          "p_value": 1.0,
           "significant": false
         },
         {
@@ -568,6 +580,7 @@
           "paired_n": 5,
           "ci_low": 1.0,
           "ci_high": 3.0,
+          "p_value": 0.0,
           "significant": true
         }
       ],
@@ -598,6 +611,7 @@
           "paired_n": 1,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         },
         {
@@ -626,6 +640,7 @@
           "paired_n": 1,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         },
         {
@@ -654,6 +669,7 @@
           "paired_n": 1,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         },
         {
@@ -682,6 +698,7 @@
           "paired_n": 1,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         }
       ],
