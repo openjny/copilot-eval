@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import requests
@@ -58,6 +59,45 @@ class RunMetrics:
     total_cache_tokens: int
     model: str
     cost: float
+
+
+def _parse_float(value: object) -> float | None:
+    """Best-effort float conversion; returns None for missing/non-numeric values."""
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+# Numeric RunMetrics fields a `metric` evaluator can assert on. Maps the public
+# metric name (used in eval-config.yaml) to how its numeric value is derived from
+# a RunMetrics instance. `duration_seconds` is an alias for `duration` and
+# `total_tokens` is derived (input + output). `cost` is coerced defensively via
+# `_parse_float`, which yields None for a non-numeric value so callers treat it as
+# unavailable rather than silently passing.
+_METRIC_ACCESSORS: dict[str, Callable[[RunMetrics], float | None]] = {
+    "duration": lambda m: float(m.duration),
+    "duration_seconds": lambda m: float(m.duration),
+    "turn_count": lambda m: float(m.turn_count),
+    "tool_count": lambda m: float(m.tool_count),
+    "tool_duration": lambda m: float(m.tool_duration),
+    "total_input_tokens": lambda m: float(m.total_input_tokens),
+    "total_output_tokens": lambda m: float(m.total_output_tokens),
+    "total_cache_tokens": lambda m: float(m.total_cache_tokens),
+    "total_tokens": lambda m: float(m.total_input_tokens + m.total_output_tokens),
+    "cost": lambda m: _parse_float(m.cost),
+}
+
+# Assertable metric names, exposed for config validation.
+METRIC_FIELDS: tuple[str, ...] = tuple(_METRIC_ACCESSORS)
+
+
+def metric_value(metrics: RunMetrics, name: str) -> float | None:
+    """Return the numeric value of a named metric, or None if unknown/unavailable."""
+    accessor = _METRIC_ACCESSORS.get(name)
+    if accessor is None:
+        return None
+    return accessor(metrics)
 
 
 def fetch_traces(

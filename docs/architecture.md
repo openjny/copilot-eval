@@ -68,7 +68,9 @@ runs are reported rather than silently dropped.
 
 Judge (LLM-as-Judge) evaluators do **not** run during `run`. They run later in
 `copilot-eval analyze`, which fetches traces, reconstructs the conversation, and
-scores it:
+scores it. `metric` evaluators are also evaluated at `analyze` time — deterministically,
+straight from the parsed `RunMetrics` (no LLM) — and their pass/fail scores are merged
+into the same `.scores.json` files:
 
 ```mermaid
 sequenceDiagram

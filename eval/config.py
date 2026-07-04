@@ -20,7 +20,8 @@ class ConfigError(ValueError):
 # bump the version everywhere.
 DEFAULT_COPILOT_VERSION = "1.0.18"
 
-EVALUATOR_TYPES = ("judge", "script", "contains", "regex")
+EVALUATOR_TYPES = ("judge", "script", "contains", "regex", "metric")
+METRIC_OPS = ("<", "<=", ">", ">=", "==", "!=")
 PARALLEL_MODES = ("off", "per_task", "full")
 VARIANT_ORDER_MODES = ("fixed", "counterbalance", "random")
 OUTPUT_FORMATS = ("text", "json")
@@ -87,7 +88,7 @@ class Variant:
 
 @dataclass
 class Evaluator:
-    """Evaluation criterion. type: judge | script | contains | regex."""
+    """Evaluation criterion. type: judge | script | contains | regex | metric."""
 
     name: str
     type: str = "judge"
@@ -99,6 +100,9 @@ class Evaluator:
     # them; the strict-JSON output contract is appended by the runner.
     criterion: str | None = None
     rubric: dict[int, str] | None = None
+    metric: str | None = None  # type=metric: RunMetrics field to assert on
+    op: str | None = None  # type=metric: comparison operator
+    threshold: float | None = None  # type=metric: numeric threshold
 
 
 @dataclass
@@ -397,6 +401,11 @@ def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Eva
                     f"Evaluator '{name}'{where} has an invalid regex 'value': {exc}."
                 ) from exc
 
+        metric, op, threshold = None, None, None
+        if etype == "metric":
+            metric, op, threshold = _parse_metric_fields(e, name, where)
+            value = None  # metric stores its numeric threshold, not a string value
+
         evaluators.append(
             Evaluator(
                 name=name,
@@ -406,6 +415,9 @@ def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Eva
                 value=value,
                 criterion=criterion,
                 rubric=rubric,
+                metric=metric,
+                op=op,
+                threshold=threshold,
             )
         )
     return evaluators
@@ -479,6 +491,40 @@ def _build_rubric_prompt(criterion: str, rubric: dict[int, str]) -> str:
     lines = [criterion, "", f"Score from {scores[-1]} to {scores[0]} using these anchors:"]
     lines += [f"- {s}: {rubric[s]}" for s in scores]
     return "\n".join(lines)
+
+
+def _parse_metric_fields(e: dict[str, Any], name: str, where: str) -> tuple[str, str, float]:
+    """Validate and extract the metric/op/value fields of a type=metric evaluator."""
+    from eval.trace import METRIC_FIELDS
+
+    metric = e.get("metric")
+    if not metric:
+        raise ConfigError(f"Evaluator '{name}'{where} (type=metric) requires a 'metric'.")
+    metric = str(metric)
+    if metric not in METRIC_FIELDS:
+        raise ConfigError(
+            f"Evaluator '{name}'{where} has invalid metric '{metric}'. "
+            f"Must be one of: {', '.join(METRIC_FIELDS)}."
+        )
+
+    op = e.get("op")
+    if not op:
+        raise ConfigError(f"Evaluator '{name}'{where} (type=metric) requires an 'op'.")
+    op = str(op)
+    if op not in METRIC_OPS:
+        raise ConfigError(
+            f"Evaluator '{name}'{where} has invalid op '{op}'. "
+            f"Must be one of: {', '.join(METRIC_OPS)}."
+        )
+
+    raw_value = e.get("value")
+    if raw_value is None:
+        raise ConfigError(f"Evaluator '{name}'{where} (type=metric) requires a numeric 'value'.")
+    if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+        raise ConfigError(
+            f"Evaluator '{name}'{where} (type=metric) requires a numeric 'value', got {raw_value!r}."
+        )
+    return metric, op, float(raw_value)
 
 
 def _parse_hooks(raw: dict[str, Any] | None) -> Hooks:

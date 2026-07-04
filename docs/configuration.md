@@ -99,7 +99,7 @@ tasks:
       on_failure: fail                   # before_run failure policy: fail | warn (default: fail)
     evaluators:
       - name: quality
-        type: judge                      # judge | script | contains | regex
+        type: judge                      # judge | script | contains | regex | metric
         prompt: "Rate on 1-10..."
 ```
 
@@ -163,7 +163,7 @@ variants:
 
 ## Evaluators
 
-Four evaluator types are supported:
+Five evaluator types are supported:
 
 | Type | Config | What it does |
 |------|--------|-------------|
@@ -171,8 +171,58 @@ Four evaluator types are supported:
 | `script` | `script` | Bash script; exit 0 = pass |
 | `contains` | `value` | Checks if string exists in output |
 | `regex` | `value` | Checks if regex matches output |
+| `metric` | `metric`, `op`, `value` | Thresholds a numeric run metric (pass/fail) |
 
-Each evaluator requires a unique `name` within its task and a valid `type`. The type-specific field above is mandatory (e.g. `judge` requires a `prompt` or a `rubric`). Invalid types, missing required fields, duplicate names, and invalid regex `value`s are rejected at config load time with a clear `ConfigError`.
+Each evaluator requires a unique `name` within its task and a valid `type`. The type-specific field(s) above are mandatory (e.g. `judge` requires a `prompt` or a `rubric`). Invalid types, missing required fields, duplicate names, invalid regex `value`s, and invalid `metric`/`op`/`value` are rejected at config load time with a clear `ConfigError`.
+
+### Metric Evaluator
+
+The `metric` evaluator turns collected telemetry into a pass/fail gate — useful for
+CI, where you want to *fail the build* if a customization makes the agent slower or
+more expensive rather than just observing the delta.
+
+```yaml
+evaluators:
+  - name: cost-budget
+    type: metric
+    metric: cost            # RunMetrics field to assert on
+    op: "<"                 # < <= > >= == !=
+    value: 0.5              # numeric threshold
+  - name: latency-budget
+    type: metric
+    metric: duration
+    op: "<="
+    value: 60
+```
+
+- Scores **deterministically** (pass → `1`, fail → `0`), like `contains`/`regex`, and
+  is written to the same `*.scores.json` file, so it feeds the same pass/fail path and
+  shows up in the report alongside other scores.
+- Runs during `analyze` from the parsed traces — **no extra LLM calls**. It is
+  recomputed on every `analyze` (idempotently) and runs even with `--skip-eval`, so a
+  gate always reflects the current telemetry.
+- **CI gating:** when any metric gate does not pass, `analyze` exits **non-zero** (with a
+  summary of the failed gates), so a cost/latency/token regression can block a merge.
+  Tasks with no metric evaluators are unaffected and still exit `0`.
+- **Fails closed:** a metric value that can't be derived scores `null` and counts as a
+  failure (never a silent pass). This includes a trace that yields no metrics at all for
+  a metric-gated task. Note that an absent `github.copilot.cost` tag currently parses to
+  `0.0` (a real float), so `cost` itself does not reach the `null` path from real
+  telemetry today.
+
+Assertable metrics (fields of `RunMetrics`):
+
+| `metric` | Meaning |
+|----------|---------|
+| `duration` / `duration_seconds` | Wall-clock duration of the agent run (seconds) |
+| `turn_count` | Number of agent turns |
+| `tool_count` | Number of tool calls |
+| `tool_duration` | Total time spent in tool calls (seconds) |
+| `total_input_tokens` | Prompt tokens across chat spans |
+| `total_output_tokens` | Completion tokens across chat spans |
+| `total_cache_tokens` | Cache-read input tokens |
+| `total_tokens` | `total_input_tokens + total_output_tokens` |
+| `cost` | Reported run cost |
 
 ### Judge Evaluator
 

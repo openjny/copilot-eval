@@ -288,6 +288,168 @@ def test_judge_without_prompt_or_rubric_rejected(tmp_path):
         load_inline(tmp_path, _rubric_task())
 
 
+# --- Metric evaluator validation ---
+
+
+def test_metric_evaluator_parsed(tmp_path):
+    cfg = load_inline(
+        tmp_path,
+        {
+            "tasks": [
+                {
+                    "name": "t1",
+                    "prompt": "p",
+                    "evaluators": [
+                        {
+                            "name": "cost-budget",
+                            "type": "metric",
+                            "metric": "cost",
+                            "op": "<",
+                            "value": 0.5,
+                        },
+                        {
+                            "name": "latency",
+                            "type": "metric",
+                            "metric": "duration",
+                            "op": "<=",
+                            "value": 60,
+                        },
+                    ],
+                }
+            ]
+        },
+    )
+    evs = {e.name: e for e in cfg.get_task("t1").evaluators}
+    assert evs["cost-budget"].metric == "cost"
+    assert evs["cost-budget"].op == "<"
+    assert evs["cost-budget"].threshold == 0.5
+    assert evs["latency"].threshold == 60.0
+
+
+def test_metric_evaluator_missing_metric(tmp_path):
+    with pytest.raises(ConfigError, match="requires a 'metric'"):
+        load_inline(
+            tmp_path,
+            {
+                "tasks": [
+                    {
+                        "name": "t1",
+                        "prompt": "p",
+                        "evaluators": [{"name": "e", "type": "metric", "op": "<", "value": 1}],
+                    }
+                ]
+            },
+        )
+
+
+def test_metric_evaluator_invalid_metric(tmp_path):
+    with pytest.raises(ConfigError, match="invalid metric 'bogus'"):
+        load_inline(
+            tmp_path,
+            {
+                "tasks": [
+                    {
+                        "name": "t1",
+                        "prompt": "p",
+                        "evaluators": [
+                            {
+                                "name": "e",
+                                "type": "metric",
+                                "metric": "bogus",
+                                "op": "<",
+                                "value": 1,
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+
+def test_metric_evaluator_missing_op(tmp_path):
+    with pytest.raises(ConfigError, match="requires an 'op'"):
+        load_inline(
+            tmp_path,
+            {
+                "tasks": [
+                    {
+                        "name": "t1",
+                        "prompt": "p",
+                        "evaluators": [
+                            {"name": "e", "type": "metric", "metric": "cost", "value": 1}
+                        ],
+                    }
+                ]
+            },
+        )
+
+
+def test_metric_evaluator_invalid_op(tmp_path):
+    with pytest.raises(ConfigError, match="invalid op '=<'"):
+        load_inline(
+            tmp_path,
+            {
+                "tasks": [
+                    {
+                        "name": "t1",
+                        "prompt": "p",
+                        "evaluators": [
+                            {
+                                "name": "e",
+                                "type": "metric",
+                                "metric": "cost",
+                                "op": "=<",
+                                "value": 1,
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+
+def test_metric_evaluator_missing_value(tmp_path):
+    with pytest.raises(ConfigError, match="requires a numeric 'value'"):
+        load_inline(
+            tmp_path,
+            {
+                "tasks": [
+                    {
+                        "name": "t1",
+                        "prompt": "p",
+                        "evaluators": [
+                            {"name": "e", "type": "metric", "metric": "cost", "op": "<"}
+                        ],
+                    }
+                ]
+            },
+        )
+
+
+def test_metric_evaluator_non_numeric_value(tmp_path):
+    with pytest.raises(ConfigError, match="requires a numeric 'value'"):
+        load_inline(
+            tmp_path,
+            {
+                "tasks": [
+                    {
+                        "name": "t1",
+                        "prompt": "p",
+                        "evaluators": [
+                            {
+                                "name": "e",
+                                "type": "metric",
+                                "metric": "cost",
+                                "op": "<",
+                                "value": "cheap",
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+
 # --- Runner validation ---
 
 

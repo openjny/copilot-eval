@@ -1006,3 +1006,78 @@ def test_score_to_dict_non_judge_omits_metadata():
     s = EvalScore(name="c", type="contains", score=1, reason="found", passed=True)
     d = score_to_dict(s)
     assert d == {"name": "c", "type": "contains", "score": 1, "reason": "found", "passed": True}
+
+
+# --- Metric evaluator ---
+
+
+def test_eval_metric_pass_and_fail():
+    from eval.runner import eval_metric
+    from tests.conftest import make_metrics
+
+    m = make_metrics("t", "v", "0", duration=42.0)
+    ev_pass = Evaluator(name="lat", type="metric", metric="duration", op="<", threshold=60.0)
+    ev_fail = Evaluator(name="lat", type="metric", metric="duration", op="<", threshold=30.0)
+
+    s_pass = eval_metric(ev_pass, m)
+    assert s_pass.passed is True
+    assert s_pass.score == 1
+    assert s_pass.type == "metric"
+    assert "PASS" in s_pass.reason
+
+    s_fail = eval_metric(ev_fail, m)
+    assert s_fail.passed is False
+    assert s_fail.score == 0
+    assert "FAIL" in s_fail.reason
+
+
+@pytest.mark.parametrize(
+    "op,threshold,expected",
+    [
+        ("<", 2.0, False),
+        ("<", 3.0, True),
+        ("<=", 2.0, True),
+        (">", 1.0, True),
+        (">", 2.0, False),
+        (">=", 2.0, True),
+        ("==", 2.0, True),
+        ("!=", 2.0, False),
+    ],
+)
+def test_eval_metric_operators(op, threshold, expected):
+    from eval.runner import eval_metric
+    from tests.conftest import make_metrics
+
+    m = make_metrics("t", "v", "0", turn_count=2)
+    ev = Evaluator(name="turns", type="metric", metric="turn_count", op=op, threshold=threshold)
+    assert eval_metric(ev, m).passed is expected
+
+
+def test_eval_metric_total_tokens_derived():
+    from eval.runner import eval_metric
+    from tests.conftest import make_metrics
+
+    m = make_metrics("t", "v", "0", total_input_tokens=100, total_output_tokens=50)
+    ev = Evaluator(name="tok", type="metric", metric="total_tokens", op="==", threshold=150.0)
+    assert eval_metric(ev, m).passed is True
+
+
+def test_eval_metric_cost_parsed_from_string():
+    from eval.runner import eval_metric
+    from tests.conftest import make_metrics
+
+    m = make_metrics("t", "v", "0", cost="0.42")
+    ev = Evaluator(name="cost", type="metric", metric="cost", op="<", threshold=0.5)
+    assert eval_metric(ev, m).passed is True
+
+
+def test_eval_metric_unavailable_value_scores_none():
+    from eval.runner import eval_metric
+    from tests.conftest import make_metrics
+
+    m = make_metrics("t", "v", "0", cost="?")
+    ev = Evaluator(name="cost", type="metric", metric="cost", op="<", threshold=0.5)
+    s = eval_metric(ev, m)
+    assert s.score is None
+    assert s.passed is False
+    assert "unavailable" in s.reason
