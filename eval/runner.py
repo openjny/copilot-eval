@@ -106,7 +106,9 @@ class RunResult:
 
 
 def get_github_token() -> str:
-    token = os.environ.get("GITHUB_TOKEN", "")
+    # COPILOT_GITHUB_TOKEN (the name used in .env.example) is accepted as a
+    # fallback so it stays in sync with validation.check_github_token().
+    token = os.environ.get("GITHUB_TOKEN", "") or os.environ.get("COPILOT_GITHUB_TOKEN", "")
     if token:
         return token
     try:

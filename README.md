@@ -61,8 +61,9 @@ uv run copilot-eval --log-level warning --log-format json run --config-dir examp
 | Command | Description |
 |---------|-------------|
 | `list --config-dir <dir>` | List tasks and variants |
+| `validate --config-dir <dir>` | Check config schema, fixtures, script/variant references, and var interpolation (warnings for non-blocking issues, e.g. missing optional fixtures) |
 | `build --config-dir <dir> [--variant NAME]` | Build Docker images |
-| `run --config-dir <dir> [--task NAME] [--epochs N] [--dry-run] [--no-build]` | Execute eval runs |
+| `run --config-dir <dir> [--task NAME] [--epochs N] [--dry-run] [--no-build] [--skip-preflight]` | Execute eval runs (fails fast on pre-flight checks before any Docker work; `--skip-preflight` bypasses those checks entirely) |
 | `analyze --run-id <ID> [--config-dir <dir>] [-o table\|json\|markdown] [-a paired\|median\|mean] [--jaeger-url URL] [--skip-eval] [--re-eval]` | Analyze results |
 
 ## Examples

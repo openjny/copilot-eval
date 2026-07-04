@@ -32,6 +32,15 @@ from eval.trace import (
     fetch_traces,
     filter_by_run,
 )
+from eval.validation import (
+    CheckResult,
+    any_failed,
+    check_config_schema,
+    check_fixtures,
+    check_script_references,
+    check_var_interpolation,
+    validate_readiness,
+)
 
 logger = getLogger(__name__)
 
@@ -137,6 +146,18 @@ def _load_manifest(results_dir: Path) -> list[dict[str, Any]] | None:
     return runs if isinstance(runs, list) else None
 
 
+def _print_check_results(results: list[CheckResult], title: str) -> None:
+    """Print a validation/readiness report, one line per check, to stderr."""
+    passed = sum(1 for r in results if r.passed)
+    warnings = sum(1 for r in results if not r.passed and not r.blocking)
+    summary = f"{title}: {passed}/{len(results)} passed"
+    if warnings:
+        summary += f" ({warnings} warning{'s' if warnings != 1 else ''})"
+    click.echo(summary, err=True)
+    for r in results:
+        click.echo(r.format(), err=True)
+
+
 @click.group()
 @click.option(
     "--log-level",
@@ -232,9 +253,19 @@ def _safe_run_one(
 )
 @click.option("--dry-run", is_flag=True, help="Show plan without executing")
 @click.option("--no-build", is_flag=True, help="Skip auto-build of Docker images")
+@click.option(
+    "--skip-preflight",
+    is_flag=True,
+    help="Skip pre-flight readiness checks (Docker/auth/fixtures/disk space)",
+)
 @click.option("--config-dir", default=None, type=click.Path(exists=True), help="Project directory")
 def run(
-    task: str | None, epochs: int | None, dry_run: bool, no_build: bool, config_dir: str | None
+    task: str | None,
+    epochs: int | None,
+    dry_run: bool,
+    no_build: bool,
+    skip_preflight: bool,
+    config_dir: str | None,
 ) -> None:
     """Run A/B eval for one or more tasks."""
     config = load_config(Path(config_dir) if config_dir else None)
@@ -292,6 +323,25 @@ def run(
             f"fixtures for each task ({total} runs total)."
         )
         return
+
+    # Pre-flight: fail fast on missing Docker/auth/disk space before doing any
+    # Docker work (build, pull, or jaeger startup). Non-blocking warnings
+    # (e.g. a missing fixture dir, which the runner itself tolerates) are
+    # printed but never abort the run; only blocking failures do.
+    if skip_preflight:
+        click.echo("Pre-flight checks: skipped (--skip-preflight)", err=True)
+    else:
+        # The base-image check only makes sense when builds are disabled
+        # (--no-build): if auto-build is enabled, _ensure_images() below will
+        # build the image itself, so a missing image pre-flight isn't a
+        # failure — the default first-run flow must not be blocked here.
+        preflight = validate_readiness(config, tasks=tasks, check_build=no_build)
+        if any(not r.passed for r in preflight):
+            _print_check_results(preflight, "Pre-flight checks")
+        if any_failed(preflight):
+            raise click.ClickException(
+                "Pre-flight validation failed. Fix the issues above and re-run."
+            )
 
     if config.runner.collector == "jaeger":
         _ensure_jaeger(config)
@@ -1201,3 +1251,36 @@ def list_tasks(config_dir: str | None) -> None:
         has_build = "✓" if v.dockerfile else "−"
         has_run = "✓" if v.run_script else "−"
         click.echo(f"  {v.name:<25} {has_build:<8} {has_run:<8} {v.description[:40]}")
+
+
+@main.command()
+@click.option("--config-dir", default=None, type=click.Path(exists=True), help="Project directory")
+def validate(config_dir: str | None) -> None:
+    """Validate an eval-config.yaml: schema, fixtures, script/variant references, and vars.
+
+    Checks (independent of Docker/auth, unlike `run`'s pre-flight checks):
+    - YAML syntax and schema validity
+    - Referenced fixture directories exist on disk (warning: a missing
+      fixture dir doesn't fail a run, since eval.runner tolerates it)
+    - Variant/task script references (Dockerfile, run script, hooks,
+      health_check, script evaluators) exist on disk
+    - {var} prompt/output_instruction placeholders resolve for every variant
+      (warning: unresolved placeholders are left as literal text at run time)
+
+    Exits 0 if all *blocking* checks pass (warnings don't affect the exit
+    code), 1 otherwise.
+    """
+    config, schema_result = check_config_schema(Path(config_dir) if config_dir else None)
+    results: list[CheckResult] = [schema_result]
+    if config is not None:
+        results += check_fixtures(config)
+        results += check_script_references(config)
+        results += check_var_interpolation(config)
+
+    _print_check_results(results, "Validation")
+    if any_failed(results):
+        raise click.exceptions.Exit(1)
+    if any(not r.passed for r in results):
+        click.echo("All blocking checks passed (see warnings above).", err=True)
+    else:
+        click.echo("All checks passed.", err=True)
