@@ -703,3 +703,67 @@ def test_analyze_compact_selects_compact_formatter(tmp_path: Path, monkeypatch):
     assert "📊 copilot-eval:" in result.output
     assert "### Per-Run Details" not in result.output
     assert "### Tool Usage" not in result.output
+
+
+# --- CI-native output formats ---
+
+
+def test_analyze_junit_output_is_valid_xml(tmp_path: Path, monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    from eval import cli
+
+    run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.5)
+
+    result = CliRunner().invoke(
+        cli.main, ["analyze", "--run-id", run_id, "--skip-eval", "-o", "junit"]
+    )
+
+    assert result.exit_code == 0, result.output
+    xml_start = result.output.index("<?xml")
+    root = ET.fromstring(result.output[xml_start:])
+    assert root.tag == "testsuites"
+
+
+def test_analyze_html_output_is_self_contained(tmp_path: Path, monkeypatch):
+    from eval import cli
+
+    run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.5)
+
+    result = CliRunner().invoke(
+        cli.main, ["analyze", "--run-id", run_id, "--skip-eval", "-o", "html"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "<!DOCTYPE html>" in result.output
+    assert "<style>" in result.output
+
+
+def test_analyze_gha_summary_writes_to_step_summary_file(tmp_path: Path, monkeypatch):
+    from eval import cli
+
+    run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.5)
+    summary_path = tmp_path / "step-summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
+
+    result = CliRunner().invoke(
+        cli.main, ["analyze", "--run-id", run_id, "--skip-eval", "-o", "gha-summary"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "GITHUB_STEP_SUMMARY" in result.output
+    assert "📊 copilot-eval:" in summary_path.read_text(encoding="utf-8")
+
+
+def test_analyze_gha_summary_falls_back_to_stdout_without_env_var(tmp_path: Path, monkeypatch):
+    from eval import cli
+
+    run_id = _patch_analyze(tmp_path, monkeypatch, budget_threshold=0.5)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+    result = CliRunner().invoke(
+        cli.main, ["analyze", "--run-id", run_id, "--skip-eval", "-o", "gha-summary"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "📊 copilot-eval:" in result.output

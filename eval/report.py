@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
+import xml.etree.ElementTree as ET
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from statistics import mean as _mean
@@ -1423,6 +1426,319 @@ def format_markdown_compact(reports: list[Report]) -> str:
 
     body = "\n\n---\n\n".join(sections)
     return _truncate_for_pr_comment(body)
+
+
+# --- CI-native output formats (JUnit XML, GitHub Actions step summary, HTML) ---
+
+# Groups of (kind, rows, higher_is_better) mirroring the direction rules used
+# by the compact markdown formatter (`_fmt_delta_compact` call sites): OTel
+# metrics (duration/cost/tokens/...) regress when they go *up*, judge scores
+# and pass@k/pass^k rates regress when they go *down*.
+_RowGroup = tuple[str, list[SummaryRow], bool]
+
+
+def _row_groups(report: Report) -> list[_RowGroup]:
+    return [
+        ("metric", report.summary, False),
+        ("judge", report.judge_scores, True),
+        ("pass_k", report.pass_k, True),
+    ]
+
+
+def _delta_pct(row: SummaryRow) -> float | None:
+    """Parse `row.delta` (e.g. `"+12.5%"`) back to a float, or None when the
+    delta is empty/unparseable (no common paired epochs)."""
+    if not row.delta:
+        return None
+    try:
+        return float(row.delta.rstrip("%"))
+    except ValueError:
+        return None
+
+
+def _is_improvement(row: SummaryRow, *, higher_is_better: bool) -> bool | None:
+    """Whether the delta moved in the favorable direction; None when there's
+    no parseable delta (e.g. no paired epochs)."""
+    pct = _delta_pct(row)
+    if pct is None or pct == 0:
+        return None
+    return (pct > 0) if higher_is_better else (pct < 0)
+
+
+def _is_regression(row: SummaryRow, *, higher_is_better: bool) -> bool:
+    """A CI-gate-worthy regression: the paired-delta CI excludes zero (and
+    survives multiple-comparison correction -- `row.significant` already
+    reflects that), *and* the change moved in the unfavorable direction."""
+    if row.significant is not True:
+        return False
+    improved = _is_improvement(row, higher_is_better=higher_is_better)
+    return improved is False
+
+
+# --- JUnit XML ---
+
+
+def _junit_testcase(row: SummaryRow, *, task: str, higher_is_better: bool) -> ET.Element:
+    testcase = ET.Element("testcase", {"classname": task, "name": row.metric})
+    detail = [f"values: {row.values}"]
+    if row.ci_low is not None and row.ci_high is not None:
+        p = row.precision
+        detail.append(
+            f"delta: {row.delta} (95% CI [{row.ci_low:+.{p}f},{row.ci_high:+.{p}f}] abs, "
+            f"paired_n={row.paired_n})"
+        )
+    elif row.delta:
+        detail.append(f"delta: {row.delta}")
+    else:
+        detail.append("delta: n/a (no common paired epochs)")
+    if _is_regression(row, higher_is_better=higher_is_better):
+        failure = ET.SubElement(
+            testcase,
+            "failure",
+            {
+                "message": f"Statistically significant regression in {row.metric} ({row.delta})",
+                "type": "RegressionError",
+            },
+        )
+        failure.text = "\n".join(detail)
+    else:
+        system_out = ET.SubElement(testcase, "system-out")
+        system_out.text = "\n".join(detail)
+    return testcase
+
+
+def format_junit(reports: list[Report]) -> str:
+    """JUnit XML for native CI test-report integration (GitHub Actions,
+    Azure Pipelines, Jenkins, GitLab CI, ...) -- ``analyze -o junit``.
+
+    One ``<testsuite>`` per task, one ``<testcase>`` per metric/judge-score/
+    pass@k comparison. A comparison whose bootstrap CI excludes zero (and
+    survives multiple-comparison correction) *and* moved in the unfavorable
+    direction (metrics regress upward, judge/pass@k scores regress downward)
+    renders as a ``<failure>`` so CI systems surface it as a failed test.
+    """
+    testsuites = ET.Element("testsuites")
+    for report in reports:
+        groups = _row_groups(report)
+        all_rows = [row for _, rows, _ in groups for row in rows]
+        failures = sum(
+            1
+            for _, rows, hib in groups
+            for row in rows
+            if _is_regression(row, higher_is_better=hib)
+        )
+        testsuite = ET.SubElement(
+            testsuites,
+            "testsuite",
+            {
+                "name": report.task,
+                "tests": str(len(all_rows)),
+                "failures": str(failures),
+                "errors": "0",
+                "skipped": "0",
+            },
+        )
+        for _, rows, hib in groups:
+            for row in rows:
+                testsuite.append(_junit_testcase(row, task=report.task, higher_is_better=hib))
+    total_tests = sum(int(ts.get("tests", "0")) for ts in testsuites)
+    total_failures = sum(int(ts.get("failures", "0")) for ts in testsuites)
+    testsuites.set("name", "copilot-eval")
+    testsuites.set("tests", str(total_tests))
+    testsuites.set("failures", str(total_failures))
+    ET.indent(testsuites, space="  ")
+    body = ET.tostring(testsuites, encoding="unicode")
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + body + "\n"
+
+
+# --- GitHub Actions step summary ---
+
+
+def format_gha_summary(reports: list[Report]) -> str:
+    """Markdown for a GitHub Actions step summary (``analyze -o gha-summary``).
+
+    Reuses the compact PR-comment format: a step summary is read in the same
+    few-seconds-skim context as a PR comment, so the same condensed table +
+    CI-summary-line + warnings shape applies.
+    """
+    return format_markdown_compact(reports)
+
+
+def write_gha_summary(content: str, *, env: Mapping[str, str] | None = None) -> bool:
+    """Append `content` to `$GITHUB_STEP_SUMMARY` when set.
+
+    Returns True when the write happened, False when `GITHUB_STEP_SUMMARY`
+    isn't set (e.g. running locally, or on a non-GitHub-Actions CI system) --
+    callers should print `content` to stdout instead in that case.
+    """
+    env = os.environ if env is None else env
+    path = env.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return False
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(content)
+        if not content.endswith("\n"):
+            f.write("\n")
+    return True
+
+
+# --- Self-contained HTML report ---
+
+_HTML_CSS = """
+:root { color-scheme: light dark; }
+body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif;
+  margin: 2rem; max-width: 1100px; }
+h1 { font-size: 1.4rem; }
+h2 { font-size: 1.15rem; margin-top: 2.5rem; border-bottom: 1px solid #8884; padding-bottom: .3rem; }
+table { border-collapse: collapse; width: 100%; margin: .75rem 0 1.5rem; font-size: .9rem; }
+th, td { border: 1px solid #8884; padding: .4rem .6rem; text-align: right; }
+th:first-child, td:first-child { text-align: left; }
+th { background: #8881; }
+td.sig-good { background: #2ecc7133; font-weight: 600; }
+td.sig-bad { background: #e74c3c33; font-weight: 600; }
+.bar { position: relative; height: .55rem; background: #8882; border-radius: 2px; margin-top: .3rem; }
+.bar span { position: absolute; inset: 0; background: #3498db; border-radius: 2px; }
+.warning { background: #f39c1233; border-left: 3px solid #f39c12; padding: .5rem .75rem; margin: .5rem 0; }
+.meta { color: #888; font-size: .85rem; }
+.legend { color: #888; font-size: .8rem; margin-top: .5rem; }
+"""
+
+
+def _html_escape(text: str) -> str:
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _html_bar(value: float, max_value: float) -> str:
+    """CSS-only horizontal bar (a sparkline substitute) sized relative to the
+    largest value across variants for this row -- an at-a-glance sense of
+    relative magnitude with no JS/chart library."""
+    pct = 0.0 if max_value <= 0 else max(0.0, min(100.0, (value / max_value) * 100))
+    return f'<div class="bar"><span style="width:{pct:.1f}%"></span></div>'
+
+
+def _html_sig_class(row: SummaryRow, *, higher_is_better: bool) -> str:
+    if row.significant is not True:
+        return ""
+    improved = _is_improvement(row, higher_is_better=higher_is_better)
+    if improved is None:
+        return ""
+    return ' class="sig-good"' if improved else ' class="sig-bad"'
+
+
+def _html_rows_table(
+    title: str,
+    rows: list[SummaryRow],
+    variants: list[str],
+    *,
+    higher_is_better: bool,
+    pass_k: bool = False,
+) -> str:
+    if not rows:
+        return ""
+    fmt_value = _fmt_pass_k_value if pass_k else _fmt_value
+    fmt_delta = _fmt_pass_k_delta if pass_k else _fmt_delta
+    out = [f"<h3>{_html_escape(title)}</h3>", "<table>", "<tr><th>Metric</th>"]
+    out.extend(f"<th>{_html_escape(v)}</th>" for v in variants)
+    out.append("<th>Delta</th></tr>")
+    for row in rows:
+        max_v = max((row.values.get(v, 0.0) for v in variants), default=0.0)
+        cells = "".join(
+            f"<td>{_html_escape(fmt_value(row, v))}{_html_bar(row.values.get(v, 0.0), max_v)}</td>"
+            for v in variants
+        )
+        sig_class = _html_sig_class(row, higher_is_better=higher_is_better)
+        out.append(
+            f"<tr><td>{_html_escape(row.metric)}</td>{cells}"
+            f"<td{sig_class}>{_html_escape(fmt_delta(row))}</td></tr>"
+        )
+    out.append("</table>")
+    return "\n".join(out)
+
+
+def format_html(reports: list[Report]) -> str:
+    """Self-contained single-file HTML report (``analyze -o html``): all CSS
+    inlined, no external resources, tables color-coded for statistically
+    significant deltas, and CSS-only bars standing in for a score-distribution
+    chart.
+    """
+    body: list[str] = []
+    for report in reports:
+        body.append(f"<h2>{_html_escape(report.task)}</h2>")
+        n_desc = ", ".join(f"{v}={report.variant_n.get(v, 0)}" for v in report.variants)
+        meta = f"Samples: {n_desc}"
+        if report.aggregate == "paired" and len(report.variants) == 2:
+            meta += f"; paired epochs={report.paired_n}"
+        body.append(f'<p class="meta">{_html_escape(meta)}</p>')
+        if mc_line := _mc_correction_line(report):
+            body.append(f'<p class="meta">{_html_escape(mc_line)}</p>')
+        for w in report.warnings:
+            first_line = w["message"].split("\n", 1)[0]
+            body.append(f'<div class="warning">⚠️ {_html_escape(first_line)}</div>')
+
+        if report.reliability:
+            body.append("<h3>Reliability</h3><table><tr><th>Metric</th>")
+            body.extend(f"<th>{_html_escape(v)}</th>" for v in report.variants)
+            body.append("</tr>")
+            for rrow in report.reliability:
+                cells = "".join(
+                    f"<td>{_html_escape(rrow.values.get(v, '—'))}</td>" for v in report.variants
+                )
+                body.append(f"<tr><td>{_html_escape(rrow.metric)}</td>{cells}</tr>")
+            body.append("</table>")
+
+        body.append(
+            _html_rows_table(
+                f"Metrics ({report.aggregate})",
+                report.summary,
+                report.variants,
+                higher_is_better=False,
+            )
+        )
+        if report.judge_scores:
+            body.append(
+                _html_rows_table(
+                    f"Judge Scores ({report.aggregate})",
+                    report.judge_scores,
+                    report.variants,
+                    higher_is_better=True,
+                )
+            )
+        if report.pass_k:
+            body.append(
+                _html_rows_table(
+                    "Pass@k / Pass^k Reliability",
+                    report.pass_k,
+                    report.variants,
+                    higher_is_better=True,
+                    pass_k=True,
+                )
+            )
+
+    legend = ""
+    if _significance_legend(reports):
+        star_meaning, ns_meaning, trailing_note = _legend_marker_meaning(reports)
+        legend = (
+            '<p class="legend">Green = statistically significant improvement, '
+            "red = statistically significant regression "
+            f"({star_meaning} / {ns_meaning}). {trailing_note}</p>"
+        )
+
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en"><head><meta charset="utf-8">'
+        "<title>copilot-eval report</title>"
+        f"<style>{_HTML_CSS}</style></head><body>"
+        "<h1>copilot-eval A/B report</h1>"
+        f"{''.join(body)}"
+        f"{legend}"
+        "</body></html>\n"
+    )
 
 
 # --- Judge score loading ---

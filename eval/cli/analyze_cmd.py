@@ -12,9 +12,15 @@ from eval.services.analyze_service import run_analysis
 @click.option(
     "--output",
     "-o",
-    type=click.Choice(["table", "json", "markdown"]),
+    type=click.Choice(["table", "json", "markdown", "junit", "gha-summary", "html"]),
     default="table",
-    help="Output format",
+    help=(
+        "Output format. 'junit' emits JUnit XML (one testsuite per task, one "
+        "testcase per metric/judge/pass@k comparison; regressions render as "
+        "<failure>). 'gha-summary' appends compact markdown to "
+        "$GITHUB_STEP_SUMMARY (falls back to stdout). 'html' emits a "
+        "self-contained single-file report."
+    ),
 )
 @click.option(
     "--aggregate",
