@@ -8,6 +8,14 @@
       "additionalProperties": false,
       "description": "Global run behavior: epochs, timeouts, models, judge settings, parallelism, and trace collection.",
       "properties": {
+        "backend": {
+          "default": "docker",
+          "description": "Agent execution backend. Third-party backends (issue #66) may register additional values not listed here via the `copilot_eval.runners` entry-point group.",
+          "enum": [
+            "docker"
+          ],
+          "type": "string"
+        },
         "capture_content": {
           "default": true,
           "description": "Capture prompt/response content in OTel spans (required by judge evaluators).",
@@ -273,6 +281,28 @@
                       "if": {
                         "properties": {
                           "type": {
+                            "const": "python"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ]
+                      },
+                      "then": {
+                        "properties": {
+                          "script": {
+                            "pattern": ".+:.+"
+                          }
+                        },
+                        "required": [
+                          "script"
+                        ]
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "type": {
                             "enum": [
                               "contains",
                               "regex"
@@ -361,7 +391,7 @@
                       "type": "object"
                     },
                     "script": {
-                      "description": "type=script: path to an executable that scores the run.",
+                      "description": "type=script: path to an executable that scores the run. type=python: 'module:func' reference to a callable, called in-process with EvalContext and returning EvalScore | None.",
                       "type": "string"
                     },
                     "type": {
@@ -372,7 +402,8 @@
                         "script",
                         "contains",
                         "regex",
-                        "metric"
+                        "metric",
+                        "python"
                       ],
                       "type": "string"
                     },
@@ -604,6 +635,28 @@
                       "if": {
                         "properties": {
                           "type": {
+                            "const": "python"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ]
+                      },
+                      "then": {
+                        "properties": {
+                          "script": {
+                            "pattern": ".+:.+"
+                          }
+                        },
+                        "required": [
+                          "script"
+                        ]
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "type": {
                             "enum": [
                               "contains",
                               "regex"
@@ -692,7 +745,7 @@
                       "type": "object"
                     },
                     "script": {
-                      "description": "type=script: path to an executable that scores the run.",
+                      "description": "type=script: path to an executable that scores the run. type=python: 'module:func' reference to a callable, called in-process with EvalContext and returning EvalScore | None.",
                       "type": "string"
                     },
                     "type": {
@@ -703,7 +756,8 @@
                         "script",
                         "contains",
                         "regex",
-                        "metric"
+                        "metric",
+                        "python"
                       ],
                       "type": "string"
                     },

@@ -142,6 +142,7 @@ runner:
   trace_fetch_limit: 2000        # analyze: max traces to request from Jaeger
   trace_fetch_retries: 5         # analyze: attempts to wait for trace ingestion
   trace_fetch_retry_delay: 2.0   # analyze: seconds between ingestion retries
+  backend: docker                # Agent execution backend (docker is the only built-in; see Extensibility)
 
 variants:
   - name: baseline
@@ -168,7 +169,7 @@ tasks:
       on_failure: fail                   # before_run failure policy: fail | warn (default: fail)
     evaluators:
       - name: quality
-        type: judge                      # judge | script | contains | regex | metric
+        type: judge                      # judge | script | contains | regex | metric | python
         prompt: "Rate on 1-10..."
 ```
 
@@ -203,6 +204,40 @@ When non-empty, the instruction is appended after a `\n\n` separator.
 See [Architecture: Trace Collection](architecture.md#trace-collection) for the full
 dual-abstraction design (`AgentRunner` + `TraceCollector`).
 
+## Extensibility
+
+Evaluators, runners (`runner.backend`), and trace collectors (`runner.collector`) are
+all registry-driven (`EVALUATOR_REGISTRY` / `RUNNER_REGISTRY` / `COLLECTOR_REGISTRY`),
+so a third-party package can register a new `type:`/`backend:`/`collector:` value
+without forking the framework, via Python
+[entry points](https://packaging.python.org/en/latest/specifications/entry-points/):
+
+```toml
+# my-plugin-package's pyproject.toml
+[project.entry-points."copilot_eval.evaluators"]
+my_type = "my_package.evaluators:MyEvaluator"
+
+[project.entry-points."copilot_eval.runners"]
+my_backend = "my_package.runners:MyRunner"
+
+[project.entry-points."copilot_eval.collectors"]
+my_collector = "my_package.collectors:MyCollector"
+```
+
+Each class implements the corresponding `Protocol` in `eval/protocols.py`
+(`Evaluator` / `AgentRunner` / `TraceCollector`). Once the plugin package is
+installed alongside `copilot-eval`, `copilot-eval` discovers it at CLI startup
+and the new `type:`/`backend:`/`collector:` value validates and dispatches
+like a built-in one — no changes to `eval.config` or `eval.runner` needed. For
+a lighter-weight alternative that doesn't require packaging a plugin, see the
+[Python Evaluator](#python-evaluator) above, which calls a plain `module:func`
+in-process.
+
+`docker` (via `DockerCLIRunner`) is the only built-in runner backend today —
+it's registered like any other, not hardcoded, so the framework stays
+"environment-isolated" rather than "Docker-isolated" (see
+[docs/vision.md](vision.md)).
+
 ## Variants
 
 Each variant gets its own Docker image built from a Dockerfile. The image inherits from `copilot-eval:base` (built from `docker/Dockerfile`).
@@ -232,7 +267,7 @@ variants:
 
 ## Evaluators
 
-Five evaluator types are supported:
+Six evaluator types are supported:
 
 | Type | Config | What it does |
 |------|--------|-------------|
@@ -241,8 +276,25 @@ Five evaluator types are supported:
 | `contains` | `value` | Checks if string exists in output |
 | `regex` | `value` | Checks if regex matches output |
 | `metric` | `metric`, `op`, `value` | Thresholds a numeric run metric (pass/fail) |
+| `python` | `script` (`module:func`) | Calls an in-process Python function with the run's `EvalContext` |
 
-Each evaluator requires a unique `name` within its task and a valid `type`. The type-specific field(s) above are mandatory (e.g. `judge` requires a `prompt` or a `rubric`). Invalid types, missing required fields, duplicate names, invalid regex `value`s, and invalid `metric`/`op`/`value` are rejected at config load time with a clear `ConfigError`.
+Each evaluator requires a unique `name` within its task and a valid `type`. The type-specific field(s) above are mandatory (e.g. `judge` requires a `prompt` or a `rubric`). Invalid types, missing required fields, duplicate names, invalid regex `value`s, and invalid `metric`/`op`/`value` are rejected at config load time with a clear `ConfigError`. Third-party plugins (see [Extensibility](#extensibility) below) may register additional `type` strings beyond these six.
+
+### Python Evaluator
+
+The `python` evaluator calls a function in-process instead of shelling out to a script, which is useful when you want direct access to the run's structured data (task/variant, or `RunMetrics`/conversation when scored during `analyze`) instead of just an exit code:
+
+```yaml
+evaluators:
+  - name: custom-check
+    type: python
+    script: my_package.evaluators:check_output   # module:func
+```
+
+- `script` must be a `module:func` reference resolvable via `importlib.import_module` — the module must be importable from wherever `copilot-eval` runs (e.g. installed in the same environment, or on `PYTHONPATH`).
+- The function is called as `func(context: EvalContext) -> EvalScore | None`, where `EvalContext` (`eval/protocols.py`) carries `task`/`variant`/`log_file`/`work_dir` (available inline during `run`) plus `conversation`/`output_files_text`/`metrics` (available during `analyze`, like judge/metric evaluators).
+- Returning `None` means "not applicable to this context" (mirrors `script`/`contains`/`regex`); returning anything other than `EvalScore | None` raises a clear error instead of silently mis-scoring.
+- Runs inline during `run` (like `script`/`contains`/`regex`), not deferred to `analyze`.
 
 ### Metric Evaluator
 

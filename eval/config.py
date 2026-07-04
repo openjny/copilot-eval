@@ -20,7 +20,7 @@ class ConfigError(ValueError):
 # bump the version everywhere.
 DEFAULT_COPILOT_VERSION = "1.0.18"
 
-EVALUATOR_TYPES = ("judge", "script", "contains", "regex", "metric")
+EVALUATOR_TYPES = ("judge", "script", "contains", "regex", "metric", "python")
 METRIC_OPS = ("<", "<=", ">", ">=", "==", "!=")
 PARALLEL_MODES = ("off", "per_task", "full")
 VARIANT_ORDER_MODES = ("fixed", "counterbalance", "random")
@@ -71,6 +71,10 @@ class RunnerConfig:
     otel_endpoint: str = "http://host.docker.internal:4318"
     jaeger_url: str = "http://localhost:16686"
     collector: str = "file"  # file | jaeger
+    # Agent execution backend. "docker" (DockerCLIRunner) is built in; other
+    # backends can be registered via the `copilot_eval.runners` entry-point
+    # group (see eval.runners.load_runner_plugins, issue #66).
+    backend: str = "docker"
     # analyze: how many traces to request from a remote collector, and how long to wait
     # for ingestion to catch up with the expected set of runs.
     trace_fetch_limit: int = 2000
@@ -270,12 +274,21 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
             f"Must be one of: {', '.join(JUDGE_AGGREGATE_MODES)}."
         )
     collector = runner_raw.get("collector", "file")
-    from eval.collectors import COLLECTOR_TYPES as COLLECTOR_REGISTRY
+    from eval.collectors import COLLECTOR_REGISTRY
 
     collector_types = tuple(sorted(COLLECTOR_REGISTRY))
     if collector not in collector_types:
         raise ConfigError(
             f"runner.collector has invalid value '{collector}'. Must be one of: {', '.join(collector_types)}."
+        )
+
+    backend = runner_raw.get("backend", "docker")
+    from eval.runners import RUNNER_REGISTRY
+
+    runner_backends = tuple(sorted(RUNNER_REGISTRY))
+    if backend not in runner_backends:
+        raise ConfigError(
+            f"runner.backend has invalid value '{backend}'. Must be one of: {', '.join(runner_backends)}."
         )
 
     output_instruction = runner_raw.get("output_instruction")
@@ -334,6 +347,7 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         otel_endpoint=runner_raw.get("otel_endpoint", "http://host.docker.internal:4318"),
         jaeger_url=runner_raw.get("jaeger_url", "http://localhost:16686"),
         collector=collector,
+        backend=backend,
         trace_fetch_limit=trace_fetch_limit,
         trace_fetch_retries=trace_fetch_retries,
         trace_fetch_retry_delay=trace_fetch_retry_delay,
@@ -453,6 +467,17 @@ def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Eva
                 )
         if etype == "script" and not script:
             raise ConfigError(f"Evaluator '{name}'{where} (type=script) requires a 'script'.")
+        if etype == "python":
+            if not script:
+                raise ConfigError(
+                    f"Evaluator '{name}'{where} (type=python) requires a 'script' in "
+                    f"'module:func' format."
+                )
+            if ":" not in str(script):
+                raise ConfigError(
+                    f"Evaluator '{name}'{where} (type=python) 'script' must be in "
+                    f"'module:func' format, got '{script}'."
+                )
         if etype in ("contains", "regex") and not value:
             raise ConfigError(f"Evaluator '{name}'{where} (type={etype}) requires a 'value'.")
         if etype == "regex" and value is not None:

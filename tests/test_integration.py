@@ -279,8 +279,8 @@ class TestFactoryWiring:
     """Integration tests for create_runner and create_collector factories."""
 
     def test_create_runner_returns_docker_runner(self):
-        """create_runner('cli') returns a fully functional DockerCLIRunner."""
-        runner = create_runner("cli", github_token="integration-token")
+        """create_runner('docker') returns a fully functional DockerCLIRunner."""
+        runner = create_runner("docker", github_token="integration-token")
         assert isinstance(runner, DockerCLIRunner)
         assert runner.github_token == "integration-token"
         assert "file" in runner.supported_collectors
@@ -304,7 +304,7 @@ class TestFactoryWiring:
 
     def test_runner_collector_compatibility(self):
         """Runner's supported_collectors includes all registered collector types."""
-        runner = create_runner("cli", github_token="tok")
+        runner = create_runner("docker", github_token="tok")
         for collector_type in runner.supported_collectors:
             # Should not raise
             if collector_type == "jaeger":

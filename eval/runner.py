@@ -51,7 +51,6 @@ from eval.protocols import (
 from eval.protocols import (
     status_from_exit_code as _status_from_exit_code,
 )
-from eval.runners.docker_cli_runner import DockerCLIRunner
 from eval.trace import RunMetrics, metric_value
 
 logger = getLogger(__name__)
@@ -120,6 +119,28 @@ def get_github_token() -> str:
         raise AuthError("GITHUB_TOKEN not set and gh CLI not authenticated") from exc
 
 
+def _build_default_runner(config: Config, github_token: str) -> AgentRunner:
+    """Instantiate the configured runner backend (`runner.backend`, default
+    `docker`) via the plugin registry instead of hardcoding DockerCLIRunner.
+
+    `eval.config._build_runner` already validates `runner.backend` against
+    `RUNNER_REGISTRY` at config-load time, so this only needs to guard against
+    the (unlikely) case of a backend being removed from the registry between
+    config load and run — e.g. a plugin unloaded mid-process. Local import:
+    `eval.runners.docker_cli_runner` imports from `eval.config`, so importing
+    `eval.runners` at module scope here would create a cycle.
+    """
+    from eval.runners import RUNNER_REGISTRY
+
+    runner_cls = RUNNER_REGISTRY.get(config.runner.backend)
+    if runner_cls is None:
+        supported = ", ".join(sorted(RUNNER_REGISTRY))
+        raise ConfigError(
+            f"Unknown runner.backend '{config.runner.backend}'. Available: {supported}."
+        )
+    return runner_cls(github_token)  # type: ignore[call-arg]  # AgentRunner Protocol has no __init__ signature
+
+
 def run_one(
     task: Task,
     variant: Variant,
@@ -164,8 +185,10 @@ def run_one(
 
     # `runner` is injectable (see AgentRunner protocol) so callers -- notably
     # unit tests -- can exercise run_one's setup/hook/evaluator orchestration
-    # without a live Docker daemon; production callers rely on the default.
-    runner = runner or DockerCLIRunner(github_token, run_command=subprocess.run)
+    # without a live Docker daemon; production callers rely on the default,
+    # which is selected via `runner.backend` (see eval.runners, issue #66)
+    # instead of being hardcoded to DockerCLIRunner.
+    runner = runner or _build_default_runner(config, github_token)
 
     # Fail fast on invalid runner/collector combinations before doing any setup
     # work, so a misconfiguration surfaces as a clear ConfigError instead of a
