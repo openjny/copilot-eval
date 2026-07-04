@@ -167,16 +167,18 @@ Four evaluator types are supported:
 
 | Type | Config | What it does |
 |------|--------|-------------|
-| `judge` | `prompt` | LLM scores the output on 1-10 scale |
+| `judge` | `prompt` **or** `criterion`+`rubric` | LLM scores the output on 1-10 scale |
 | `script` | `script` | Bash script; exit 0 = pass |
 | `contains` | `value` | Checks if string exists in output |
 | `regex` | `value` | Checks if regex matches output |
 
-Each evaluator requires a unique `name` within its task and a valid `type`. The type-specific field above is mandatory (e.g. `judge` requires `prompt`). Invalid types, missing required fields, duplicate names, and invalid regex `value`s are rejected at config load time with a clear `ConfigError`.
+Each evaluator requires a unique `name` within its task and a valid `type`. The type-specific field above is mandatory (e.g. `judge` requires a `prompt` or a `rubric`). Invalid types, missing required fields, duplicate names, and invalid regex `value`s are rejected at config load time with a clear `ConfigError`.
 
 ### Judge Evaluator
 
 The judge sees both the **conversation output** (Copilot's terminal log) and any **files written to `/workspace/output/`**. This ensures correct scoring even when Copilot writes results to files without echoing them.
+
+A judge is defined either with a free-form `prompt`, or with the structured `criterion`+`rubric` form below. Either way the framework appends the strict-JSON output contract (`Output ONLY valid JSON: {"score": N, "reason": "..."}`) automatically — you never write it by hand.
 
 Judge scoring is done by `runner.judge_model` (defaults to `gpt-4.1`). OTel is disabled during judge calls to avoid contaminating traces.
 
@@ -185,6 +187,41 @@ The judge runs with the **host** Copilot CLI, which is not version-pinned like t
 The judge context is bounded by `runner.judge_max_conversation_chars` (conversation/log text) and `runner.judge_max_output_chars` (output-file text). When either budget is exceeded the context is truncated, `meta.truncation` is recorded, and the report flags how many judge runs saw truncated context — raise these limits if the judge is missing decisive evidence. Each judge score's `meta.outcome` (`ok`/`parse_error`/`error`/`timeout`/`not_found`) plus the captured `returncode`/`stderr` are aggregated into the report's "Judge runtime" section so host failures are no longer silently collapsed.
 
 Judges run during `analyze` and are scored idempotently: a judge is (re)run only when no judge score yet exists for that run (non-judge `script`/`contains`/`regex` scores share the same `.scores.json` file, so file presence alone does not skip judging). Use `analyze --re-eval` to force all judges to re-run. Judge timeouts or unparseable output produce `score: null` and are surfaced as warnings rather than dropped.
+
+### Structured Rubric
+
+Instead of hand-writing the scale anchors and the strict-JSON line in every judge `prompt`, use the structured `criterion`+`rubric` form. The framework composes the prompt (criterion + anchors) and appends the JSON contract:
+
+```yaml
+evaluators:
+  - name: thoroughness
+    type: judge
+    criterion: "How thoroughly does the response explain the architecture?"
+    rubric:
+      "10": "Complete: components, data flow, and key design decisions"
+      "7":  "Good: most components and flow, minor gaps"
+      "4":  "Partial: some components, missing the flow"
+      "1":  "Minimal: vague or mostly missing"
+```
+
+This composes to a prompt like:
+
+```
+How thoroughly does the response explain the architecture?
+
+Score from 1 to 10 using these anchors:
+- 10: Complete: components, data flow, and key design decisions
+- 7: Good: most components and flow, minor gaps
+- 4: Partial: some components, missing the flow
+- 1: Minimal: vague or mostly missing
+```
+
+Rules:
+
+- A judge still produces **one scalar score** — the rubric structures anchors for a single axis, it does **not** introduce multi-dimensional aggregation (this preserves the report contract).
+- `criterion` is required when `rubric` is set; `rubric` must be a non-empty mapping of integer scores to non-empty descriptions (keys may be quoted like `"10"` or bare integers). Anchors are listed high-to-low regardless of order.
+- `prompt` and `rubric` are **mutually exclusive** on the same judge.
+- Plain-string `prompt:` judges keep working unchanged — the rubric is optional sugar.
 
 ### Judge Self-Consistency & Reliability
 
@@ -229,19 +266,22 @@ eval set: it pins Copilot output to fixed answers with known expected score band
 
 ### Ground Truth in Judge Prompts
 
-For reliable scoring, include the expected answer in the judge prompt:
+For reliable scoring, include the expected answer in the judge's `criterion` (or `prompt`):
 
 ```yaml
 evaluators:
   - name: thoroughness
     type: judge
-    prompt: |
+    criterion: |
       The code has these known issues:
       1. eval() with user input (line 36)
       2. Plaintext password storage (line 15)
       3. No auth on DELETE endpoint (line 27)
-      Rate how many issues the review found on 1-10.
-      Output ONLY valid JSON: {"score": N, "reason": "..."}
+      Rate how many issues the review found.
+    rubric:
+      "10": "All 3 issues found with correct descriptions"
+      "5":  "1-2 issues found"
+      "1":  "No issues found"
 ```
 
 For extra reliability, pair noisy judges with **deterministic ground-truth

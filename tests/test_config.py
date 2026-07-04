@@ -212,6 +212,82 @@ def test_evaluator_invalid_regex(tmp_path):
         )
 
 
+# --- Structured judge rubric ---
+
+
+def _rubric_task(**ev):
+    return {
+        "tasks": [
+            {"name": "t1", "prompt": "p", "evaluators": [{"name": "j", "type": "judge", **ev}]}
+        ]
+    }
+
+
+def test_rubric_composes_prompt(tmp_path):
+    cfg = load_inline(
+        tmp_path,
+        _rubric_task(
+            criterion="How thorough is it?",
+            rubric={"10": "Complete", "4": "Partial", "1": "Minimal"},
+        ),
+    )
+    ev = cfg.get_task("t1").evaluators[0]
+    assert ev.criterion == "How thorough is it?"
+    assert ev.rubric == {10: "Complete", 4: "Partial", 1: "Minimal"}
+    assert ev.prompt == (
+        "How thorough is it?\n\n"
+        "Score from 1 to 10 using these anchors:\n"
+        "- 10: Complete\n- 4: Partial\n- 1: Minimal"
+    )
+
+
+def test_rubric_accepts_integer_keys_and_sorts_descending(tmp_path):
+    cfg = load_inline(
+        tmp_path,
+        _rubric_task(
+            criterion="Rate it.",
+            rubric={1: "low", 7: "mid", 10: "high"},
+        ),
+    )
+    ev = cfg.get_task("t1").evaluators[0]
+    assert ev.prompt.splitlines()[3:] == ["- 10: high", "- 7: mid", "- 1: low"]
+
+
+def test_rubric_and_prompt_mutually_exclusive(tmp_path):
+    with pytest.raises(ConfigError, match="cannot set both 'prompt' and 'rubric'"):
+        load_inline(tmp_path, _rubric_task(prompt="rate", criterion="c", rubric={"10": "good"}))
+
+
+def test_rubric_requires_criterion(tmp_path):
+    with pytest.raises(ConfigError, match="requires a non-empty 'criterion'"):
+        load_inline(tmp_path, _rubric_task(rubric={"10": "good"}))
+
+
+def test_criterion_without_rubric_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="sets 'criterion' without a 'rubric'"):
+        load_inline(tmp_path, _rubric_task(criterion="c"))
+
+
+def test_rubric_must_be_non_empty_mapping(tmp_path):
+    with pytest.raises(ConfigError, match="non-empty mapping"):
+        load_inline(tmp_path, _rubric_task(criterion="c", rubric={}))
+
+
+def test_rubric_non_integer_key_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="non-integer score key"):
+        load_inline(tmp_path, _rubric_task(criterion="c", rubric={"high": "good"}))
+
+
+def test_rubric_empty_anchor_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="must be a non-empty string"):
+        load_inline(tmp_path, _rubric_task(criterion="c", rubric={"10": "  "}))
+
+
+def test_judge_without_prompt_or_rubric_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="requires a 'prompt' or a 'rubric'"):
+        load_inline(tmp_path, _rubric_task())
+
+
 # --- Runner validation ---
 
 

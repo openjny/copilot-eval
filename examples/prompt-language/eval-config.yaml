@@ -32,7 +32,7 @@ tasks:
     evaluators:
       - name: thoroughness
         type: judge
-        prompt: |
+        criterion: |
           The code has these known issues:
           1. CRITICAL: eval() with user input in /search endpoint (line 36) — arbitrary code execution
           2. HIGH: Plaintext password storage (line 15) — no hashing
@@ -41,20 +41,19 @@ tasks:
           5. MEDIUM: No rate limiting (noted in TODO, line 5)
           6. MEDIUM: No input validation on POST /users (line 12)
           7. LOW: In-memory storage (users object) — no persistence
-          Rate how many of these 7 issues the review identified on a scale of 1-10.
-          10 = All 7 issues found with correct descriptions.
-          7 = 5-6 issues found.
-          4 = 3-4 issues found.
-          1 = 0-2 issues found.
-          Output ONLY valid JSON: {"score": N, "reason": "..."}
+          Rate how many of these 7 issues the review identified.
+        rubric:
+          "10": "All 7 issues found with correct descriptions"
+          "7": "5-6 issues found"
+          "4": "3-4 issues found"
+          "1": "0-2 issues found"
       - name: actionability
         type: judge
-        prompt: |
-          Rate how actionable the review feedback is on a scale of 1-10.
-          10 = Each finding has a specific fix suggestion with code examples.
-          5 = Findings identified but fixes are vague.
-          1 = No actionable recommendations.
-          Output ONLY valid JSON: {"score": N, "reason": "..."}
+        criterion: "Rate how actionable the review feedback is."
+        rubric:
+          "10": "Each finding has a specific fix suggestion with code examples"
+          "5": "Findings identified but fixes are vague"
+          "1": "No actionable recommendations"
       # Deterministic ground-truth anchors (language-neutral code tokens). These
       # score 0/1 with no LLM, so they don't drift between runs and provide a
       # reliable floor next to the noisier judges above.
@@ -71,27 +70,26 @@ tasks:
     evaluators:
       - name: completeness
         type: judge
-        prompt: |
+        criterion: |
           The code is a Node.js Express REST API with these components:
           1. Express app setup with JSON body parser (line 1-6)
           2. In-memory user store with auto-incrementing ID (line 8-9)
           3. CRUD endpoints: POST /users, GET /users/:id, DELETE /users/:id
           4. Search endpoint: GET /search with query parameter
           5. Server listener on configurable PORT (line 43)
-          Rate how completely these components and their data flow are explained on a scale of 1-10.
-          10 = All 5 components described with how they interact.
-          7 = 3-4 components described.
-          4 = Only 1-2 components mentioned.
-          1 = No meaningful architecture explanation.
-          Output ONLY valid JSON: {"score": N, "reason": "..."}
+          Rate how completely these components and their data flow are explained.
+        rubric:
+          "10": "All 5 components described with how they interact"
+          "7": "3-4 components described"
+          "4": "Only 1-2 components mentioned"
+          "1": "No meaningful architecture explanation"
       - name: clarity
         type: judge
-        prompt: |
-          Rate how clearly the explanation is written on a scale of 1-10.
-          10 = Well-structured, easy to follow, with appropriate level of detail.
-          5 = Understandable but poorly organized or too verbose.
-          1 = Confusing or incoherent.
-          Output ONLY valid JSON: {"score": N, "reason": "..."}
+        criterion: "Rate how clearly the explanation is written."
+        rubric:
+          "10": "Well-structured, easy to follow, with appropriate level of detail"
+          "5": "Understandable but poorly organized or too verbose"
+          "1": "Confusing or incoherent"
       # Deterministic ground-truth anchor: the GET /search endpoint is the
       # component most often missed, so checking it is referenced gives a
       # reproducible completeness signal independent of the judge.
