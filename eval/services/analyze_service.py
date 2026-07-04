@@ -51,6 +51,7 @@ def run_analysis(
     skip_eval: bool,
     re_eval: bool,
     min_epochs: int | None = None,
+    mc_correction: str = "holm",
 ) -> None:
     """Analyze traces from a previous eval run and print the A/B report."""
     config = load_config(Path(config_dir) if config_dir else None)
@@ -115,6 +116,7 @@ def run_analysis(
         aggregate,
         manifest_runs=manifest_runs,
         trace_test_ids=trace_test_ids,
+        mc_correction=mc_correction,
     )
     if not reports:
         click.echo("No reports generated.", err=True)

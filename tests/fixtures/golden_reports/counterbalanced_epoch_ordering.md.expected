@@ -1,6 +1,7 @@
 ## counterbalance_task
 
 **Samples:** base=5, new=5; paired epochs=5
+**Multiple-comparison correction: Holm-Bonferroni across 9 test(s).**
 
 ### Reliability
 
@@ -45,4 +46,4 @@
 
 ---
 
-_Legend: value ±stddev; Delta is a percentage, `[CI low,high abs]` is a bootstrap interval of the paired delta in **absolute metric units**; `*` = CI excludes 0 (statistically supported), `ns` = observed only (not supported), `low-n` = fewer than 5 paired samples (significance not assessed). No multiple-comparison correction applied._
+_Legend: value ±stddev; Delta is a percentage, `[CI low,high abs]` is a bootstrap interval of the paired delta in **absolute metric units**; `*` = CI excludes 0 and remains significant after Holm-Bonferroni multiple-comparison correction (see the per-task line above for the test count), `ns` = not significant after correction, or CI included 0, `low-n` = fewer than 5 paired samples (significance not assessed)._

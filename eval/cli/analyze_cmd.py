@@ -38,6 +38,16 @@ from eval.services.analyze_service import run_analysis
         "Use e.g. --min-epochs 10 to require enough data for reliable conclusions."
     ),
 )
+@click.option(
+    "--no-mc-correction",
+    is_flag=True,
+    help=(
+        "Disable the Holm-Bonferroni multiple-comparison correction applied to "
+        "significance markers (`*`) across each task's family of metrics/judge "
+        "criteria. Off by default only when you explicitly want the old, "
+        "uncorrected per-metric significance check."
+    ),
+)
 def analyze(
     run_id: str,
     output: str,
@@ -47,6 +57,7 @@ def analyze(
     skip_eval: bool,
     re_eval: bool,
     min_epochs: int | None,
+    no_mc_correction: bool,
 ) -> None:
     """Analyze traces from a previous eval run."""
     run_analysis(
@@ -58,4 +69,5 @@ def analyze(
         skip_eval=skip_eval,
         re_eval=re_eval,
         min_epochs=min_epochs,
+        mc_correction="none" if no_mc_correction else "holm",
     )

@@ -13,6 +13,8 @@
       },
       "paired_n": 5,
       "warnings": [],
+      "mc_correction": "holm",
+      "mc_tests": 10,
       "reliability": [
         {
           "metric": "Runs (traces)",
@@ -288,6 +290,7 @@
           "paired_n": 5,
           "ci_low": 0.0,
           "ci_high": 0.0,
+          "p_value": 1.0,
           "significant": false
         },
         {
@@ -316,6 +319,7 @@
           "paired_n": 5,
           "ci_low": 0.0,
           "ci_high": 0.0,
+          "p_value": 1.0,
           "significant": false
         },
         {
@@ -344,6 +348,7 @@
           "paired_n": 5,
           "ci_low": 0.0,
           "ci_high": 0.0,
+          "p_value": 1.0,
           "significant": false
         },
         {
@@ -372,6 +377,7 @@
           "paired_n": 5,
           "ci_low": 0.0,
           "ci_high": 0.0,
+          "p_value": 1.0,
           "significant": false
         },
         {
@@ -400,6 +406,7 @@
           "paired_n": 5,
           "ci_low": 0.0,
           "ci_high": 0.0,
+          "p_value": 1.0,
           "significant": false
         },
         {
@@ -428,6 +435,7 @@
           "paired_n": 5,
           "ci_low": 0.0,
           "ci_high": 0.0,
+          "p_value": 1.0,
           "significant": false
         },
         {
@@ -456,6 +464,7 @@
           "paired_n": 5,
           "ci_low": 0.0,
           "ci_high": 0.0,
+          "p_value": 1.0,
           "significant": false
         },
         {
@@ -484,6 +493,7 @@
           "paired_n": 5,
           "ci_low": 0.0,
           "ci_high": 0.0,
+          "p_value": 1.0,
           "significant": false
         },
         {
@@ -512,6 +522,7 @@
           "paired_n": 5,
           "ci_low": 0.0,
           "ci_high": 0.0,
+          "p_value": 1.0,
           "significant": false
         }
       ],
@@ -550,6 +561,7 @@
           "paired_n": 5,
           "ci_low": -2.0,
           "ci_high": 2.0,
+          "p_value": 0.596,
           "significant": false
         }
       ],
@@ -580,6 +592,7 @@
           "paired_n": 1,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         },
         {
@@ -608,6 +621,7 @@
           "paired_n": 1,
           "ci_low": null,
           "ci_high": null,
+          "p_value": null,
           "significant": null
         }
       ],

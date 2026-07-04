@@ -490,6 +490,165 @@ def test_low_n_significance_not_rendered_as_star():
     assert "abs" in rendered  # CI labelled as absolute units
 
 
+# --- Multiple-comparison correction (issue #71) ---
+
+
+def test_holm_bonferroni_rejects_only_a_significant_prefix():
+    from eval.report import _holm_bonferroni
+
+    # Sorted p-values 0.001, 0.01, 0.02, 0.5 against alpha=0.05 and m=4:
+    # thresholds are 0.0125, 0.01667, 0.025, 0.05 -- 0.001 and 0.01 clear their
+    # thresholds, 0.02 clears 0.025, 0.5 fails, so all three smallest reject.
+    p_values = [0.5, 0.001, 0.02, 0.01]
+    decisions = _holm_bonferroni(p_values)
+    assert decisions == [False, True, True, True]
+
+
+def test_holm_bonferroni_step_down_stops_at_first_failure():
+    from eval.report import _holm_bonferroni
+
+    # Even though the third p-value (0.05) alone would clear a Bonferroni-style
+    # 0.05/3 cutoff for *some* rank, Holm's step-down property means once an
+    # earlier-ranked hypothesis fails, nothing after it can be rejected either.
+    p_values = [0.5, 0.5, 0.02]
+    decisions = _holm_bonferroni(p_values)
+    # sorted: 0.02 (thr=0.05/3=0.0167 -> fails) -> stop; nothing rejected.
+    assert decisions == [False, False, False]
+
+
+def test_holm_bonferroni_empty_input():
+    from eval.report import _holm_bonferroni
+
+    assert _holm_bonferroni([]) == []
+
+
+def test_benjamini_hochberg_more_permissive_than_holm():
+    from eval.report import _benjamini_hochberg, _holm_bonferroni
+
+    # A classic case where BH (FDR) rejects more than Holm (FWER) for the same
+    # p-values -- BH is intentionally less conservative.
+    p_values = [0.001, 0.008, 0.039, 0.041, 0.042, 0.06, 0.074, 0.205]
+    holm = sum(_holm_bonferroni(p_values))
+    bh = sum(_benjamini_hochberg(p_values))
+    assert bh >= holm
+
+
+def test_benjamini_hochberg_empty_input():
+    from eval.report import _benjamini_hochberg
+
+    assert _benjamini_hochberg([]) == []
+
+
+def test_apply_mc_correction_only_downgrades_never_upgrades():
+    from eval.report import SummaryRow, _apply_mc_correction
+
+    # Two "significant" rows (small p) and one "not significant" row (p=1).
+    # Correction may turn a True into False, but must never turn False/None
+    # into True -- that would grant significance a raw CI check didn't support.
+    rows = [
+        SummaryRow(metric="a", values={}, paired_n=5, p_value=0.001, significant=True),
+        SummaryRow(metric="b", values={}, paired_n=5, p_value=0.04, significant=True),
+        SummaryRow(metric="c", values={}, paired_n=5, p_value=1.0, significant=False),
+    ]
+    tests = _apply_mc_correction(rows, "holm")
+    assert tests == 3
+    assert rows[0].significant is True  # p=0.001 survives alpha/3
+    assert rows[2].significant is False  # was already False; stays False
+
+
+def test_apply_mc_correction_skips_untestable_rows():
+    from eval.report import MIN_RELIABLE_N, SummaryRow, _apply_mc_correction
+
+    # A row below MIN_RELIABLE_N (significant=None) or with no p-value at all
+    # must not count towards the family size or be touched by correction.
+    rows = [
+        SummaryRow(metric="a", values={}, paired_n=5, p_value=0.001, significant=True),
+        SummaryRow(metric="b", values={}, paired_n=2, p_value=0.001, significant=None),
+        SummaryRow(metric="c", values={}, paired_n=0, p_value=None, significant=None),
+    ]
+    tests = _apply_mc_correction(rows, "holm")
+    assert tests == 1
+    assert rows[0].significant is True
+    assert rows[1].significant is None
+    assert rows[2].significant is None
+    assert rows[1].paired_n < MIN_RELIABLE_N  # sanity: below-threshold row untouched
+
+
+def test_apply_mc_correction_none_method_is_a_no_op():
+    from eval.report import SummaryRow, _apply_mc_correction
+
+    rows = [SummaryRow(metric="a", values={}, paired_n=5, p_value=0.04, significant=True)]
+    tests = _apply_mc_correction(rows, "none")
+    assert tests == 0
+    assert rows[0].significant is True  # untouched
+
+
+def test_apply_mc_correction_rejects_unknown_method():
+    from eval.report import SummaryRow, _apply_mc_correction
+
+    rows = [SummaryRow(metric="a", values={}, paired_n=5, p_value=0.04, significant=True)]
+    try:
+        _apply_mc_correction(rows, "not-a-real-method")
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
+def test_mc_correction_suppresses_isolated_false_positive():
+    """A single borderline-significant metric among many independently tested
+    OTel metrics loses its raw `*` once Holm-Bonferroni is applied across the
+    task's family -- the false-positive-by-chance scenario issue #71 exists to
+    fix (a lone metric "looking" significant purely because ~9-11 tests ran at
+    alpha=0.05 each).
+    """
+    results = []
+    # 7 epochs of a clean +1 delta, one epoch of a -1 delta: raw CI (1.0, 1.0)
+    # excludes 0 with p ~= 0.014 -- individually "significant" at alpha=0.05,
+    # but not once corrected alongside the other 8 (constant, p=1) OTel metrics.
+    for e in range(1, 8):
+        results.append(make_metrics("t1", "a", str(e), duration=10.0))
+        results.append(make_metrics("t1", "b", str(e), duration=11.0))
+    results.append(make_metrics("t1", "a", "8", duration=10.0))
+    results.append(make_metrics("t1", "b", "8", duration=9.0))
+
+    corrected = build_report(results, variant_order=["a", "b"], aggregate="paired")
+    uncorrected = build_report(
+        results, variant_order=["a", "b"], aggregate="paired", mc_correction="none"
+    )
+
+    dur_uncorrected = next(r for r in uncorrected[0].summary if r.metric == "Duration (s)")
+    dur_corrected = next(r for r in corrected[0].summary if r.metric == "Duration (s)")
+
+    assert dur_uncorrected.significant is True  # raw CI-excludes-zero check
+    assert dur_corrected.significant is False  # corrected away
+    assert corrected[0].mc_correction == "holm"
+    assert corrected[0].mc_tests == 9
+    assert uncorrected[0].mc_correction == "none"
+    assert uncorrected[0].mc_tests == 0
+
+
+def test_mc_correction_default_is_holm():
+    results = []
+    for e in range(1, 6):
+        results.append(make_metrics("t1", "a", str(e), duration=float(e)))
+        results.append(make_metrics("t1", "b", str(e), duration=float(e) + 5.0))
+    reports = build_report(results, variant_order=["a", "b"], aggregate="paired")
+    assert reports[0].mc_correction == "holm"
+
+
+def test_mc_correction_benjamini_hochberg_selectable():
+    results = []
+    for e in range(1, 6):
+        results.append(make_metrics("t1", "a", str(e), duration=float(e)))
+        results.append(make_metrics("t1", "b", str(e), duration=float(e) + 5.0))
+    reports = build_report(
+        results, variant_order=["a", "b"], aggregate="paired", mc_correction="benjamini-hochberg"
+    )
+    assert reports[0].mc_correction == "benjamini-hochberg"
+    dur = next(r for r in reports[0].summary if r.metric == "Duration (s)")
+    assert dur.significant is True  # consistent +5 gap survives either correction
+
+
 # --- Small-n warnings ---
 
 
