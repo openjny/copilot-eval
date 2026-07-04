@@ -21,6 +21,7 @@ eval/
 ├── cli.py        Click CLI: list, build, run, analyze
 ├── config.py     YAML config → dataclasses (Config, Task, Variant, Evaluator, Hooks)
 ├── runner.py     Single eval run: hooks → Docker container → evaluators
+├── judge_executor.py  JudgeExecutor: judge prompt construction, CLI call, parsing, self-consistency sampling
 ├── protocols.py  AgentRunner / TraceCollector / Evaluator protocol interfaces (dual abstraction)
 ├── evaluators/   Evaluator protocol implementations + EVALUATOR_REGISTRY (judge/script/contains/regex/metric)
 ├── collectors/   TraceCollector implementations: file_collector.py (default), jaeger_collector.py

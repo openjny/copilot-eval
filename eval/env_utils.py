@@ -54,6 +54,16 @@ def collect_secrets(config: Config, token: str | None = None) -> list[str]:
     return secrets
 
 
+def mask_secrets(text: str | None, secrets: list[str]) -> str | None:
+    """Replace any occurrence of a secret value in ``text`` with a placeholder."""
+    if not text or not secrets:
+        return text
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, _SECRET_PLACEHOLDER)
+    return text
+
+
 def write_sanitized_env_file(config: Config) -> Path:
     """Write a quote-stripped copy of the project's .env for ``docker --env-file``.
 

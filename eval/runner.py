@@ -3,36 +3,36 @@
 from __future__ import annotations
 
 import json
-import math
 import operator
 import os
-import re
 import shutil
 import subprocess
 import tempfile
 import time
 import uuid
-from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from logging import getLogger
 from pathlib import Path
-from statistics import mean, median, pstdev
 from typing import Any
 
 from eval.collectors import create_collector
 from eval.collectors.file_collector import TRACE_FILE
 from eval.config import Config, ConfigError, Evaluator, Task, Variant
 from eval.env_utils import (
-    _SECRET_PLACEHOLDER,
     collect_secrets,
+    mask_secrets,
     strip_quotes,
     write_sanitized_env_file,
 )
 from eval.env_utils import (
     load_env_file as _load_env_file,
 )
+from eval.judge_executor import JudgeContext, JudgeExecutor
+from eval.judge_executor import _aggregate_scores as _aggregate_scores
+from eval.judge_executor import _parse_json as _parse_json
+from eval.judge_executor import host_copilot_version as host_copilot_version
 from eval.naming import run_slug
 from eval.protocols import (
     EvalContext,
@@ -509,197 +509,12 @@ def _run_evaluators(
     return scores
 
 
-def _aggregate_scores(samples: list[int], method: str) -> int:
-    """Aggregate successful judge sample scores into a single integer score.
-
-    Uses half-up rounding (not Python's banker's rounding) so an even-length
-    median/mean of e.g. 6.5 rounds to 7 rather than 6.
-    """
-
-    def _round_half_up(x: float) -> int:
-        return int(math.floor(x + 0.5))
-
-    if method == "mean":
-        return _round_half_up(mean(samples))
-    if method == "majority":
-        # Most common value; ties broken by the lower score for determinism.
-        counts = Counter(samples)
-        top = max(counts.values())
-        return min(v for v, c in counts.items() if c == top)
-    return _round_half_up(median(samples))  # default: median
-
-
-_STDERR_SNIPPET_CHARS = 500
-_host_copilot_version_cache: str | None = None
-
-
-def host_copilot_version() -> str | None:
-    """Return the host `copilot --version` string, cached for the process.
-
-    Returns None if the Copilot CLI is missing or the call fails. Used to record
-    and verify which (unpinned) host Copilot performed the judge scoring.
-    """
-    global _host_copilot_version_cache
-    if _host_copilot_version_cache is not None:
-        return _host_copilot_version_cache or None
-    try:
-        proc = subprocess.run(["copilot", "--version"], capture_output=True, text=True, timeout=15)
-    except (OSError, subprocess.SubprocessError):
-        _host_copilot_version_cache = ""
-        return None
-    out = (proc.stdout or proc.stderr or "").strip()
-    # Reduce noisy multi-line banners to the first non-empty line.
-    version = next((ln.strip() for ln in out.splitlines() if ln.strip()), "")
-    _host_copilot_version_cache = version
-    return version or None
-
-
 def _write_scores_file(log_file: Path, scores: list[EvalScore]) -> None:
     """Persist scores next to the run log as `<log>.scores.json`."""
     if not scores:
         return
     sf = log_file.with_suffix(".scores.json")
     sf.write_text(json.dumps([s.to_dict() for s in scores], indent=2, ensure_ascii=False))
-
-
-def _run_judge_once(
-    prompt: str, config: Config, token: str | None, secrets: list[str]
-) -> tuple[int | None, str, str, dict[str, Any]]:
-    """Invoke the judge Copilot once.
-
-    Returns ``(score, reason, outcome, sample_meta)`` where ``outcome`` is one of
-    ok | ok_nonzero | parse_error | invalid_score | timeout | not_found | error.
-    ``sample_meta`` carries per-call runtime details (returncode, masked stderr).
-    """
-    cmd = ["copilot", "-p", prompt, "-s"]
-    if config.runner.judge_model:
-        cmd.extend(["--model", config.runner.judge_model])
-    # Disable OTel to avoid contaminating eval traces with judge calls
-    judge_env = {**os.environ, "GITHUB_TOKEN": token or "", "COPILOT_OTEL_ENABLED": "false"}
-    sample_meta: dict[str, Any] = {}
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=config.runner.judge_timeout_seconds,
-            env=judge_env,
-        )
-    except subprocess.TimeoutExpired:
-        return None, f"timeout after {config.runner.judge_timeout_seconds}s", "timeout", sample_meta
-    except FileNotFoundError:
-        return None, "copilot CLI not found on host", "not_found", sample_meta
-    except OSError as exc:
-        return None, f"error: {exc}", "error", sample_meta
-    sample_meta["returncode"] = proc.returncode
-    stderr = mask_secrets((proc.stderr or "").strip(), secrets) or ""
-    if stderr:
-        sample_meta["stderr"] = stderr[:_STDERR_SNIPPET_CHARS]
-    data = _parse_json(proc.stdout, require_keys=("score",))
-    if data is not None:
-        try:
-            score = int(data.get("score", 0))
-        except (TypeError, ValueError):
-            return None, f"invalid_score: {data.get('score')!r}", "invalid_score", sample_meta
-        # A parseable verdict from a process that exited non-zero is suspicious:
-        # keep the score but flag the anomaly so it isn't counted as a clean run.
-        outcome = "ok" if proc.returncode == 0 else "ok_nonzero"
-        return score, str(data.get("reason", "")), outcome, sample_meta
-    if proc.returncode != 0:
-        detail = f" — {stderr[:200]}" if stderr else ""
-        return None, f"error: rc={proc.returncode}{detail}", "error", sample_meta
-    return None, "parse_error", "parse_error", sample_meta
-
-
-# Per-call judge result: (score, masked_reason, outcome, sample_meta)
-_SampleResult = tuple["int | None", str, str, dict[str, Any]]
-
-
-def _judge_sections(conversation: str, output_files_text: str | None) -> str:
-    """Build the evidence block (conversation + optional output files) shared by
-    single and batched judge prompts."""
-    sections = [f"--- COPILOT OUTPUT ---\n{conversation}\n--- END OUTPUT ---"]
-    if output_files_text:
-        sections.append(f"--- OUTPUT FILES ---\n{output_files_text}\n--- END FILES ---")
-    return chr(10).join(sections)
-
-
-def _judge_base_meta(
-    config: Config, extra_meta: dict[str, Any] | None, version: str | None
-) -> dict[str, Any]:
-    """Seed judge meta with caller extras, host version, and any version
-    mismatch against the configured expectation."""
-    base_meta: dict[str, Any] = {**(extra_meta or {})}
-    if version:
-        base_meta["judge_version"] = version
-    expected = config.runner.judge_copilot_version
-    # Record a mismatch when the host version differs from the configured
-    # expectation -- including when the host version is unavailable, which is
-    # exactly when reproducibility is least observable.
-    if expected and version != expected:
-        base_meta["judge_version_mismatch"] = {"expected": expected, "actual": version}
-    return base_meta
-
-
-def _finalize_judge_score(
-    ev: Evaluator,
-    per_sample: list[_SampleResult],
-    samples: list[int],
-    outcomes: dict[str, int],
-    n: int,
-    base_meta: dict[str, Any],
-    version: str | None,
-    config: Config,
-) -> EvalScore:
-    """Aggregate a judge's per-sample results into one EvalScore.
-
-    Shared by the single-judge (:func:`run_judge`) and batched
-    (:func:`run_judges_batch`) paths so both produce identical score shapes.
-    """
-    if not samples:
-        # No usable score across all samples; surface the dominant failure mode
-        # along with its representative reason and runtime meta.
-        dominant = max(outcomes, key=lambda o: outcomes[o])
-        idx = next(i for i, t in enumerate(per_sample) if t[2] == dominant)
-        meta = {**base_meta, **per_sample[idx][3], "outcome": dominant}
-        reason = per_sample[idx][1] if n == 1 else dominant
-        return EvalScore(
-            name=ev.name,
-            type="judge",
-            score=None,
-            reason=reason,
-            passed=False,
-            samples=samples,
-            score_stddev=None,
-            n_samples=n,
-            outcomes=outcomes,
-            judge_model=config.runner.judge_model,
-            judge_version=version,
-            meta=meta,
-        )
-
-    agg = _aggregate_scores(samples, config.runner.judge_aggregate)
-    stddev = float(pstdev(samples)) if len(samples) > 1 else 0.0
-    # Representative: successful call whose score is closest to the aggregate.
-    succ = [(s, t) for t in per_sample if (s := t[0]) is not None]
-    _, rep = min(succ, key=lambda it: abs(it[0] - agg))
-    reason = rep[1]
-    if n > 1:
-        reason = f"[{config.runner.judge_aggregate} of {len(samples)}/{n}, σ={stddev:.2f}] {reason}"
-    meta = {**base_meta, **rep[3], "outcome": rep[2]}
-    return EvalScore(
-        name=ev.name,
-        type="judge",
-        score=agg,
-        reason=reason,
-        samples=samples,
-        score_stddev=round(stddev, 4),
-        n_samples=n,
-        outcomes=outcomes,
-        judge_model=config.runner.judge_model,
-        judge_version=version,
-        meta=meta,
-    )
 
 
 def run_judge(
@@ -712,107 +527,18 @@ def run_judge(
 ) -> EvalScore:
     """Run a judge evaluator against captured conversation + output files.
 
-    Shared by the `analyze` command. Builds the judge prompt and samples the
-    judge ``runner.judge_samples`` times (self-consistency), disabling OTel so
-    judge calls don't contaminate eval traces. Successful samples are aggregated
-    via ``runner.judge_aggregate`` (median/mean/majority); the per-sample spread
-    (stddev) and outcome counts are recorded for reliability reporting. Judge
-    runtime metadata (host Copilot version, returncode/stderr, version mismatch,
-    and caller-supplied truncation flags) is recorded on the returned score so
-    the analyze report can surface reproducibility issues.
+    Thin wrapper around :class:`eval.judge_executor.JudgeExecutor` (see #80),
+    which owns prompt construction, the Copilot CLI call, response parsing,
+    and self-consistency sampling. Shared by the `analyze` command.
     """
-    secrets = collect_secrets(config, token)
-    conversation = mask_secrets(conversation, secrets) or ""
-    output_files_text = mask_secrets(output_files_text, secrets)
-    prompt = (
-        f"You are an eval judge. Score the following Copilot output.\n\n"
-        f"{ev.prompt}\n\n"
-        f"{_judge_sections(conversation, output_files_text)}\n\n"
-        f'Output ONLY valid JSON: {{"score": N, "reason": "..."}}'
+    executor = JudgeExecutor(config)
+    context = JudgeContext(
+        conversation=conversation,
+        output_files_text=output_files_text,
+        token=token,
+        extra_meta=extra_meta,
     )
-
-    version = host_copilot_version()
-    base_meta = _judge_base_meta(config, extra_meta, version)
-
-    n = max(1, config.runner.judge_samples)
-    per_sample: list[_SampleResult] = []
-    samples: list[int] = []
-    outcomes: dict[str, int] = {}
-    for _ in range(n):
-        score, reason, outcome, smeta = _run_judge_once(prompt, config, token, secrets)
-        outcomes[outcome] = outcomes.get(outcome, 0) + 1
-        per_sample.append((score, mask_secrets(reason, secrets) or reason, outcome, smeta))
-        if score is not None:
-            samples.append(score)
-
-    return _finalize_judge_score(ev, per_sample, samples, outcomes, n, base_meta, version, config)
-
-
-def _run_judges_batch_once(
-    prompt: str, names: list[str], config: Config, token: str | None, secrets: list[str]
-) -> tuple[dict[str, tuple[int | None, str, str]], dict[str, Any]]:
-    """Invoke the judge Copilot once for *all* criteria in ``names``.
-
-    Returns ``(results, sample_meta)`` where ``results`` maps each evaluator name
-    to ``(score, reason, outcome)``. A process-level failure (timeout/error) or an
-    unparseable top-level response is applied to *every* criterion (the batching
-    failure blast radius). When the top-level object parses, a missing key or bad
-    score fails only that individual criterion.
-    """
-    cmd = ["copilot", "-p", prompt, "-s"]
-    if config.runner.judge_model:
-        cmd.extend(["--model", config.runner.judge_model])
-    judge_env = {**os.environ, "GITHUB_TOKEN": token or "", "COPILOT_OTEL_ENABLED": "false"}
-    sample_meta: dict[str, Any] = {}
-
-    def _all(
-        outcome: str, reason: str
-    ) -> tuple[dict[str, tuple[int | None, str, str]], dict[str, Any]]:
-        return {name: (None, reason, outcome) for name in names}, sample_meta
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=config.runner.judge_timeout_seconds,
-            env=judge_env,
-        )
-    except subprocess.TimeoutExpired:
-        return _all("timeout", f"timeout after {config.runner.judge_timeout_seconds}s")
-    except FileNotFoundError:
-        return _all("not_found", "copilot CLI not found on host")
-    except OSError as exc:
-        return _all("error", f"error: {exc}")
-
-    sample_meta["returncode"] = proc.returncode
-    stderr = mask_secrets((proc.stderr or "").strip(), secrets) or ""
-    if stderr:
-        sample_meta["stderr"] = stderr[:_STDERR_SNIPPET_CHARS]
-
-    data = _parse_json(proc.stdout)
-    if data is None:
-        if proc.returncode != 0:
-            detail = f" — {stderr[:200]}" if stderr else ""
-            return _all("error", f"error: rc={proc.returncode}{detail}")
-        return _all("parse_error", "parse_error")
-
-    # A parseable verdict from a non-zero exit is suspicious: keep scores but flag
-    # the anomaly so it isn't counted as a clean run.
-    ok_outcome = "ok" if proc.returncode == 0 else "ok_nonzero"
-    results: dict[str, tuple[int | None, str, str]] = {}
-    for name in names:
-        entry = data.get(name)
-        if not isinstance(entry, dict) or "score" not in entry:
-            results[name] = (None, "parse_error", "parse_error")
-            continue
-        try:
-            score = int(entry.get("score", 0))
-        except (TypeError, ValueError):
-            results[name] = (None, f"invalid_score: {entry.get('score')!r}", "invalid_score")
-            continue
-        results[name] = (score, str(entry.get("reason", "")), ok_outcome)
-    return results, sample_meta
+    return executor.execute_single(ev, context)
 
 
 def run_judges_batch(
@@ -825,71 +551,22 @@ def run_judges_batch(
 ) -> list[EvalScore]:
     """Score *all* of a task's judge evaluators in a single LLM call per sample.
 
-    Opt-in optimization (``runner.judge_batch``). Instead of one Copilot call per
-    evaluator, one call scores every criterion at once, returning a JSON object
-    keyed by evaluator name. The response is split back into per-evaluator scores
-    that are byte-compatible with :func:`run_judge`, so the report layer is
-    untouched. Calls drop from ``n_judges × judge_samples`` to ``judge_samples``.
-
-    This trades judge independence for cost: criteria can cross-contaminate (halo
-    effect), a single parse failure fails every criterion, and per-criterion noise
-    within a sample becomes correlated. Keep it off (default) when accuracy matters.
-
-    A single evaluator is delegated to :func:`run_judge` since there is nothing to
+    Thin wrapper around :class:`eval.judge_executor.JudgeExecutor` (see #80).
+    Opt-in optimization (``runner.judge_batch``): instead of one Copilot call
+    per evaluator, one call scores every criterion at once. Trades judge
+    independence (halo effect, shared failure blast radius, correlated noise)
+    for cost -- keep it off (default) when accuracy matters. A single
+    evaluator is delegated to :func:`run_judge` since there is nothing to
     batch.
     """
-    if len(evaluators) == 1:
-        return [
-            run_judge(evaluators[0], conversation, config, token, output_files_text, extra_meta)
-        ]
-
-    secrets = collect_secrets(config, token)
-    conversation = mask_secrets(conversation, secrets) or ""
-    output_files_text = mask_secrets(output_files_text, secrets)
-    criteria = "\n\n".join(f"### {ev.name}\n{ev.prompt}" for ev in evaluators)
-    example = ", ".join(f'"{ev.name}": {{"score": N, "reason": "..."}}' for ev in evaluators)
-    prompt = (
-        f"You are an eval judge. Score the following Copilot output against "
-        f"MULTIPLE independent criteria. Judge each criterion strictly on its own "
-        f"merits; do not let one criterion's score influence another.\n\n"
-        f"Criteria:\n{criteria}\n\n"
-        f"{_judge_sections(conversation, output_files_text)}\n\n"
-        f"Output ONLY valid JSON mapping each criterion name to its verdict: "
-        f"{{{example}}}"
+    executor = JudgeExecutor(config)
+    context = JudgeContext(
+        conversation=conversation,
+        output_files_text=output_files_text,
+        token=token,
+        extra_meta=extra_meta,
     )
-
-    names = [ev.name for ev in evaluators]
-    version = host_copilot_version()
-    base_meta = _judge_base_meta(config, extra_meta, version)
-
-    n = max(1, config.runner.judge_samples)
-    per_sample: dict[str, list[_SampleResult]] = {name: [] for name in names}
-    samples: dict[str, list[int]] = {name: [] for name in names}
-    outcomes: dict[str, dict[str, int]] = {name: {} for name in names}
-    for _ in range(n):
-        results, smeta = _run_judges_batch_once(prompt, names, config, token, secrets)
-        for name in names:
-            score, reason, outcome = results[name]
-            outcomes[name][outcome] = outcomes[name].get(outcome, 0) + 1
-            per_sample[name].append(
-                (score, mask_secrets(reason, secrets) or reason, outcome, smeta)
-            )
-            if score is not None:
-                samples[name].append(score)
-
-    return [
-        _finalize_judge_score(
-            ev,
-            per_sample[ev.name],
-            samples[ev.name],
-            outcomes[ev.name],
-            n,
-            base_meta,
-            version,
-            config,
-        )
-        for ev in evaluators
-    ]
+    return executor.execute_batch(evaluators, context)
 
 
 _METRIC_OP_FUNCS: dict[str, Callable[[float, float], bool]] = {
@@ -1001,61 +678,9 @@ def _print_scores(scores: list[EvalScore]) -> None:
         logger.info("%s %s (%s): %s — %s", icon, s.name, s.type, score_str, s.reason[:50])
 
 
-def _parse_json(text: str, require_keys: tuple[str, ...] | None = None) -> dict[str, Any] | None:
-    """Extract a JSON object from possibly noisy LLM output.
-
-    Handles single-line JSON, whole-text JSON, markdown code fences, and
-    multiline JSON objects embedded in surrounding prose. When ``require_keys``
-    is given, only a parsed object containing all of those keys is accepted, so
-    stray JSON fragments don't masquerade as a valid result.
-    """
-    if not text:
-        return None
-    stripped = text.strip()
-
-    candidates: list[str] = []
-    # Markdown code fence (```json ... ``` or ``` ... ```)
-    fence = re.search(r"```(?:json)?\s*(.*?)```", stripped, re.DOTALL | re.IGNORECASE)
-    if fence:
-        candidates.append(fence.group(1).strip())
-    # Whole text
-    candidates.append(stripped)
-    # First brace .. last brace (multiline object embedded in prose)
-    start, end = stripped.find("{"), stripped.rfind("}")
-    if start != -1 and end > start:
-        candidates.append(stripped[start : end + 1])
-    # Single-line JSON objects
-    for line in stripped.splitlines():
-        line = line.strip()
-        if line.startswith("{") and line.endswith("}"):
-            candidates.append(line)
-
-    for candidate in candidates:
-        try:
-            data = json.loads(candidate)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        if require_keys and not all(k in data for k in require_keys):
-            continue
-        return data
-    return None
-
-
 def _strip_quotes(value: str) -> str:
     """Backward-compatible alias for :func:`eval.env_utils.strip_quotes`."""
     return strip_quotes(value)
-
-
-def mask_secrets(text: str | None, secrets: list[str]) -> str | None:
-    """Replace any occurrence of a secret value in ``text`` with a placeholder."""
-    if not text or not secrets:
-        return text
-    for secret in secrets:
-        if secret:
-            text = text.replace(secret, _SECRET_PLACEHOLDER)
-    return text
 
 
 def _write_sanitized_env_file(config: Config) -> Path:
