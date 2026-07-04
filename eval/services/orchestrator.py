@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime
 from logging import getLogger
 from pathlib import Path
+from typing import Any
 
 import click
 import requests
@@ -27,7 +28,16 @@ from eval.protocols import RunStatus
 from eval.runner import RunResult, get_github_token, run_one
 from eval.services.build_service import _ensure_images
 from eval.services.check_report import print_check_results
-from eval.services.manifest import write_manifest
+from eval.services.manifest import write_manifest, write_manifest_dicts
+from eval.services.resume_service import (
+    CellKey,
+    cell_key,
+    completed_cells,
+    filter_schedule,
+    merge_manifest_runs,
+    scan_run_results,
+    warn_if_schedule_changed,
+)
 from eval.validation import any_failed, validate_readiness
 
 logger = getLogger(__name__)
@@ -229,6 +239,7 @@ def _execute_schedule(
     run_dir: Path,
     github_token: str,
     reporter: ProgressReporter | None = None,
+    skip_cells: set[CellKey] | None = None,
 ) -> list[RunResult]:
     """Run every (task, fixture, epoch, variant) combination per the configured
     parallelism strategy (``full``, ``per_task``, or serial) and variant order.
@@ -237,12 +248,29 @@ def _execute_schedule(
     start/cell_started/cell_completed|cell_failed/finish stream so callers get
     live progress without any of this scheduling logic depending on how (or
     whether) it's rendered.
+
+    ``skip_cells`` (issue #67, ``run --resume``) is a set of
+    ``(task, variant, epoch, fixture)`` keys that already succeeded in a prior
+    run and should not be re-executed; only cells outside this set are
+    submitted/iterated, so the returned ``results`` cover exactly what this
+    call ran (callers merge that back into the prior manifest themselves --
+    see ``eval.services.resume_service.merge_manifest_runs``).
     """
     reporter = reporter or NullProgress()
     results: list[RunResult] = []
     order = config.runner.variant_order
     seed = config.runner.seed
-    total = sum(len(t.fixture_names()) for t in tasks) * epochs * len(config.variants)
+    skip_cells = skip_cells or set()
+    total = sum(
+        1
+        for t in tasks
+        for f in t.fixture_names()
+        for e in range(1, epochs + 1)
+        for v in config.variants
+        if cell_key(t.name, v.name, e, t.fixture_label(f)) not in skip_cells
+    )
+    if skip_cells:
+        click.echo(f"Resume: skipping {len(skip_cells)} previously completed cell(s).", err=True)
 
     if config.runner.parallel == "full":
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -258,6 +286,7 @@ def _execute_schedule(
             for e in range(1, epochs + 1)
             for v in order_variants(config.variants, e, order, _ordering_rng(seed, t.name, e))
         ]
+        work = filter_schedule(work, skip_cells)
         click.echo(
             f"Running {len(work)} runs in full parallel (max_workers={config.runner.max_workers})"
         )
@@ -297,6 +326,12 @@ def _execute_schedule(
                         config.variants, epoch, order, _ordering_rng(seed, task.name, epoch)
                     )
                     for variant in ordered:
+                        skip_key = cell_key(
+                            task.name, variant.name, epoch, task.fixture_label(fixture)
+                        )
+                        if skip_key in skip_cells:
+                            order_index += 1
+                            continue
                         name = _cell_name(task, variant, epoch, fixture)
                         reporter.cell_started(name)
                         result = _safe_run_one(
@@ -341,6 +376,12 @@ def _execute_schedule(
                         for variant in order_variants(
                             config.variants, epoch, order, _ordering_rng(seed, p.name, epoch)
                         ):
+                            skip_key = cell_key(
+                                p.name, variant.name, epoch, p.fixture_label(fixture)
+                            )
+                            if skip_key in skip_cells:
+                                order_index += 1
+                                continue
                             name = _cell_name(p, variant, epoch, fixture)
                             reporter.cell_started(name)
                             result = _safe_run_one(
@@ -398,9 +439,18 @@ def run_command(
     skip_preflight: bool,
     config_dir: str | None,
     no_progress: bool = False,
+    resume: bool = False,
+    run_id: str | None = None,
 ) -> None:
     """Business logic for the `run` CLI command: select tasks, print the plan,
-    pre-flight, build/ensure images, schedule runs, and persist the manifest."""
+    pre-flight, build/ensure images, schedule runs, and persist the manifest.
+
+    When ``resume`` is set (issue #67), ``run_id`` must name an existing run
+    directory: its manifest is scanned for cells that already succeeded, only
+    the remaining (failed/missing) cells are executed, and the new results are
+    merged back into that same run directory instead of starting a fresh
+    run-id.
+    """
     resolved_epochs = epochs or config.runner.epochs
 
     if task:
@@ -417,18 +467,56 @@ def run_command(
         click.echo("No tasks to run. Use --task NAME or enable tasks in config.")
         return
 
-    run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
-    run_dir = config.results_dir / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    existing_index: dict[CellKey, dict[str, Any]] = {}
+    skip_cells: set[CellKey] = set()
+
+    if resume:
+        if not run_id:
+            raise click.ClickException("--resume requires --run-id <existing run id>")
+        run_dir = config.results_dir / run_id
+        if not run_dir.exists():
+            raise click.ClickException(
+                f"Run '{run_id}' not found under {config.results_dir}. "
+                "Pass an existing --run-id to resume."
+            )
+        existing_index = scan_run_results(run_dir)
+        skip_cells = completed_cells(existing_index)
+        warn_if_schedule_changed(run_dir, config)
+    else:
+        run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        run_dir = config.results_dir / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
 
     _print_plan(config, tasks, resolved_epochs, run_id)
+    if resume:
+        remaining = len(existing_index) - len(skip_cells)
+        click.echo(
+            f" Resume:   {len(skip_cells)} cell(s) already completed, "
+            f"{remaining} to retry (plus any missing cells)"
+        )
 
     if dry_run:
-        total = sum(len(p.fixture_names()) for p in tasks) * resolved_epochs * len(config.variants)
-        click.echo(
-            f"[dry-run] Would run {resolved_epochs} epoch(s) × {len(config.variants)} variants × "
-            f"fixtures for each task ({total} runs total)."
+        full_total = (
+            sum(len(p.fixture_names()) for p in tasks) * resolved_epochs * len(config.variants)
         )
+        if resume:
+            remaining = sum(
+                1
+                for p in tasks
+                for f in p.fixture_names()
+                for e in range(1, resolved_epochs + 1)
+                for v in config.variants
+                if cell_key(p.name, v.name, e, p.fixture_label(f)) not in skip_cells
+            )
+            click.echo(
+                f"[dry-run] Would run {remaining} cell(s) out of {full_total} in the matrix "
+                f"(skipping {len(skip_cells)} already completed)."
+            )
+        else:
+            click.echo(
+                f"[dry-run] Would run {resolved_epochs} epoch(s) × {len(config.variants)} variants × "
+                f"fixtures for each task ({full_total} runs total)."
+            )
         return
 
     # Pre-flight: fail fast on missing Docker/auth/disk space before doing any
@@ -458,7 +546,7 @@ def run_command(
 
     reporter = create_reporter(no_progress=no_progress)
     results = _execute_schedule(
-        config, tasks, resolved_epochs, run_id, run_dir, github_token, reporter
+        config, tasks, resolved_epochs, run_id, run_dir, github_token, reporter, skip_cells
     )
 
     schedule = {
@@ -467,6 +555,15 @@ def run_command(
         "variant_order": config.runner.variant_order,
         "seed": config.runner.seed,
     }
-    write_manifest(run_dir, run_id, results, schedule)
+    if resume:
+        merged_runs = merge_manifest_runs(existing_index, results)
+        write_manifest_dicts(run_dir, run_id, merged_runs, schedule)
+        passed = sum(1 for r in merged_runs if r.get("passed"))
+        click.echo(
+            f" Resume merged: {passed}/{len(merged_runs)} cell(s) passing overall "
+            f"({len(results)} re-executed this run)"
+        )
+    else:
+        write_manifest(run_dir, run_id, results, schedule)
 
     _print_summary(config, run_id, results, config_dir)
