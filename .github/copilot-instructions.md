@@ -85,11 +85,6 @@ When creating or renaming files, follow established conventions:
 
 - **Root-level community files**: use standard uppercase names (`CONTRIBUTING.md`, `CHANGELOG.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`)
 - **docs/**: use lowercase kebab-case for internal docs (e.g., `docs/architecture.md`, `docs/configuration.md`, `docs/issue-guidelines.md`)
-- **Python**: follow existing package layout (`eval/` package, `tests/` directory, `pyproject.toml`)
-- **Docker**: `docker/Dockerfile` for base, `docker/Dockerfile.<variant>` for variant images
-- **Examples**: `examples/<eval-set-name>/` with `eval-config.yaml` as entry point
-- **CI**: `.github/workflows/<name>.yml`
-
 Always check existing file naming patterns before creating new files. Prefer widely-recognized names (e.g., `CONTRIBUTING.md`, `CHANGELOG.md`) over custom ones.
 
 ## Issue Tracking
