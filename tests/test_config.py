@@ -464,6 +464,7 @@ def test_metric_evaluator_non_numeric_value(tmp_path):
         ({"judge_timeout_seconds": 0}, "runner.judge_timeout_seconds"),
         ({"judge_samples": 0}, "runner.judge_samples"),
         ({"judge_aggregate": "mode"}, "runner.judge_aggregate"),
+        ({"judge_batch": "yes"}, "runner.judge_batch"),
         ({"judge_max_conversation_chars": 0}, "runner.judge_max_conversation_chars"),
         ({"judge_max_output_chars": 0}, "runner.judge_max_output_chars"),
         ({"epochs": "two"}, "runner.epochs"),
@@ -525,6 +526,19 @@ def test_runner_judge_sampling_defaults_and_values(tmp_path):
     )
     assert cfg.runner.judge_samples == 5
     assert cfg.runner.judge_aggregate == "majority"
+
+
+def test_runner_judge_batch_default_and_override(tmp_path):
+    cfg = load_inline(tmp_path, {"tasks": [{"name": "t1", "prompt": "p"}]})
+    assert cfg.runner.judge_batch is False
+    cfg = load_inline(
+        tmp_path,
+        {
+            "runner": {"judge_batch": True},
+            "tasks": [{"name": "t1", "prompt": "p"}],
+        },
+    )
+    assert cfg.runner.judge_batch is True
 
 
 def test_runner_judge_context_defaults(tmp_path):

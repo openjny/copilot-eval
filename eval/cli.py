@@ -719,7 +719,7 @@ def _run_judges(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from eval.runner import read_files_from_dir, run_judge, score_to_dict
+    from eval.runner import read_files_from_dir, run_judge, run_judges_batch, score_to_dict
 
     github_token = get_github_token()
     tasks_by_name = {t.name: t for t in config.tasks}
@@ -727,9 +727,11 @@ def _run_judges(
     # Phase 1: build per-trace context and collect the judge work items. Each
     # trace owns a dedicated scores file; contexts are keyed by that file so
     # duplicate traces for the same scenario/variant/epoch coalesce into one
-    # writer and don't clobber each other.
+    # writer and don't clobber each other. In batch mode (runner.judge_batch)
+    # a context's judges share one work item (one LLM call); otherwise each
+    # judge is its own item so failures stay isolated.
     contexts: dict[str, dict[str, Any]] = {}
-    work: list[tuple[str, Any]] = []  # (context key, evaluator)
+    work: list[tuple[str, list[Any]]] = []  # (context key, evaluators)
 
     for trace in traces:
         scenario = trace.resource_tags.get("eval.scenario", "")
@@ -807,8 +809,13 @@ def _run_judges(
             "remaining": len(pending),
             "scores": [],
         }
-        for ev in pending:
-            work.append((key, ev))
+        # Batch mode groups all of a context's judges into one call; otherwise
+        # each judge is its own work item so a failure only affects that judge.
+        if config.runner.judge_batch:
+            work.append((key, list(pending)))
+        else:
+            for ev in pending:
+                work.append((key, [ev]))
 
     if not work:
         return
@@ -826,57 +833,74 @@ def _run_judges(
         if all_scores:
             ctx["scores_file"].write_text(json.dumps(all_scores, indent=2, ensure_ascii=False))
 
-    # Phase 2: run judge evaluators in parallel (each invokes Copilot). Results
-    # are collected per trace context on the main thread; a context's scores
-    # file is written as soon as all of its judges complete, so an interrupt or
-    # crash only loses traces still in flight.
-    def _judge(key: str, ev: Any) -> tuple[str, dict[str, Any]]:
+    # Phase 2: run judge evaluators in parallel (each work item invokes Copilot).
+    # Results are collected per trace context on the main thread; a context's
+    # scores file is written as soon as all of its judges complete, so an
+    # interrupt or crash only loses traces still in flight.
+    def _judge(key: str, evs: list[Any]) -> tuple[str, list[dict[str, Any]]]:
         ctx = contexts[key]
+        label = ", ".join(ev.name for ev in evs)
         click.echo(
-            f"    [{ctx['scenario']}/{ctx['variant']}/e{ctx['epoch']}] Evaluating: {ev.name} (judge)...",
+            f"    [{ctx['scenario']}/{ctx['variant']}/e{ctx['epoch']}] Evaluating: {label} (judge)...",
             err=True,
         )
         extra_meta = {"truncation": ctx["truncation"]} if ctx["truncation"] else None
-        s = run_judge(
-            ev,
-            ctx["conversation"],
-            config,
-            github_token,
-            ctx["output_files_text"],
-            extra_meta=extra_meta,
-        )
-        if s.score is not None:
-            click.echo(f"    ✓ {ev.name}: {s.score} — {s.reason[:60]}", err=True)
+        if config.runner.judge_batch and len(evs) > 1:
+            scored = run_judges_batch(
+                evs,
+                ctx["conversation"],
+                config,
+                github_token,
+                ctx["output_files_text"],
+                extra_meta=extra_meta,
+            )
         else:
-            click.echo(f"    ! {ev.name}: {s.reason}", err=True)
-        return key, score_to_dict(s)
+            scored = [
+                run_judge(
+                    evs[0],
+                    ctx["conversation"],
+                    config,
+                    github_token,
+                    ctx["output_files_text"],
+                    extra_meta=extra_meta,
+                )
+            ]
+        for s in scored:
+            if s.score is not None:
+                click.echo(f"    ✓ {s.name}: {s.score} — {s.reason[:60]}", err=True)
+            else:
+                click.echo(f"    ! {s.name}: {s.reason}", err=True)
+        return key, [score_to_dict(s) for s in scored]
 
     with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
-        futures = {pool.submit(_judge, key, ev): (key, ev) for key, ev in work}
+        futures = {pool.submit(_judge, key, evs): (key, evs) for key, evs in work}
         for future in as_completed(futures):
-            key, ev = futures[future]
+            key, evs = futures[future]
             try:
-                key, score = future.result()
+                key, scores = future.result()
             except Exception as exc:  # never let one judge abort the whole batch
-                click.echo(f"    ! {ev.name}: error — {exc}", err=True)
+                click.echo(f"    ! {', '.join(ev.name for ev in evs)}: error — {exc}", err=True)
                 n = max(1, config.runner.judge_samples)
-                score = {
-                    "name": ev.name,
-                    "type": "judge",
-                    "score": None,
-                    "reason": f"error: {exc}",
-                    "passed": False,
-                    "samples": [],
-                    "score_stddev": None,
-                    "n_samples": n,
-                    "outcomes": {"ok": 0, "parse_error": 0, "timeout": 0, "error": n},
-                    "judge_model": config.runner.judge_model,
-                    "judge_version": None,
-                }
+                scores = [
+                    {
+                        "name": ev.name,
+                        "type": "judge",
+                        "score": None,
+                        "reason": f"error: {exc}",
+                        "passed": False,
+                        "samples": [],
+                        "score_stddev": None,
+                        "n_samples": n,
+                        "outcomes": {"ok": 0, "parse_error": 0, "timeout": 0, "error": n},
+                        "judge_model": config.runner.judge_model,
+                        "judge_version": None,
+                    }
+                    for ev in evs
+                ]
             ctx = contexts[key]
-            ctx["scores"].append(score)
-            ctx["remaining"] -= 1
-            if ctx["remaining"] == 0:
+            ctx["scores"].extend(scores)
+            ctx["remaining"] -= len(scores)
+            if ctx["remaining"] <= 0:
                 _write_ctx(ctx)
 
 
