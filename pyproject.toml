@@ -10,6 +10,9 @@ dependencies = [
     "jsonschema>=4.20",
 ]
 
+[project.optional-dependencies]
+progress = ["rich>=13.0"]
+
 [project.scripts]
 copilot-eval = "eval.cli:main"
 
@@ -21,6 +24,7 @@ dev = [
     "types-PyYAML>=6.0",
     "types-requests>=2.31",
     "types-jsonschema>=4.20",
+    "rich>=13.0",
 ]
 
 [tool.pytest.ini_options]

@@ -10,6 +10,7 @@ from pathlib import Path
 import click
 
 from eval.config import load_config
+from eval.progress import create_reporter
 from eval.report import (
     Report,
     build_report,
@@ -60,6 +61,7 @@ def run_analysis(
     min_epochs: int | None = None,
     mc_correction: str = "holm",
     compact: bool = False,
+    no_progress: bool = False,
 ) -> None:
     """Analyze traces from a previous eval run and print the A/B report."""
     config = load_config(Path(config_dir) if config_dir else None)
@@ -102,7 +104,8 @@ def run_analysis(
 
     # Run judge evaluators if not skipped
     if not skip_eval and results_dir.exists():
-        _run_judges(config, traces, results_dir, force=re_eval)
+        reporter = create_reporter(no_progress=no_progress)
+        _run_judges(config, traces, results_dir, force=re_eval, reporter=reporter)
         _warn_unscored_judges(config, traces, results_dir)
     # Metric evaluators are deterministic (no LLM), so they run every analyze —
     # even with --skip-eval — so CI gates always reflect the current telemetry.

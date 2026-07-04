@@ -22,6 +22,7 @@ import requests
 from eval.config import Config, Task, Variant
 from eval.exceptions import EvalError
 from eval.naming import run_slug
+from eval.progress import NullProgress, ProgressReporter, create_reporter
 from eval.protocols import RunStatus
 from eval.runner import RunResult, get_github_token, run_one
 from eval.services.build_service import _ensure_images
@@ -167,6 +168,31 @@ def _safe_run_one(
         return _errored_result(exc, "errored")
 
 
+def _cell_name(task: Task, variant: Variant, epoch: int, fixture: str = "") -> str:
+    """Human-readable id for one (task, variant, epoch, fixture) cell, used in
+    progress output. Fixture is only included for multi-fixture tasks."""
+    if task.is_multi_fixture and fixture:
+        return f"{task.name}/{fixture}/{variant.name}/e{epoch}"
+    return f"{task.name}/{variant.name}/e{epoch}"
+
+
+def _report_cell_result(
+    reporter: ProgressReporter, config: Config, name: str, result: RunResult
+) -> None:
+    """Forward one cell's outcome to the progress reporter as a completion or
+    a failure, deriving a short human-readable reason for failures."""
+    if result.status == RunStatus.SUCCESS:
+        reporter.cell_completed(name, duration=result.duration_seconds, status=str(result.status))
+        return
+    if result.status == RunStatus.TIMEOUT:
+        reason = f"timeout after {config.runner.timeout_seconds}s"
+    elif result.status == RunStatus.SETUP_FAILED:
+        reason = "setup failed"
+    else:
+        reason = f"exit code {result.exit_code}"
+    reporter.cell_failed(name, duration=result.duration_seconds, reason=reason)
+
+
 def _print_plan(config: Config, tasks: list[Task], epochs: int, run_id: str) -> None:
     """Print the run banner (model/effort/epochs/variants/tasks) before executing."""
     click.echo("=" * 50)
@@ -202,12 +228,21 @@ def _execute_schedule(
     run_id: str,
     run_dir: Path,
     github_token: str,
+    reporter: ProgressReporter | None = None,
 ) -> list[RunResult]:
     """Run every (task, fixture, epoch, variant) combination per the configured
-    parallelism strategy (``full``, ``per_task``, or serial) and variant order."""
+    parallelism strategy (``full``, ``per_task``, or serial) and variant order.
+
+    ``reporter`` (default: a silent :class:`NullProgress`) is fed a
+    start/cell_started/cell_completed|cell_failed/finish stream so callers get
+    live progress without any of this scheduling logic depending on how (or
+    whether) it's rendered.
+    """
+    reporter = reporter or NullProgress()
     results: list[RunResult] = []
     order = config.runner.variant_order
     seed = config.runner.seed
+    total = sum(len(t.fixture_names()) for t in tasks) * epochs * len(config.variants)
 
     if config.runner.parallel == "full":
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -226,15 +261,26 @@ def _execute_schedule(
         click.echo(
             f"Running {len(work)} runs in full parallel (max_workers={config.runner.max_workers})"
         )
-        with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
-            futures = {
-                pool.submit(
-                    _safe_run_one, t, v, e, config, run_id, run_dir, github_token, i, f
-                ): f"{t.name}/{v.name}/e{e}"
-                for i, (t, v, e, f) in enumerate(work)
-            }
-            for future in as_completed(futures):
-                results.append(future.result())
+
+        def _run_and_report(t: Task, v: Variant, e: int, f: str, i: int, name: str) -> RunResult:
+            # cell_started is reported from inside the worker thread so it
+            # reflects the true concurrent start time, not submission order.
+            reporter.cell_started(name)
+            result = _safe_run_one(t, v, e, config, run_id, run_dir, github_token, i, f)
+            _report_cell_result(reporter, config, name, result)
+            return result
+
+        reporter.start(len(work), label="eval matrix", workers=config.runner.max_workers)
+        try:
+            with ThreadPoolExecutor(max_workers=config.runner.max_workers) as pool:
+                futures = [
+                    pool.submit(_run_and_report, t, v, e, f, i, _cell_name(t, v, e, f))
+                    for i, (t, v, e, f) in enumerate(work)
+                ]
+                for future in as_completed(futures):
+                    results.append(future.result())
+        finally:
+            reporter.finish()
 
     elif config.runner.parallel == "per_task" and len(tasks) > 1:
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -251,43 +297,10 @@ def _execute_schedule(
                         config.variants, epoch, order, _ordering_rng(seed, task.name, epoch)
                     )
                     for variant in ordered:
-                        task_results.append(
-                            _safe_run_one(
-                                task,
-                                variant,
-                                epoch,
-                                config,
-                                run_id,
-                                run_dir,
-                                github_token,
-                                order_index,
-                                fixture,
-                            )
-                        )
-                        order_index += 1
-            return task_results
-
-        click.echo(f"Running {len(tasks)} tasks in parallel (variants serial within each task)")
-        with ThreadPoolExecutor(max_workers=min(len(tasks), config.runner.max_workers)) as pool:
-            task_futures = {pool.submit(_run_task_serial, t): t.name for t in tasks}
-            for task_future in as_completed(task_futures):
-                results.extend(task_future.result())
-    else:
-        order_index = 0
-        for p in tasks:
-            prompt = config.resolve_prompt(p, config.variants[0])
-            click.echo(f"\n>>> Task: {p.name}")
-            click.echo(f">>> Prompt:  {prompt}\n")
-
-            for fixture in p.fixture_names():
-                if p.is_multi_fixture:
-                    click.echo(f">>> Fixture: {fixture}")
-                for epoch in range(1, epochs + 1):
-                    for variant in order_variants(
-                        config.variants, epoch, order, _ordering_rng(seed, p.name, epoch)
-                    ):
+                        name = _cell_name(task, variant, epoch, fixture)
+                        reporter.cell_started(name)
                         result = _safe_run_one(
-                            p,
+                            task,
                             variant,
                             epoch,
                             config,
@@ -297,8 +310,55 @@ def _execute_schedule(
                             order_index,
                             fixture,
                         )
-                        results.append(result)
+                        _report_cell_result(reporter, config, name, result)
+                        task_results.append(result)
                         order_index += 1
+            return task_results
+
+        click.echo(f"Running {len(tasks)} tasks in parallel (variants serial within each task)")
+        workers = min(len(tasks), config.runner.max_workers)
+        reporter.start(total, label="eval matrix", workers=workers)
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                task_futures = {pool.submit(_run_task_serial, t): t.name for t in tasks}
+                for task_future in as_completed(task_futures):
+                    results.extend(task_future.result())
+        finally:
+            reporter.finish()
+    else:
+        reporter.start(total, label="eval matrix", workers=1)
+        try:
+            order_index = 0
+            for p in tasks:
+                prompt = config.resolve_prompt(p, config.variants[0])
+                click.echo(f"\n>>> Task: {p.name}")
+                click.echo(f">>> Prompt:  {prompt}\n")
+
+                for fixture in p.fixture_names():
+                    if p.is_multi_fixture:
+                        click.echo(f">>> Fixture: {fixture}")
+                    for epoch in range(1, epochs + 1):
+                        for variant in order_variants(
+                            config.variants, epoch, order, _ordering_rng(seed, p.name, epoch)
+                        ):
+                            name = _cell_name(p, variant, epoch, fixture)
+                            reporter.cell_started(name)
+                            result = _safe_run_one(
+                                p,
+                                variant,
+                                epoch,
+                                config,
+                                run_id,
+                                run_dir,
+                                github_token,
+                                order_index,
+                                fixture,
+                            )
+                            _report_cell_result(reporter, config, name, result)
+                            results.append(result)
+                            order_index += 1
+        finally:
+            reporter.finish()
 
     return results
 
@@ -337,6 +397,7 @@ def run_command(
     no_build: bool,
     skip_preflight: bool,
     config_dir: str | None,
+    no_progress: bool = False,
 ) -> None:
     """Business logic for the `run` CLI command: select tasks, print the plan,
     pre-flight, build/ensure images, schedule runs, and persist the manifest."""
@@ -395,7 +456,10 @@ def run_command(
     if not no_build:
         _ensure_images(config, github_token)
 
-    results = _execute_schedule(config, tasks, resolved_epochs, run_id, run_dir, github_token)
+    reporter = create_reporter(no_progress=no_progress)
+    results = _execute_schedule(
+        config, tasks, resolved_epochs, run_id, run_dir, github_token, reporter
+    )
 
     schedule = {
         "parallel": config.runner.parallel,
