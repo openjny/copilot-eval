@@ -12,6 +12,7 @@ from eval.validation import (
     any_failed,
     check_config_schema,
     check_fixtures,
+    check_json_schema,
     check_script_references,
     check_var_interpolation,
 )
@@ -24,6 +25,7 @@ def validate(config_dir: str | None) -> None:
 
     Checks (independent of Docker/auth, unlike `run`'s pre-flight checks):
     - YAML syntax and schema validity
+    - JSON Schema conformance against schemas/eval-config.schema.json
     - Referenced fixture directories exist on disk (warning: a missing
       fixture dir doesn't fail a run, since eval.runner tolerates it)
     - Variant/task script references (Dockerfile, run script, hooks,
@@ -34,8 +36,9 @@ def validate(config_dir: str | None) -> None:
     Exits 0 if all *blocking* checks pass (warnings don't affect the exit
     code), 1 otherwise.
     """
-    config, schema_result = check_config_schema(Path(config_dir) if config_dir else None)
-    results: list[CheckResult] = [schema_result]
+    config_path = Path(config_dir) if config_dir else None
+    config, schema_result = check_config_schema(config_path)
+    results: list[CheckResult] = [schema_result, check_json_schema(config_path)]
     if config is not None:
         results += check_fixtures(config)
         results += check_script_references(config)
