@@ -3,7 +3,7 @@
 import random
 from pathlib import Path
 
-from eval.cli import _fetch_traces_from_files, _ordering_rng, order_variants
+from eval.cli import _collect_file_traces, _ordering_rng, order_variants
 from eval.config import Config, RunnerConfig, Variant
 
 FIXTURE = Path(__file__).parent / "fixtures" / "file-exporter-sample.jsonl"
@@ -98,7 +98,7 @@ def test_ordering_rng_none_seed_is_nondeterministic():
     assert isinstance(r, random.Random)
 
 
-def test_fetch_traces_from_files_reads_all_per_run_files(tmp_path: Path):
+def test_collect_file_traces_reads_all_per_run_files(tmp_path: Path):
     results_dir = tmp_path / "results"
     traces_dir = results_dir / ".traces"
     traces_dir.mkdir(parents=True)
@@ -122,7 +122,7 @@ def test_fetch_traces_from_files_reads_all_per_run_files(tmp_path: Path):
         config_dir=tmp_path,
     )
 
-    traces = _fetch_traces_from_files(config, "run-2", results_dir, manifest_runs=None)
+    traces = _collect_file_traces(config, "run-2", results_dir)
 
     assert len(traces) == 1
     assert traces[0].trace_id == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
