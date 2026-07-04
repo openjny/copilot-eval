@@ -22,7 +22,12 @@ from tests.conftest import load_inline
 
 def _config(tmp_path: Path) -> Config:
     return Config(
-        vars={}, runner=RunnerConfig(), tasks=[], variants=[], project_dir=tmp_path, config_dir=tmp_path
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[],
+        variants=[],
+        project_dir=tmp_path,
+        config_dir=tmp_path,
     )
 
 
