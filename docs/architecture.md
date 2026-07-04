@@ -273,3 +273,35 @@ manifest + ingested trace ids:
 When no manifest is available (older runs), reliability degrades to a simple
 per-variant trace count, and the rest of the report still renders.
 
+### Cross-run baseline comparison (regression tracking)
+
+Within-run comparison above pairs two *variants of the same run* on a shared
+epoch key. A **baseline** is different: a named, point-in-time snapshot of one
+run's metrics (`copilot-eval baseline save --run-id <id> --name <name>`), kept
+around so a *later, independent* run can be checked against it
+(`copilot-eval analyze --run-id <new-id> --baseline <name>`) -- e.g. "does this
+task still perform the same after this week's prompt change?".
+
+- **Storage**: `eval/services/baseline_service.py` serializes the current run's
+  raw per-task, per-variant OTel metrics (the same fields `_METRIC_DEFS`
+  aggregates) to `<results_dir>/.baselines/<name>.json` -- a plain JSON
+  snapshot, no database, consistent with the project's zero-infrastructure
+  default path.
+- **Unpaired bootstrap**: the two runs share no epoch to pair on (different
+  run, possibly a different epoch count), so `report.build_baseline_comparisons`
+  resamples the baseline and current samples *independently* with replacement
+  (`_unpaired_bootstrap_stats`) to build a CI for the (current - baseline)
+  median difference, rather than reusing the paired-epoch bootstrap above.
+- **Regression detection**: every OTel metric tracked here (duration, tokens,
+  cost, tool/turn counts) is "lower is better" -- a statistically supported
+  (CI-excludes-zero, Holm-corrected by default) increase vs baseline is flagged
+  as a regression; a decrease as an improvement.
+- **CI gating**: `analyze --baseline <name> --fail-on-regression` exits
+  non-zero when any task/variant regressed. Without an explicit
+  `--fail-on-regression`/`--no-fail-on-regression`, the default follows the
+  `CI` environment variable (enabled in CI, disabled for interactive local
+  runs).
+- Tasks/variants present in the current run but absent from the baseline (a
+  new task, or a renamed variant) are reported as a warning rather than
+  silently skipped or erroring the whole comparison.
+

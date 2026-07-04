@@ -75,7 +75,10 @@ uv run copilot-eval --log-level warning --log-format json run --config-dir examp
 | `validate --config-dir <dir>` | Check config schema, fixtures, script/variant references, and var interpolation (warnings for non-blocking issues, e.g. missing optional fixtures) |
 | `build --config-dir <dir> [--variant NAME]` | Build Docker images |
 | `run --config-dir <dir> [--task NAME] [--epochs N] [--dry-run] [--no-build] [--skip-preflight] [--no-progress]` | Execute eval runs (fails fast on pre-flight checks before any Docker work; `--skip-preflight` bypasses those checks entirely; live progress bar/ETA on a TTY, or per-cell log lines otherwise — `--no-progress` disables it) |
-| `analyze --run-id <ID> [--config-dir <dir>] [-o table\|json\|markdown] [-a paired\|median\|mean] [--jaeger-url URL] [--skip-eval] [--re-eval] [--min-epochs N] [--no-mc-correction] [--compact] [--no-progress]` | Analyze results (`--min-epochs` exits non-zero if a task has fewer than `N` paired epochs — a CI gate for statistical power; `*` significance markers are Holm-Bonferroni corrected across each task's metrics/judge-criteria family by default — `--no-mc-correction` reverts to raw, uncorrected per-metric significance; `--compact` with `-o markdown` produces a condensed report for PR comments, see [CI Integration](docs/ci-integration.md); `--no-progress` disables judge-scoring progress output) |
+| `analyze --run-id <ID> [--config-dir <dir>] [-o table\|json\|markdown] [-a paired\|median\|mean] [--jaeger-url URL] [--skip-eval] [--re-eval] [--min-epochs N] [--no-mc-correction] [--compact] [--no-progress] [--baseline NAME] [--fail-on-regression\|--no-fail-on-regression]` | Analyze results (`--min-epochs` exits non-zero if a task has fewer than `N` paired epochs — a CI gate for statistical power; `*` significance markers are Holm-Bonferroni corrected across each task's metrics/judge-criteria family by default — `--no-mc-correction` reverts to raw, uncorrected per-metric significance; `--compact` with `-o markdown` produces a condensed report for PR comments, see [CI Integration](docs/ci-integration.md); `--no-progress` disables judge-scoring progress output; `--baseline NAME` additionally compares this run against a saved baseline snapshot via unpaired bootstrap, exiting non-zero on regression when `--fail-on-regression` is set (or the `CI` env var is set) — see [Architecture](docs/architecture.md#cross-run-baseline-comparison-regression-tracking)) |
+| `baseline save --run-id <ID> --name <NAME> [--config-dir <dir>] [--jaeger-url URL]` | Snapshot a run's metrics as a named baseline for later `analyze --baseline` regression checks |
+| `baseline list [--config-dir <dir>]` | List saved baselines |
+| `baseline delete --name <NAME> [--config-dir <dir>]` | Delete a saved baseline |
 
 ## Examples
 
@@ -92,7 +95,7 @@ copilot-eval/
 ├── eval/                  # Framework
 │   ├── __init__.py        # Package marker
 │   ├── __main__.py        # `python -m eval` entry
-│   ├── cli/               # Click CLI, routing only (list/build/run/analyze/validate)
+│   ├── cli/               # Click CLI, routing only (list/build/run/analyze/baseline/validate)
 │   ├── services/          # Business logic (orchestrator, judge_service, build_service, ...)
 │   ├── config.py          # Config loading
 │   ├── runner.py          # Docker execution + evaluators
