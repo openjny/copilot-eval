@@ -81,8 +81,8 @@ sequenceDiagram
 
     CLI->>Collector: collect(run_context) — file: read results/<run_id>/.traces/traces.jsonl | jaeger: fetch_traces (server-side run_id filter) + reconcile manifest
     CLI->>Trace: extract_conversation (chronological by startTime)
-    CLI->>Judge: run_judge (conversation + output files, ×judge_samples)
-    Judge-->>CLI: {"score": N, "reason": "..."} per sample
+    CLI->>Judge: run_judge (conversation + output files, ×judge_samples)<br/>or run_judges_batch (all judges in one call when runner.judge_batch)
+    Judge-->>CLI: {"score": N, "reason": "..."} per sample<br/>(batched: object keyed by evaluator name)
     CLI->>CLI: aggregate (median/mean/majority) + σ + outcome rates
     CLI->>CLI: merge with existing scores → A/B report
 ```

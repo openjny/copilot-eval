@@ -594,39 +594,24 @@ def _run_judge_once(
     return None, "parse_error", "parse_error", sample_meta
 
 
-def run_judge(
-    ev: Evaluator,
-    conversation: str,
-    config: Config,
-    token: str | None,
-    output_files_text: str | None = None,
-    extra_meta: dict[str, Any] | None = None,
-) -> EvalScore:
-    """Run a judge evaluator against captured conversation + output files.
+# Per-call judge result: (score, masked_reason, outcome, sample_meta)
+_SampleResult = tuple["int | None", str, str, dict[str, Any]]
 
-    Shared by the `analyze` command. Builds the judge prompt and samples the
-    judge ``runner.judge_samples`` times (self-consistency), disabling OTel so
-    judge calls don't contaminate eval traces. Successful samples are aggregated
-    via ``runner.judge_aggregate`` (median/mean/majority); the per-sample spread
-    (stddev) and outcome counts are recorded for reliability reporting. Judge
-    runtime metadata (host Copilot version, returncode/stderr, version mismatch,
-    and caller-supplied truncation flags) is recorded on the returned score so
-    the analyze report can surface reproducibility issues.
-    """
-    secrets = collect_secrets(config, token)
-    conversation = mask_secrets(conversation, secrets) or ""
-    output_files_text = mask_secrets(output_files_text, secrets)
+
+def _judge_sections(conversation: str, output_files_text: str | None) -> str:
+    """Build the evidence block (conversation + optional output files) shared by
+    single and batched judge prompts."""
     sections = [f"--- COPILOT OUTPUT ---\n{conversation}\n--- END OUTPUT ---"]
     if output_files_text:
         sections.append(f"--- OUTPUT FILES ---\n{output_files_text}\n--- END FILES ---")
-    prompt = (
-        f"You are an eval judge. Score the following Copilot output.\n\n"
-        f"{ev.prompt}\n\n"
-        f"{chr(10).join(sections)}\n\n"
-        f'Output ONLY valid JSON: {{"score": N, "reason": "..."}}'
-    )
+    return chr(10).join(sections)
 
-    version = host_copilot_version()
+
+def _judge_base_meta(
+    config: Config, extra_meta: dict[str, Any] | None, version: str | None
+) -> dict[str, Any]:
+    """Seed judge meta with caller extras, host version, and any version
+    mismatch against the configured expectation."""
     base_meta: dict[str, Any] = {**(extra_meta or {})}
     if version:
         base_meta["judge_version"] = version
@@ -636,19 +621,24 @@ def run_judge(
     # exactly when reproducibility is least observable.
     if expected and version != expected:
         base_meta["judge_version_mismatch"] = {"expected": expected, "actual": version}
+    return base_meta
 
-    n = max(1, config.runner.judge_samples)
-    # Each entry: (score, masked_reason, outcome, sample_meta)
-    per_sample: list[tuple[int | None, str, str, dict[str, Any]]] = []
-    samples: list[int] = []
-    outcomes: dict[str, int] = {}
-    for _ in range(n):
-        score, reason, outcome, smeta = _run_judge_once(prompt, config, token, secrets)
-        outcomes[outcome] = outcomes.get(outcome, 0) + 1
-        per_sample.append((score, mask_secrets(reason, secrets) or reason, outcome, smeta))
-        if score is not None:
-            samples.append(score)
 
+def _finalize_judge_score(
+    ev: Evaluator,
+    per_sample: list[_SampleResult],
+    samples: list[int],
+    outcomes: dict[str, int],
+    n: int,
+    base_meta: dict[str, Any],
+    version: str | None,
+    config: Config,
+) -> EvalScore:
+    """Aggregate a judge's per-sample results into one EvalScore.
+
+    Shared by the single-judge (:func:`run_judge`) and batched
+    (:func:`run_judges_batch`) paths so both produce identical score shapes.
+    """
     if not samples:
         # No usable score across all samples; surface the dominant failure mode
         # along with its representative reason and runtime meta.
@@ -693,6 +683,196 @@ def run_judge(
         judge_version=version,
         meta=meta,
     )
+
+
+def run_judge(
+    ev: Evaluator,
+    conversation: str,
+    config: Config,
+    token: str | None,
+    output_files_text: str | None = None,
+    extra_meta: dict[str, Any] | None = None,
+) -> EvalScore:
+    """Run a judge evaluator against captured conversation + output files.
+
+    Shared by the `analyze` command. Builds the judge prompt and samples the
+    judge ``runner.judge_samples`` times (self-consistency), disabling OTel so
+    judge calls don't contaminate eval traces. Successful samples are aggregated
+    via ``runner.judge_aggregate`` (median/mean/majority); the per-sample spread
+    (stddev) and outcome counts are recorded for reliability reporting. Judge
+    runtime metadata (host Copilot version, returncode/stderr, version mismatch,
+    and caller-supplied truncation flags) is recorded on the returned score so
+    the analyze report can surface reproducibility issues.
+    """
+    secrets = collect_secrets(config, token)
+    conversation = mask_secrets(conversation, secrets) or ""
+    output_files_text = mask_secrets(output_files_text, secrets)
+    prompt = (
+        f"You are an eval judge. Score the following Copilot output.\n\n"
+        f"{ev.prompt}\n\n"
+        f"{_judge_sections(conversation, output_files_text)}\n\n"
+        f'Output ONLY valid JSON: {{"score": N, "reason": "..."}}'
+    )
+
+    version = host_copilot_version()
+    base_meta = _judge_base_meta(config, extra_meta, version)
+
+    n = max(1, config.runner.judge_samples)
+    per_sample: list[_SampleResult] = []
+    samples: list[int] = []
+    outcomes: dict[str, int] = {}
+    for _ in range(n):
+        score, reason, outcome, smeta = _run_judge_once(prompt, config, token, secrets)
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        per_sample.append((score, mask_secrets(reason, secrets) or reason, outcome, smeta))
+        if score is not None:
+            samples.append(score)
+
+    return _finalize_judge_score(ev, per_sample, samples, outcomes, n, base_meta, version, config)
+
+
+def _run_judges_batch_once(
+    prompt: str, names: list[str], config: Config, token: str | None, secrets: list[str]
+) -> tuple[dict[str, tuple[int | None, str, str]], dict[str, Any]]:
+    """Invoke the judge Copilot once for *all* criteria in ``names``.
+
+    Returns ``(results, sample_meta)`` where ``results`` maps each evaluator name
+    to ``(score, reason, outcome)``. A process-level failure (timeout/error) or an
+    unparseable top-level response is applied to *every* criterion (the batching
+    failure blast radius). When the top-level object parses, a missing key or bad
+    score fails only that individual criterion.
+    """
+    cmd = ["copilot", "-p", prompt, "-s"]
+    if config.runner.judge_model:
+        cmd.extend(["--model", config.runner.judge_model])
+    judge_env = {**os.environ, "GITHUB_TOKEN": token or "", "COPILOT_OTEL_ENABLED": "false"}
+    sample_meta: dict[str, Any] = {}
+
+    def _all(
+        outcome: str, reason: str
+    ) -> tuple[dict[str, tuple[int | None, str, str]], dict[str, Any]]:
+        return {name: (None, reason, outcome) for name in names}, sample_meta
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=config.runner.judge_timeout_seconds,
+            env=judge_env,
+        )
+    except subprocess.TimeoutExpired:
+        return _all("timeout", f"timeout after {config.runner.judge_timeout_seconds}s")
+    except FileNotFoundError:
+        return _all("not_found", "copilot CLI not found on host")
+    except OSError as exc:
+        return _all("error", f"error: {exc}")
+
+    sample_meta["returncode"] = proc.returncode
+    stderr = mask_secrets((proc.stderr or "").strip(), secrets) or ""
+    if stderr:
+        sample_meta["stderr"] = stderr[:_STDERR_SNIPPET_CHARS]
+
+    data = _parse_json(proc.stdout)
+    if data is None:
+        if proc.returncode != 0:
+            detail = f" — {stderr[:200]}" if stderr else ""
+            return _all("error", f"error: rc={proc.returncode}{detail}")
+        return _all("parse_error", "parse_error")
+
+    # A parseable verdict from a non-zero exit is suspicious: keep scores but flag
+    # the anomaly so it isn't counted as a clean run.
+    ok_outcome = "ok" if proc.returncode == 0 else "ok_nonzero"
+    results: dict[str, tuple[int | None, str, str]] = {}
+    for name in names:
+        entry = data.get(name)
+        if not isinstance(entry, dict) or "score" not in entry:
+            results[name] = (None, "parse_error", "parse_error")
+            continue
+        try:
+            score = int(entry.get("score", 0))
+        except (TypeError, ValueError):
+            results[name] = (None, f"invalid_score: {entry.get('score')!r}", "invalid_score")
+            continue
+        results[name] = (score, str(entry.get("reason", "")), ok_outcome)
+    return results, sample_meta
+
+
+def run_judges_batch(
+    evaluators: list[Evaluator],
+    conversation: str,
+    config: Config,
+    token: str | None,
+    output_files_text: str | None = None,
+    extra_meta: dict[str, Any] | None = None,
+) -> list[EvalScore]:
+    """Score *all* of a task's judge evaluators in a single LLM call per sample.
+
+    Opt-in optimization (``runner.judge_batch``). Instead of one Copilot call per
+    evaluator, one call scores every criterion at once, returning a JSON object
+    keyed by evaluator name. The response is split back into per-evaluator scores
+    that are byte-compatible with :func:`run_judge`, so the report layer is
+    untouched. Calls drop from ``n_judges × judge_samples`` to ``judge_samples``.
+
+    This trades judge independence for cost: criteria can cross-contaminate (halo
+    effect), a single parse failure fails every criterion, and per-criterion noise
+    within a sample becomes correlated. Keep it off (default) when accuracy matters.
+
+    A single evaluator is delegated to :func:`run_judge` since there is nothing to
+    batch.
+    """
+    if len(evaluators) == 1:
+        return [
+            run_judge(evaluators[0], conversation, config, token, output_files_text, extra_meta)
+        ]
+
+    secrets = collect_secrets(config, token)
+    conversation = mask_secrets(conversation, secrets) or ""
+    output_files_text = mask_secrets(output_files_text, secrets)
+    criteria = "\n\n".join(f"### {ev.name}\n{ev.prompt}" for ev in evaluators)
+    example = ", ".join(f'"{ev.name}": {{"score": N, "reason": "..."}}' for ev in evaluators)
+    prompt = (
+        f"You are an eval judge. Score the following Copilot output against "
+        f"MULTIPLE independent criteria. Judge each criterion strictly on its own "
+        f"merits; do not let one criterion's score influence another.\n\n"
+        f"Criteria:\n{criteria}\n\n"
+        f"{_judge_sections(conversation, output_files_text)}\n\n"
+        f"Output ONLY valid JSON mapping each criterion name to its verdict: "
+        f"{{{example}}}"
+    )
+
+    names = [ev.name for ev in evaluators]
+    version = host_copilot_version()
+    base_meta = _judge_base_meta(config, extra_meta, version)
+
+    n = max(1, config.runner.judge_samples)
+    per_sample: dict[str, list[_SampleResult]] = {name: [] for name in names}
+    samples: dict[str, list[int]] = {name: [] for name in names}
+    outcomes: dict[str, dict[str, int]] = {name: {} for name in names}
+    for _ in range(n):
+        results, smeta = _run_judges_batch_once(prompt, names, config, token, secrets)
+        for name in names:
+            score, reason, outcome = results[name]
+            outcomes[name][outcome] = outcomes[name].get(outcome, 0) + 1
+            per_sample[name].append(
+                (score, mask_secrets(reason, secrets) or reason, outcome, smeta)
+            )
+            if score is not None:
+                samples[name].append(score)
+
+    return [
+        _finalize_judge_score(
+            ev,
+            per_sample[ev.name],
+            samples[ev.name],
+            outcomes[ev.name],
+            n,
+            base_meta,
+            version,
+            config,
+        )
+        for ev in evaluators
+    ]
 
 
 def _eval_script(

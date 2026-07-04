@@ -40,6 +40,12 @@ class RunnerConfig:
     # successful scores. 1 keeps the legacy single-shot behavior.
     judge_samples: int = 1
     judge_aggregate: str = "median"  # median | mean | majority
+    # Opt-in: score all of a task's judges in a single LLM call (keyed by
+    # evaluator name), then split the response back into per-evaluator scores.
+    # Cuts judge calls from n_judges × judge_samples to judge_samples at the
+    # cost of judge independence (halo effect, shared failure blast radius,
+    # correlated per-criterion noise). Default False keeps judges independent.
+    judge_batch: bool = False
     reasoning_effort: str | None = None
     max_turns: int | None = None
     parallel: str = "off"  # off | per_task | full
@@ -258,6 +264,7 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
     max_workers = _require_int(runner_raw, "max_workers", 8, minimum=1)
     judge_timeout_seconds = _require_int(runner_raw, "judge_timeout_seconds", 60, minimum=1)
     judge_samples = _require_int(runner_raw, "judge_samples", 1, minimum=1)
+    judge_batch = _require_bool(runner_raw, "judge_batch", False)
     judge_max_conversation_chars = _require_int(
         runner_raw, "judge_max_conversation_chars", 8000, minimum=1
     )
@@ -281,6 +288,7 @@ def _build_runner(runner_raw: dict[str, Any]) -> RunnerConfig:
         judge_model=runner_raw.get("judge_model", "gpt-4.1"),
         judge_samples=judge_samples,
         judge_aggregate=judge_aggregate,
+        judge_batch=judge_batch,
         reasoning_effort=runner_raw.get("reasoning_effort"),
         max_turns=max_turns,
         parallel=parallel,
@@ -330,6 +338,15 @@ def _require_number(
     if minimum is not None and value < minimum:
         raise ConfigError(f"runner.{key} must be >= {minimum}, got {value}.")
     return float(value)
+
+
+def _require_bool(raw: dict[str, Any], key: str, default: bool) -> bool:
+    if key not in raw or raw[key] is None:
+        return default
+    value = raw[key]
+    if not isinstance(value, bool):
+        raise ConfigError(f"runner.{key} must be a boolean, got {value!r}.")
+    return value
 
 
 def _check_duplicate_names(items: list[Any], label: str) -> None:

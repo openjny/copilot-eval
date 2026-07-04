@@ -52,6 +52,7 @@ runner:
   judge_model: claude-sonnet-4.6 # Model for LLM-as-Judge (separate from eval model)
   judge_samples: 1               # Self-consistency: sample each judge N times, aggregate
   judge_aggregate: median        # median | mean | majority (over successful samples)
+  judge_batch: false             # Opt-in: score all of a task's judges in one LLM call
   reasoning_effort: null         # Optional: low|medium|high
   max_turns: 20                  # Max autopilot turns
   parallel: off                  # off | per_task | full
@@ -310,6 +311,33 @@ score spread (σ). The markdown/JSON reports show each per-run judge score with 
 > Cached judge scores are keyed by evaluator **name** only. If you change
 > `judge_samples`, `judge_aggregate`, or `judge_model` and want existing scores
 > re-evaluated with the new settings, re-run `analyze --re-eval`.
+
+### Batched Judging (opt-in)
+
+By default each judge evaluator is scored by its own Copilot call, so a task with
+`n` judges sampled `judge_samples` times makes `n × judge_samples` calls. Set
+`runner.judge_batch: true` to score **all** of a task's judges in a *single* call
+per sample: one prompt asks for every criterion at once, returning a JSON object
+keyed by evaluator name that is split back into per-evaluator scores. Calls drop
+from `n_judges × judge_samples` to `judge_samples`.
+
+This is an internal optimization only — the config still declares `n` independent
+judges and the report contract is unchanged (1 judge = 1 scalar score). It is
+**off by default** because batching trades accuracy for cost:
+
+1. **Halo effect / cross-contamination** — scoring multiple criteria in one prompt
+   lets the model drag one score toward another. Independent calls isolate each
+   criterion.
+2. **Failure blast radius** — an unparseable batched response fails *every*
+   criterion at once; independently, a failure is per-criterion. (A parseable
+   response with a missing/invalid key still fails only that one criterion.)
+3. **Sample correlation** — within a self-consistency sample, per-criterion noise
+   becomes correlated, so per-criterion σ is no longer independent.
+
+Prefer the default (independent judges) when accuracy matters; enable
+`judge_batch` for large judge suites where cost/latency dominates. A task with a
+single judge behaves identically either way. Re-run `analyze --re-eval` to
+re-score existing runs after toggling this.
 
 To assess whether the judge itself is calibrated, see the `examples/judge-calibration`
 eval set: it pins Copilot output to fixed answers with known expected score bands.

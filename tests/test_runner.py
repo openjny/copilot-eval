@@ -7,6 +7,7 @@ and secret masking.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -27,6 +28,7 @@ from eval.runner import (
     mask_secrets,
     read_files_from_dir,
     run_judge,
+    run_judges_batch,
     score_to_dict,
     status_from_exit_code,
 )
@@ -978,6 +980,144 @@ def test_run_judge_all_failures_returns_dominant_outcome(tmp_path, monkeypatch):
     assert s.passed is False
     assert s.reason == "parse_error"
     assert s.score_stddev is None
+
+
+# --- run_judges_batch (opt-in batched judging) ---
+
+
+def _evs():
+    return [
+        Evaluator(name="thoroughness", type="judge", prompt="Rate thoroughness."),
+        Evaluator(name="actionability", type="judge", prompt="Rate actionability."),
+    ]
+
+
+def test_run_judges_batch_splits_single_call(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "v")
+    calls = {"n": 0}
+
+    def fake_run(*a, **k):
+        calls["n"] += 1
+        return _FakeProc(
+            stdout=json.dumps(
+                {
+                    "thoroughness": {"score": 8, "reason": "covers cases"},
+                    "actionability": {"score": 6, "reason": "some vague steps"},
+                }
+            )
+        )
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+    scores = run_judges_batch(_evs(), "conv", _judge_config(tmp_path, judge_model="m"), "tok")
+    # One LLM call scored both judges.
+    assert calls["n"] == 1
+    by_name = {s.name: s for s in scores}
+    assert by_name["thoroughness"].score == 8
+    assert by_name["thoroughness"].reason == "covers cases"
+    assert by_name["actionability"].score == 6
+    assert all(s.meta["outcome"] == "ok" for s in scores)
+    assert all(s.n_samples == 1 for s in scores)
+
+
+def test_run_judges_batch_call_count_is_judge_samples(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "v")
+    calls = {"n": 0}
+
+    def fake_run(*a, **k):
+        calls["n"] += 1
+        return _FakeProc(
+            stdout=json.dumps(
+                {
+                    "thoroughness": {"score": 7, "reason": "ok"},
+                    "actionability": {"score": 7, "reason": "ok"},
+                }
+            )
+        )
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+    scores = run_judges_batch(_evs(), "conv", _judge_config(tmp_path, judge_samples=3), "tok")
+    # 2 judges × 3 samples would be 6 calls independently; batched is just 3.
+    assert calls["n"] == 3
+    assert all(s.n_samples == 3 for s in scores)
+    assert all(len(s.samples) == 3 for s in scores)
+
+
+def test_run_judges_batch_parse_error_fails_all(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "v")
+    monkeypatch.setattr(
+        runner_mod.subprocess, "run", lambda *a, **k: _FakeProc(stdout="not json", returncode=0)
+    )
+    scores = run_judges_batch(_evs(), "conv", _judge_config(tmp_path), "tok")
+    # Failure blast radius: one bad response fails every criterion.
+    assert all(s.score is None for s in scores)
+    assert all(s.passed is False for s in scores)
+    assert all(s.reason == "parse_error" for s in scores)
+
+
+def test_run_judges_batch_missing_key_fails_only_that_judge(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "v")
+    monkeypatch.setattr(
+        runner_mod.subprocess,
+        "run",
+        lambda *a, **k: _FakeProc(
+            stdout=json.dumps({"thoroughness": {"score": 9, "reason": "great"}})
+        ),
+    )
+    scores = run_judges_batch(_evs(), "conv", _judge_config(tmp_path), "tok")
+    by_name = {s.name: s for s in scores}
+    assert by_name["thoroughness"].score == 9
+    assert by_name["actionability"].score is None
+    assert by_name["actionability"].meta["outcome"] == "parse_error"
+
+
+def test_run_judges_batch_single_evaluator_delegates(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "v")
+    monkeypatch.setattr(
+        runner_mod, "_run_judge_once", lambda *a, **k: (5, "fine", "ok", {"returncode": 0})
+    )
+    scores = run_judges_batch([_ev()], "conv", _judge_config(tmp_path), "tok")
+    assert len(scores) == 1
+    assert scores[0].score == 5
+    assert scores[0].name == "quality"
+
+
+def test_run_judges_batch_invalid_score_flags_one_judge(tmp_path, monkeypatch):
+    from eval import runner as runner_mod
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(runner_mod, "host_copilot_version", lambda: "v")
+    monkeypatch.setattr(
+        runner_mod.subprocess,
+        "run",
+        lambda *a, **k: _FakeProc(
+            stdout=json.dumps(
+                {
+                    "thoroughness": {"score": "abc", "reason": "bad"},
+                    "actionability": {"score": 7, "reason": "ok"},
+                }
+            )
+        ),
+    )
+    scores = run_judges_batch(_evs(), "conv", _judge_config(tmp_path), "tok")
+    by_name = {s.name: s for s in scores}
+    assert by_name["thoroughness"].score is None
+    assert by_name["thoroughness"].meta["outcome"] == "invalid_score"
+    assert by_name["actionability"].score == 7
 
 
 def test_score_to_dict_judge_includes_metadata():
