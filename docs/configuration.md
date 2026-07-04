@@ -196,6 +196,10 @@ runner:
   trace_fetch_retries: 5         # analyze: attempts to wait for trace ingestion
   trace_fetch_retry_delay: 2.0   # analyze: seconds between ingestion retries
   backend: docker                # Agent execution backend (docker is the only built-in; see Extensibility)
+  resources:                    # Optional: Docker container resource limits (reduces metric noise)
+    cpus: "2.0"                  # --cpus: number of CPUs available to the container
+    memory: "4g"                 # --memory: memory limit (b|k|m|g units, or raw bytes)
+    pids_limit: 100               # --pids-limit: max processes in the container
 
 variants:
   - name: baseline
@@ -627,6 +631,20 @@ runner:
 ## Health Check
 
 A script that validates the environment is ready before running Copilot. If it exits non-zero, the run is skipped with `status: setup_failed`.
+
+## Container Resource Limits
+
+`runner.resources` maps to Docker's `--cpus` / `--memory` / `--pids-limit` flags on the `docker run` command used for every eval run. Without limits, containers freely compete for host CPU/memory/process resources, which introduces noise into duration and other runtime metrics — especially under `parallel: full`. All fields are optional and default to unset (no limit, i.e. current behavior before this option existed).
+
+```yaml
+runner:
+  resources:
+    cpus: "2.0"      # Number of CPUs (docker --cpus); positive number as a string
+    memory: "4g"     # Memory limit (docker --memory); <number>[b|k|m|g], case-insensitive
+    pids_limit: 100  # Max processes/threads in the container (docker --pids-limit); positive integer
+```
+
+Invalid values (e.g. `cpus: "abc"`, `memory: "4gb"`, `pids_limit: -1`) are rejected at config-load time with a `ConfigError`, so `copilot-eval validate` catches them before any container starts.
 
 ## Parallel Modes
 
