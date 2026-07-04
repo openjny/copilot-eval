@@ -133,6 +133,18 @@ def test_load_callable_missing_colon_raises():
         _load_callable("no_colon_here")
 
 
+def test_load_callable_empty_module_raises():
+    """Regression test: `:func` used to crash with an unwrapped ValueError
+    from importlib.import_module('') instead of a clear PythonEvalError."""
+    with pytest.raises(PythonEvalError, match="module:func"):
+        _load_callable(":func")
+
+
+def test_load_callable_empty_func_raises():
+    with pytest.raises(PythonEvalError, match="module:func"):
+        _load_callable("eval.config:")
+
+
 def test_load_callable_missing_module_raises():
     with pytest.raises(PythonEvalError, match="Failed to import module"):
         _load_callable("totally_nonexistent_module_xyz:func")
@@ -182,6 +194,23 @@ def test_config_requires_module_colon_func_format(tmp_path):
                         "name": "t1",
                         "prompt": "p",
                         "evaluators": [{"name": "e", "type": "python", "script": "no_colon_here"}],
+                    }
+                ]
+            },
+        )
+
+
+@pytest.mark.parametrize("bad_script", [":func", "module:", ":"])
+def test_config_rejects_empty_module_or_func_part(tmp_path, bad_script):
+    with pytest.raises(ConfigError, match="module:func"):
+        load_inline(
+            tmp_path,
+            {
+                "tasks": [
+                    {
+                        "name": "t1",
+                        "prompt": "p",
+                        "evaluators": [{"name": "e", "type": "python", "script": bad_script}],
                     }
                 ]
             },

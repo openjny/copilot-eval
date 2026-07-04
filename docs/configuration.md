@@ -282,7 +282,7 @@ Each evaluator requires a unique `name` within its task and a valid `type`. The 
 
 ### Python Evaluator
 
-The `python` evaluator calls a function in-process instead of shelling out to a script, which is useful when you want direct access to the run's structured data (task/variant, or `RunMetrics`/conversation when scored during `analyze`) instead of just an exit code:
+The `python` evaluator calls a function in-process instead of shelling out to a script, which is useful when you want direct access to the run's structured data (`Task`/`Variant` objects, log/work directories) instead of just an exit code:
 
 ```yaml
 evaluators:
@@ -291,10 +291,10 @@ evaluators:
     script: my_package.evaluators:check_output   # module:func
 ```
 
-- `script` must be a `module:func` reference resolvable via `importlib.import_module` — the module must be importable from wherever `copilot-eval` runs (e.g. installed in the same environment, or on `PYTHONPATH`).
-- The function is called as `func(context: EvalContext) -> EvalScore | None`, where `EvalContext` (`eval/protocols.py`) carries `task`/`variant`/`log_file`/`work_dir` (available inline during `run`) plus `conversation`/`output_files_text`/`metrics` (available during `analyze`, like judge/metric evaluators).
+- `script` must be a `module:func` reference resolvable via `importlib.import_module` — the module must be importable from wherever `copilot-eval` runs (e.g. installed in the same environment, or on `PYTHONPATH`). Both the module and function name must be non-empty (`module:func`, not `:func` or `module:`).
+- The function is called as `func(context: EvalContext) -> EvalScore | None`.
+- Like `script`/`contains`/`regex`, `python` runs **inline**, right after each task's container run (it is not deferred to `analyze`). Only the inline fields of `EvalContext` (`eval/protocols.py`) are populated: `task`, `variant`, `log_file`, `work_dir`, `token`. `conversation`, `output_files_text`, and `metrics` are always `None` for `python` evaluators — those are only filled in for `judge`/`metric` evaluators, which run later during `analyze` against the captured transcript/traces.
 - Returning `None` means "not applicable to this context" (mirrors `script`/`contains`/`regex`); returning anything other than `EvalScore | None` raises a clear error instead of silently mis-scoring.
-- Runs inline during `run` (like `script`/`contains`/`regex`), not deferred to `analyze`.
 
 ### Metric Evaluator
 

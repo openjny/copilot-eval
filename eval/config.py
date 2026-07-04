@@ -473,10 +473,12 @@ def _parse_evaluators(raw_list: list[Any] | None, context: str = "") -> list[Eva
                     f"Evaluator '{name}'{where} (type=python) requires a 'script' in "
                     f"'module:func' format."
                 )
-            if ":" not in str(script):
+            script_str = str(script)
+            module_part, _, func_part = script_str.rpartition(":")
+            if not module_part or not func_part:
                 raise ConfigError(
                     f"Evaluator '{name}'{where} (type=python) 'script' must be in "
-                    f"'module:func' format, got '{script}'."
+                    f"'module:func' format with both parts non-empty, got '{script}'."
                 )
         if etype in ("contains", "regex") and not value:
             raise ConfigError(f"Evaluator '{name}'{where} (type={etype}) requires a 'value'.")
