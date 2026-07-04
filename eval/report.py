@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
@@ -19,6 +20,18 @@ from eval.trace import RunMetrics
 # Below this many (paired) samples, A/B deltas are treated as low-confidence: a
 # % delta at n=3 is mostly noise. Used to gate "insufficient data" warnings.
 MIN_RELIABLE_N = 5
+
+# Recommended minimum paired epochs for a CI gate (stricter than MIN_RELIABLE_N,
+# which is the floor for an "exploratory" look at the data).
+CI_GATE_RECOMMENDED_N = 10
+
+# Cohen's d effect sizes (small / medium / large) power is reported for. Medium
+# (0.5) is the headline number surfaced in the low-power banner.
+_EFFECT_SIZES = (0.2, 0.5, 0.8)
+_MEDIUM_EFFECT = 0.5
+
+# Two-sided z-critical value for alpha=0.05, used by the power approximation.
+_Z_ALPHA_TWO_SIDED = 1.959963985
 
 # Bootstrap settings for the paired-delta confidence interval. The seed keeps
 # report output deterministic across runs (same inputs -> same CI).
@@ -80,7 +93,9 @@ class Report:
     # Success/failure reliability table (empty when no manifest is available).
     reliability: list[ReliabilityRow] = field(default_factory=list)
     # Data-sufficiency / significance caveats shown at the top of the report.
-    warnings: list[str] = field(default_factory=list)
+    # Each entry is a structured warning: {"type": ..., "message": ..., ...}.
+    # "type" is one of "small_sample_size", "no_paired_epochs", "low_power".
+    warnings: list[dict[str, Any]] = field(default_factory=list)
 
 
 # Each entry is (label, RunMetrics attribute, decimal precision). Precision drives
@@ -403,25 +418,91 @@ def build_report(
     return reports
 
 
+def _norm_cdf(x: float) -> float:
+    """Standard normal CDF via math.erf (stdlib-only, no scipy dependency)."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _approx_power(n: int, effect_size: float, alpha: float = 0.05) -> float:
+    """Approximate statistical power of a paired two-sided test at sample size n.
+
+    This is a dependency-free stand-in for ``scipy.stats.ttest_rel`` power
+    analysis: the noncentrality parameter for a paired t-test is
+    ``delta = effect_size * sqrt(n)``, and its normal approximation gives
+    ``power ~= Phi(delta - z_alpha/2) + Phi(-delta - z_alpha/2)``. Because the
+    t-distribution has heavier tails than the normal at small n, this tends to
+    *overestimate* true power a bit for tiny samples -- fine for a "should I
+    trust this delta" warning, but not a substitute for a real power analysis
+    (e.g. statsmodels' ``TTestPower``) when precision matters.
+    """
+    if n < 2:
+        return 0.0
+    delta = effect_size * math.sqrt(n)
+    z = _Z_ALPHA_TWO_SIDED
+    power = _norm_cdf(delta - z) + _norm_cdf(-delta - z)
+    return max(0.0, min(1.0, power))
+
+
+def _power_table(n: int) -> dict[str, float]:
+    """Power at each tracked Cohen's d, keyed by string (JSON-friendly)."""
+    return {str(d): _approx_power(n, d) for d in _EFFECT_SIZES}
+
+
+def _low_power_banner(paired_n: int, power: dict[str, float]) -> str:
+    """Multi-line banner explaining why N is too low to trust conclusions."""
+    medium = power[str(_MEDIUM_EFFECT)]
+    miss_pct = (1 - medium) * 100
+    return "\n".join(
+        [
+            f"\u26a0\ufe0f  LOW STATISTICAL POWER: N={paired_n} paired epochs. Minimum "
+            f"recommended: N={MIN_RELIABLE_N} for exploratory, N={CI_GATE_RECOMMENDED_N}+ "
+            "for CI gates.",
+            f"    Current power at d={_MEDIUM_EFFECT} (medium effect): {medium * 100:.0f}% "
+            f"\u2014 {miss_pct:.0f}% chance of missing a real difference.",
+            f"    Run with --epochs {CI_GATE_RECOMMENDED_N} for reliable conclusions.",
+        ]
+    )
+
+
 def _build_warnings(
     variants: list[str], variant_n: dict[str, int], paired_n: int, aggregate: str
-) -> list[str]:
+) -> list[dict[str, Any]]:
     """Flag insufficient-data conditions so small deltas aren't over-read."""
-    warnings: list[str] = []
+    warnings: list[dict[str, Any]] = []
     low_variants = [v for v in variants if variant_n.get(v, 0) < MIN_RELIABLE_N]
     if low_variants:
         detail = ", ".join(f"{v}={variant_n.get(v, 0)}" for v in low_variants)
         warnings.append(
-            f"Small sample size (n<{MIN_RELIABLE_N}): {detail}. "
-            "Treat deltas as observed, not statistically supported."
+            {
+                "type": "small_sample_size",
+                "message": (
+                    f"Small sample size (n<{MIN_RELIABLE_N}): {detail}. "
+                    "Treat deltas as observed, not statistically supported."
+                ),
+                "variant_n": {v: variant_n.get(v, 0) for v in low_variants},
+                "min_reliable_n": MIN_RELIABLE_N,
+            }
         )
-    if aggregate == "paired" and len(variants) == 2 and 0 < paired_n < MIN_RELIABLE_N:
-        warnings.append(
-            f"Only {paired_n} paired epoch(s) (<{MIN_RELIABLE_N}); paired deltas "
-            "and confidence intervals are low-confidence."
-        )
-    if aggregate == "paired" and len(variants) == 2 and paired_n == 0:
-        warnings.append("No shared epochs between variants; paired delta unavailable.")
+    if aggregate == "paired" and len(variants) == 2:
+        if paired_n == 0:
+            warnings.append(
+                {
+                    "type": "no_paired_epochs",
+                    "message": "No shared epochs between variants; paired delta unavailable.",
+                }
+            )
+        elif paired_n < MIN_RELIABLE_N:
+            power = _power_table(paired_n)
+            warnings.append(
+                {
+                    "type": "low_power",
+                    "message": _low_power_banner(paired_n, power),
+                    "paired_n": paired_n,
+                    "min_reliable_n": MIN_RELIABLE_N,
+                    "ci_gate_recommended_n": CI_GATE_RECOMMENDED_N,
+                    "power": power,
+                }
+            )
     return warnings
 
 
@@ -578,7 +659,11 @@ def format_table(reports: list[Report]) -> str:
             sample_line += f"; paired epochs={report.paired_n}"
         lines.append("\n" + sample_line)
         for w in report.warnings:
-            lines.append(f"  ! {w}")
+            if w["type"] == "low_power":
+                lines.append("")
+                lines.extend(w["message"].split("\n"))
+            else:
+                lines.append(f"  ! {w['message']}")
 
         # Reliability (success/failure rates as first-class metrics)
         if report.reliability:
@@ -724,7 +809,11 @@ def format_markdown(reports: list[Report]) -> str:
             sample_line += f"; paired epochs={report.paired_n}"
         lines.append(sample_line)
         for w in report.warnings:
-            lines.append(f"\n> ⚠️ {w}")
+            if w["type"] == "low_power":
+                lines.append("")
+                lines.extend(f"> {ln}" for ln in w["message"].split("\n"))
+            else:
+                lines.append(f"\n> ⚠️ {w['message']}")
 
         # Reliability (success/failure rates as first-class metrics)
         if report.reliability:

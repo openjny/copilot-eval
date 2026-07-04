@@ -4,7 +4,9 @@
 
 > ⚠️ Small sample size (n<5): a=3, b=2. Treat deltas as observed, not statistically supported.
 
-> ⚠️ Only 2 paired epoch(s) (<5); paired deltas and confidence intervals are low-confidence.
+> ⚠️  LOW STATISTICAL POWER: N=2 paired epochs. Minimum recommended: N=5 for exploratory, N=10+ for CI gates.
+>     Current power at d=0.5 (medium effect): 11% — 89% chance of missing a real difference.
+>     Run with --epochs 10 for reliable conclusions.
 
 ### Reliability
 
