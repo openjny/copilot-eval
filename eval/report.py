@@ -6,6 +6,7 @@ import json
 import math
 import os
 import random
+import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from collections.abc import Mapping
@@ -15,6 +16,8 @@ from statistics import mean as _mean
 from statistics import median
 from statistics import stdev as _stdev
 from typing import Any
+
+import click
 
 from eval.naming import parse_slug
 from eval.protocols import RunStatus
@@ -1280,7 +1283,69 @@ def _legend_marker_meaning(reports: list[Report]) -> tuple[str, str, str]:
     )
 
 
-def format_table(reports: list[Report]) -> str:
+def _stdout_supports_color(stream: Any = None) -> bool:
+    """Whether ANSI color should be emitted for ``stream`` (defaults to stdout).
+
+    Honors the ``NO_COLOR`` convention, ``TERM=dumb``, and non-TTY (piped /
+    redirected) output so escape codes never leak into files, pipes, or CI
+    logs. This keeps the colored path opt-in to interactive terminals only.
+
+    Per the no-color.org spec, ``NO_COLOR`` disables color only when *present
+    and non-empty* — so ``NO_COLOR=""`` intentionally does not disable color
+    (the falsy ``.get()`` check below is deliberate, not a bug).
+    """
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("TERM") == "dumb":
+        return False
+    if stream is None:
+        stream = sys.stdout
+    isatty = getattr(stream, "isatty", None)
+    return bool(isatty and isatty())
+
+
+def _colorize_delta(
+    text: str, row: SummaryRow, *, lower_is_better: bool, enabled: bool
+) -> str:
+    """Wrap an already-justified Delta cell in ANSI color when ``enabled``.
+
+    Significant improvements render green + bold, significant regressions
+    red + bold, and non-significant deltas dim. ``low-n`` / uncomputed deltas
+    (``significant is None``) are left uncolored. Direction is metric-aware:
+    for lower-is-better metrics (duration, cost, tokens…) a decrease is an
+    improvement; for higher-is-better metrics (judge scores, pass@k) an
+    increase is.
+
+    Direction is read from the paired-delta CI (the same signal the issue's
+    spec names: "CI excludes zero, direction positive/negative"), so a
+    tiny-but-significant delta that rounds to ``+0.0%`` in the printed string
+    is still colored by its true sign.
+    """
+    if not enabled or not text.strip():
+        return text
+    if row.significant is True:
+        # A significant delta has a CI that excludes 0, so both bounds share a
+        # sign. Derive the direction from whichever bound proves it; if neither
+        # does (should be impossible for significant rows), leave it uncolored
+        # rather than guess a color.
+        if row.ci_high is not None and row.ci_high < 0:
+            decreased = True
+        elif row.ci_low is not None and row.ci_low > 0:
+            decreased = False
+        else:
+            return text
+        improved = decreased if lower_is_better else not decreased
+        return click.style(text, fg="green" if improved else "red", bold=True)
+    if row.significant is False:
+        return click.style(text, dim=True)
+    return text
+
+
+def format_table(reports: list[Report], *, color: bool | None = None) -> str:
+    # `color=None` auto-detects an interactive terminal; tests and callers can
+    # force it on/off. Auto-detection resolves to False under pytest / pipes,
+    # so the default (uncolored) output stays byte-stable for golden tests.
+    color_enabled = _stdout_supports_color() if color is None else color
     sections: list[str] = []
     for report in reports:
         lines: list[str] = []
@@ -1341,19 +1406,28 @@ def format_table(reports: list[Report]) -> str:
         lines.append("-" * (24 + 22 * len(report.variants) + 26))
         for row in report.summary:
             cols = "".join(f"{_fmt_value(row, v):>22}" for v in report.variants)
-            lines.append(f"{row.metric:<24} {cols} {_fmt_delta(row):>26}")
+            delta = _colorize_delta(
+                f"{_fmt_delta(row):>26}", row, lower_is_better=True, enabled=color_enabled
+            )
+            lines.append(f"{row.metric:<24} {cols} {delta}")
         if report.judge_scores:
             lines.append(f"\n{'Judge':<24} {hdr} {'Delta':>26}")
             lines.append("-" * (24 + 22 * len(report.variants) + 26))
             for row in report.judge_scores:
                 cols = "".join(f"{_fmt_value(row, v):>22}" for v in report.variants)
-                lines.append(f"{row.metric:<24} {cols} {_fmt_delta(row):>26}")
+                delta = _colorize_delta(
+                    f"{_fmt_delta(row):>26}", row, lower_is_better=False, enabled=color_enabled
+                )
+                lines.append(f"{row.metric:<24} {cols} {delta}")
         if report.pass_k:
             lines.append(f"\n{'Pass@k / Pass^k':<24} {hdr} {'Delta':>26}")
             lines.append("-" * (24 + 22 * len(report.variants) + 26))
             for row in report.pass_k:
                 cols = "".join(f"{_fmt_pass_k_value(row, v):>22}" for v in report.variants)
-                lines.append(f"{row.metric:<24} {cols} {_fmt_pass_k_delta(row):>26}")
+                delta = _colorize_delta(
+                    f"{_fmt_pass_k_delta(row):>26}", row, lower_is_better=False, enabled=color_enabled
+                )
+                lines.append(f"{row.metric:<24} {cols} {delta}")
 
         rt = report.judge_runtime
         if rt:

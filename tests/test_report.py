@@ -1164,3 +1164,184 @@ def test_format_markdown_compact_stays_within_github_comment_limit():
 
     out = format_markdown_compact(many_reports)
     assert len(out) <= PR_COMMENT_CHAR_LIMIT
+
+
+# --- Colored terminal output for significant deltas (issue #91) ---
+
+
+def _duration_delta_line(table: str) -> str:
+    return next(ln for ln in table.splitlines() if ln.startswith("Duration (s)"))
+
+
+def test_format_table_colors_significant_improvement_green():
+
+    from eval.report import format_table
+
+    reports = build_report(
+        _paired_results("t_improve", 10, base=20.0, delta_per_epoch=-5.0),
+        variant_order=["baseline", "candidate"],
+        aggregate="paired",
+    )
+    row = next(r for r in reports[0].summary if r.metric == "Duration (s)")
+    assert row.significant is True  # guard: the fixture is genuinely significant
+
+    out = format_table(reports, color=True)
+    line = _duration_delta_line(out)
+    # Lower-is-better metric going down -> green + bold.
+    assert "\x1b[32m" in line and "\x1b[1m" in line
+    assert "\x1b[0m" in line  # reset present
+
+
+def test_format_table_colors_significant_regression_red():
+
+    from eval.report import format_table
+
+    reports = build_report(
+        _paired_results("t_regress", 10, base=20.0, delta_per_epoch=5.0),
+        variant_order=["baseline", "candidate"],
+        aggregate="paired",
+    )
+    out = format_table(reports, color=True)
+    line = _duration_delta_line(out)
+    # Lower-is-better metric going up -> red + bold.
+    assert "\x1b[31m" in line and "\x1b[1m" in line
+
+
+def test_format_table_dims_non_significant_delta():
+
+    from eval.report import format_table
+
+    # 6 paired epochs where the sign of the delta flips epoch to epoch, so the
+    # bootstrap CI straddles zero -> not significant (ns), but still testable
+    # (>= MIN_RELIABLE_N paired samples, so significant is False, not None).
+    diffs = [1.0, -1.2, 0.8, -0.9, 1.1, -1.0]
+    results = []
+    for i, d in enumerate(diffs, start=1):
+        results.append(make_metrics("t1", "a", str(i), duration=10.0))
+        results.append(make_metrics("t1", "b", str(i), duration=10.0 + d))
+    reports = build_report(results, variant_order=["a", "b"], aggregate="paired")
+    row = next(r for r in reports[0].summary if r.metric == "Duration (s)")
+    assert row.significant is False
+
+    out = format_table(reports, color=True)
+    line = _duration_delta_line(out)
+    assert "\x1b[2m" in line  # dim escape present
+
+
+def test_format_table_no_color_when_disabled():
+    from eval.report import format_table
+
+    reports = build_report(
+        _paired_results("t_improve", 10, base=20.0, delta_per_epoch=-5.0),
+        variant_order=["baseline", "candidate"],
+        aggregate="paired",
+    )
+    out = format_table(reports, color=False)
+    assert "\x1b[" not in out  # no ANSI escape codes at all
+
+
+def test_format_table_auto_detect_disables_color_when_piped():
+    from eval.report import format_table
+
+    # Default (color=None) auto-detects; pytest captures stdout (not a TTY),
+    # so no color is emitted even without passing color explicitly.
+    reports = build_report(
+        _paired_results("t_improve", 10, base=20.0, delta_per_epoch=-5.0),
+        variant_order=["baseline", "candidate"],
+        aggregate="paired",
+    )
+    assert "\x1b[" not in format_table(reports)
+
+
+def test_format_table_colors_higher_is_better_metric_direction():
+    # Judge scores are higher-is-better: a significant *increase* is an
+    # improvement (green), a significant *decrease* is a regression (red).
+    # This covers the `lower_is_better=False` branch of _colorize_delta, which
+    # the summary-metric tests above (lower-is-better) never exercise.
+    from eval.report import Report, SummaryRow, format_table
+
+    def _report_with_judge(row: SummaryRow) -> Report:
+        return Report(
+            task="t",
+            runs=[],
+            variants=["baseline", "candidate"],
+            summary=[],
+            tool_patterns={},
+            judge_scores=[row],
+        )
+
+    improved = SummaryRow(
+        metric="thoroughness",
+        values={"baseline": 6.9, "candidate": 8.1},
+        delta="+17.4%",
+        n={"baseline": 5, "candidate": 5},
+        paired_n=5,
+        ci_low=0.8,
+        ci_high=1.6,  # CI entirely > 0 -> score increased
+        significant=True,
+    )
+    out = format_table([_report_with_judge(improved)], color=True)
+    line = next(ln for ln in out.splitlines() if ln.startswith("thoroughness"))
+    assert "\x1b[32m" in line and "\x1b[1m" in line  # green + bold
+
+    regressed = SummaryRow(
+        metric="thoroughness",
+        values={"baseline": 8.1, "candidate": 6.9},
+        delta="-14.8%",
+        n={"baseline": 5, "candidate": 5},
+        paired_n=5,
+        ci_low=-1.6,
+        ci_high=-0.8,  # CI entirely < 0 -> score decreased
+        significant=True,
+    )
+    out = format_table([_report_with_judge(regressed)], color=True)
+    line = next(ln for ln in out.splitlines() if ln.startswith("thoroughness"))
+    assert "\x1b[31m" in line and "\x1b[1m" in line  # red + bold
+
+
+def test_stdout_supports_color_empty_no_color_does_not_disable(monkeypatch):
+    # Per the no-color.org spec, NO_COLOR disables color only when present AND
+    # non-empty. An empty value must NOT disable it. Lock that behavior in.
+    from eval.report import _stdout_supports_color
+
+    class _Tty:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setenv("TERM", "xterm")
+    monkeypatch.setenv("NO_COLOR", "")
+    assert _stdout_supports_color(_Tty()) is True
+
+
+def test_stdout_supports_color_honors_no_color(monkeypatch):
+    from eval.report import _stdout_supports_color
+
+    class _Tty:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm")
+    assert _stdout_supports_color(_Tty()) is True
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert _stdout_supports_color(_Tty()) is False
+
+
+def test_stdout_supports_color_honors_term_dumb_and_non_tty(monkeypatch):
+    from eval.report import _stdout_supports_color
+
+    class _Tty:
+        def isatty(self) -> bool:
+            return True
+
+    class _Pipe:
+        def isatty(self) -> bool:
+            return False
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "dumb")
+    assert _stdout_supports_color(_Tty()) is False
+
+    monkeypatch.setenv("TERM", "xterm")
+    assert _stdout_supports_color(_Pipe()) is False
