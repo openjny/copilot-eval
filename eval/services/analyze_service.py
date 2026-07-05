@@ -133,7 +133,7 @@ def run_analysis(
     # needed, so gating still runs when `run` and `analyze` are separate CI jobs
     # (or a non-file collector) and the results dir wasn't pre-created. A skipped
     # gate here would silently exit 0 and defeat the CI gate.
-    failed_gates = _run_metric_evaluators(config, traces, results_dir)
+    failed_gates = _run_metric_evaluators(config, traces, results_dir, manifest_runs)
     if results_dir.exists():
         _report_judge_reliability(results_dir)
 

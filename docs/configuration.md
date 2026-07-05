@@ -384,10 +384,13 @@ evaluators:
   summary of the failed gates), so a cost/latency/token regression can block a merge.
   Tasks with no metric evaluators are unaffected and still exit `0`.
 - **Fails closed:** a metric value that can't be derived scores `null` and counts as a
-  failure (never a silent pass). This includes a trace that yields no metrics at all for
-  a metric-gated task. Note that an absent `github.copilot.cost` tag currently parses to
-  `0.0` (a real float), so `cost` itself does not reach the `null` path from real
-  telemetry today.
+  failure (never a silent pass). This covers three cases: (1) a trace that yields no
+  metrics at all for a metric-gated task; (2) an absent or `"?"` `github.copilot.cost`
+  tag, which is rendered as `0.0` for reporting but treated as **unavailable** for a
+  `cost` gate (so a `cost < X` budget can't silently pass on missing cost telemetry);
+  and (3) a metric-gated run recorded in the run manifest that produced no usable trace
+  at all (dropped or timed-out telemetry) — reconciled against the manifest so its gate
+  fails rather than being silently skipped.
 
 Assertable metrics (fields of `RunMetrics`):
 

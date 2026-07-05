@@ -108,14 +108,37 @@ def test_extract_metrics_parses_cost_as_float():
 
 
 def test_extract_metrics_cost_falls_back_when_missing_or_sentinel():
-    # Tag absent entirely
+    # Tag absent entirely: cost renders 0.0 (for #58) but is flagged unavailable.
     m_absent = extract_metrics(Trace(trace_id="x", spans=[_root()], resource_tags={}))
     assert m_absent is not None and m_absent.cost == 0.0
-    # Non-numeric "?" sentinel
+    assert m_absent.cost_available is False
+    # Non-numeric "?" sentinel: same — 0.0 for rendering, unavailable for gating.
     m_sentinel = extract_metrics(
         Trace(trace_id="y", spans=[_root_with_cost("?")], resource_tags={})
     )
     assert m_sentinel is not None and m_sentinel.cost == 0.0
+    assert m_sentinel.cost_available is False
+
+
+def test_cost_metric_gate_none_when_tag_absent_or_sentinel():
+    """A `cost` gate must fail CLOSED (metric_value → None) when the cost tag is
+    absent or the "?" sentinel, instead of silently passing on a coerced 0.0."""
+    from eval.trace import metric_value
+
+    # Genuine numeric cost (even 0.0) is available for gating.
+    m_zero = extract_metrics(Trace(trace_id="a", spans=[_root_with_cost(0.0)], resource_tags={}))
+    assert m_zero is not None and m_zero.cost_available is True
+    assert metric_value(m_zero, "cost") == 0.0
+    # Absent tag → gating value is None (→ failed gate), NOT 0.0.
+    m_absent = extract_metrics(Trace(trace_id="b", spans=[_root()], resource_tags={}))
+    assert m_absent is not None
+    assert metric_value(m_absent, "cost") is None
+    # "?" sentinel on a partial trace → None as well.
+    m_sentinel = extract_metrics(
+        Trace(trace_id="c", spans=[_root_with_cost("?")], resource_tags={})
+    )
+    assert m_sentinel is not None
+    assert metric_value(m_sentinel, "cost") is None
 
 
 def test_extract_conversation_orders_by_span_id():

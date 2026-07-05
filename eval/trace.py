@@ -59,6 +59,12 @@ class RunMetrics:
     total_cache_tokens: int
     model: str
     cost: float
+    # Whether the `github.copilot.cost` tag was actually present and numeric in
+    # the trace. #58 keeps `cost` a non-nullable float (rendered as 0.0 when the
+    # tag is absent or the "?" sentinel appears on a partial trace); this flag
+    # lets a `cost` metric gate fail CLOSED — treat cost as unavailable (→ None)
+    # rather than silently passing a `cost < X` budget on missing telemetry.
+    cost_available: bool = True
     # Reporting fixture label ("" for single-fixture tasks). Distinguishes runs
     # along the input-coverage axis when a task declares multiple fixtures.
     fixture: str = ""
@@ -75,9 +81,10 @@ def _parse_float(value: object) -> float | None:
 # Numeric RunMetrics fields a `metric` evaluator can assert on. Maps the public
 # metric name (used in eval-config.yaml) to how its numeric value is derived from
 # a RunMetrics instance. `duration_seconds` is an alias for `duration` and
-# `total_tokens` is derived (input + output). `cost` is coerced defensively via
-# `_parse_float`, which yields None for a non-numeric value so callers treat it as
-# unavailable rather than silently passing.
+# `total_tokens` is derived (input + output). `cost` returns None when the
+# `github.copilot.cost` tag was absent or the "?" sentinel (`cost_available`
+# False), so a `cost` budget gate fails CLOSED instead of silently passing on a
+# run whose cost telemetry is missing.
 _METRIC_ACCESSORS: dict[str, Callable[[RunMetrics], float | None]] = {
     "duration": lambda m: float(m.duration),
     "duration_seconds": lambda m: float(m.duration),
@@ -88,7 +95,7 @@ _METRIC_ACCESSORS: dict[str, Callable[[RunMetrics], float | None]] = {
     "total_output_tokens": lambda m: float(m.total_output_tokens),
     "total_cache_tokens": lambda m: float(m.total_cache_tokens),
     "total_tokens": lambda m: float(m.total_input_tokens + m.total_output_tokens),
-    "cost": lambda m: _parse_float(m.cost),
+    "cost": lambda m: _parse_float(m.cost) if m.cost_available else None,
 }
 
 # Assertable metric names, exposed for config validation.
@@ -161,16 +168,20 @@ def extract_metrics(trace: Trace) -> RunMetrics | None:
         v = span.tags.get(key, 0)
         return int(v) if v else 0
 
-    def float_tag(span: Span, key: str) -> float:
-        # Cost may be absent or the "?" sentinel on partial traces; fall back to 0.0
-        # so it flows through the numeric aggregation path like every other metric.
+    def float_tag(span: Span, key: str) -> tuple[float, bool]:
+        # Returns (value, available). Cost may be absent or the "?" sentinel on
+        # partial traces; report 0.0 (for #58's non-nullable-float rendering) but
+        # flag it unavailable so a `cost` metric gate fails CLOSED rather than
+        # silently passing a budget on missing telemetry.
         v = span.tags.get(key)
         if v is None:
-            return 0.0
+            return 0.0, False
         try:
-            return float(v)
+            return float(v), True
         except (TypeError, ValueError):
-            return 0.0
+            return 0.0, False
+
+    cost_value, cost_available = float_tag(root, "github.copilot.cost")
 
     return RunMetrics(
         scenario=trace.resource_tags.get("eval.scenario", "?"),
@@ -187,7 +198,8 @@ def extract_metrics(trace: Trace) -> RunMetrics | None:
         total_output_tokens=sum(int_tag(c, "gen_ai.usage.output_tokens") for c in chats),
         total_cache_tokens=sum(int_tag(c, "gen_ai.usage.cache_read.input_tokens") for c in chats),
         model=str(root.tags.get("gen_ai.request.model", "?")),
-        cost=float_tag(root, "github.copilot.cost"),
+        cost=cost_value,
+        cost_available=cost_available,
         fixture=trace.resource_tags.get("eval.fixture", ""),
     )
 

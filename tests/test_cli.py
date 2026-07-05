@@ -368,6 +368,153 @@ def test_run_metric_evaluators_fails_closed_when_metrics_absent(tmp_path: Path):
     assert budget["passed"] is False
 
 
+def _metric_trace_no_cost():
+    """A metric trace whose root has NO `github.copilot.cost` tag.
+
+    Drives the real `extract_metrics` path where an absent cost tag must be
+    treated as unavailable for gating (not coerced to 0.0).
+    """
+    from eval.trace import Span, Trace
+
+    root = Span(
+        name="invoke_agent",
+        duration_s=42.0,
+        span_id="r",
+        parent_id=None,
+        tags={
+            "github.copilot.turn_count": 3,
+            "gen_ai.request.model": "m",
+        },
+    )
+    return Trace(
+        trace_id="tr",
+        spans=[root],
+        resource_tags={
+            "eval.scenario": "t",
+            "eval.variant": "v",
+            "eval.epoch": "0",
+            "eval.test_id": "abc",
+        },
+    )
+
+
+def test_run_metric_evaluators_cost_absent_fails_closed(tmp_path: Path):
+    """Case 1 (issue #64): an absent `github.copilot.cost` tag must make a
+    `cost < X` gate fail CLOSED via the real extract_metrics path — not silently
+    pass because cost was coerced to 0.0 (0.0 < 0.5)."""
+    from eval.config import Evaluator, Task
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    task = Task(
+        name="t",
+        prompt="p",
+        evaluators=[
+            Evaluator(name="budget", type="metric", metric="cost", op="<", threshold=0.5),
+        ],
+    )
+    config = Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[task],
+        variants=_variants("v"),
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+
+    failed = _run_metric_evaluators(config, [_metric_trace_no_cost()], results_dir)
+
+    assert len(failed) == 1
+    assert "budget" in failed[0]
+    assert "unavailable" in failed[0]
+
+    # The persisted score is null (not a passing 0 < 0.5), so the report reflects it.
+    scores = json.loads((results_dir / "t_v_epoch0.scores.json").read_text())
+    budget = next(s for s in scores if s["name"] == "budget")
+    assert budget["score"] is None
+    assert budget["passed"] is False
+
+
+def test_run_metric_evaluators_missing_telemetry_run_fails_closed(tmp_path: Path):
+    """Case 2 (issue #64): a metric-gated run recorded in the manifest that
+    produced no usable trace (telemetry entirely missing) must fail CLOSED rather
+    than be silently skipped."""
+    from eval.config import Evaluator, Task
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    task = Task(
+        name="t",
+        prompt="p",
+        evaluators=[
+            Evaluator(name="budget", type="metric", metric="cost", op="<", threshold=0.5),
+        ],
+    )
+    config = Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[task],
+        variants=_variants("v"),
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+
+    # Manifest records a metric-gated run, but no trace was ingested for it.
+    manifest_runs = [
+        {
+            "task": "t",
+            "variant": "v",
+            "epoch": 0,
+            "fixture": "",
+            "test_id": "gone",
+            "status": "success",
+        }
+    ]
+
+    failed = _run_metric_evaluators(config, [], results_dir, manifest_runs)
+
+    assert len(failed) == 1
+    assert "budget" in failed[0]
+    assert "telemetry missing" in failed[0]
+
+    # A null score is persisted so the report reflects the missing run.
+    scores = json.loads((results_dir / "t_v_epoch0.scores.json").read_text())
+    budget = next(s for s in scores if s["name"] == "budget")
+    assert budget["score"] is None
+    assert budget["passed"] is False
+
+
+def test_run_metric_evaluators_manifest_run_with_trace_not_double_counted(tmp_path: Path):
+    """A manifest run that DID produce a usable trace must be scored once (from the
+    trace) and not re-failed by the missing-telemetry manifest cross-reference."""
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    config = _metric_config(tmp_path, tmp_path)
+
+    manifest_runs = [
+        {
+            "task": "t",
+            "variant": "v",
+            "epoch": 0,
+            "fixture": "",
+            "test_id": "abc",
+            "status": "success",
+        }
+    ]
+
+    # _metric_trace passes both gates (duration 42 < 60, cost 0.42 < 0.5).
+    failed = _run_metric_evaluators(config, [_metric_trace()], results_dir, manifest_runs)
+
+    assert failed == []
+    scores = {
+        s["name"]: s for s in json.loads((results_dir / "t_v_epoch0.scores.json").read_text())
+    }
+    assert scores["budget"]["passed"] is True
+    # Exactly one score per metric (no duplicate from the manifest pass).
+    all_scores = json.loads((results_dir / "t_v_epoch0.scores.json").read_text())
+    assert len([s for s in all_scores if s["name"] == "budget"]) == 1
+
+
 def _metric_trace_fx(fixture: str, duration: float):
     """A metric trace tagged with eval.fixture (multi-fixture input-coverage axis)."""
     from eval.trace import Span, Trace
