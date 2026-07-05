@@ -16,6 +16,9 @@ __pycache__/
 .venv/
 .mypy_cache/
 
+# Local scratch/debug scripts (real tests live in tests/)
+/test_*.py
+
 # Eval results (per-run data, regenerable)
 results/
 
