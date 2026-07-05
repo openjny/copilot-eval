@@ -61,6 +61,18 @@ def _base_inputs(**overrides) -> CacheKeyInputs:
         max_turns=10,
         timeout_seconds=300,
         collector="file",
+        output_format="text",
+        capture_content=True,
+        resources_cpus=None,
+        resources_memory=None,
+        resources_pids_limit=None,
+        run_script_sha256=None,
+        env_file_sha256=None,
+        evaluators_json="[]",
+        before_run_sha256=None,
+        after_run_sha256=None,
+        health_check_sha256=None,
+        hooks_on_failure="fail",
     )
     base.update(overrides)
     return CacheKeyInputs(**base)  # type: ignore[arg-type]
@@ -88,6 +100,18 @@ def test_compute_cache_key_is_deterministic():
         ("variant", "experimental"),
         ("task", "other-task"),
         ("fixture", "fixture-b"),
+        ("output_format", "json"),
+        ("capture_content", False),
+        ("resources_cpus", "2.0"),
+        ("resources_memory", "4g"),
+        ("resources_pids_limit", 100),
+        ("run_script_sha256", "runscript-hash"),
+        ("env_file_sha256", "envfile-hash"),
+        ("evaluators_json", '[{"type":"contains","value":"x"}]'),
+        ("before_run_sha256", "before-hash"),
+        ("after_run_sha256", "after-hash"),
+        ("health_check_sha256", "health-hash"),
+        ("hooks_on_failure", "warn"),
     ],
 )
 def test_any_input_change_busts_the_key(field, value):
@@ -103,6 +127,9 @@ def test_build_cache_key_inputs_captures_environment(tmp_path):
     config.runner.model = "gpt-5"
     config.runner.reasoning_effort = "high"
     config.runner.max_turns = 7
+    config.runner.output_format = "json"
+    config.runner.capture_content = False
+    config.runner.resources.cpus = "2.0"
     task = _task("t1")
     variant = Variant(name="experimental", model="variant-model")
 
@@ -122,12 +149,62 @@ def test_build_cache_key_inputs_captures_environment(tmp_path):
     assert inputs.max_turns == 7
     assert inputs.epoch == 2
     assert inputs.prompt == config.resolve_prompt(task, variant)
+    # Container/runtime inputs that aren't baked into the image digest.
+    assert inputs.output_format == "json"
+    assert inputs.capture_content is False
+    assert inputs.resources_cpus == "2.0"
+
+
+def test_run_script_content_is_part_of_the_key(tmp_path):
+    """A variant's run script is bind-mounted at run time, not baked into the
+    image, so editing it must bust the cache even though the path is unchanged."""
+    script = tmp_path / "setup.sh"
+    script.write_text("echo one")
+    config = _config(tmp_path)
+    config.tasks.append(_task("t1"))
+    variant = Variant(name="baseline", run_script="setup.sh")
+
+    def key_for() -> str:
+        return compute_cache_key(
+            build_cache_key_inputs(config, config.tasks[0], variant, 1, "", "sha256:x", "hh")
+        )
+
+    before = key_for()
+    script.write_text("echo two")  # same path, different content
+    assert key_for() != before
+
+
+def test_runtime_evaluator_change_busts_key_but_judge_does_not(tmp_path):
+    """Inline runtime evaluators (contains/regex/script) score at run time and
+    their verdicts are cached, so changing them must bust the key. Judge/metric
+    evaluators run in `analyze` off the reused trace, so they must NOT."""
+    from eval.config import Evaluator
+
+    config = _config(tmp_path)
+    task = _task("t1")
+    task.evaluators = [Evaluator(name="c", type="contains", value="foo")]
+    config.tasks.append(task)
+    variant = Variant(name="baseline")
+
+    def key_for() -> str:
+        return compute_cache_key(
+            build_cache_key_inputs(config, task, variant, 1, "", "sha256:x", "hh")
+        )
+
+    before = key_for()
+    task.evaluators[0].value = "bar"  # runtime evaluator changed
+    assert key_for() != before
+
+    # Adding a judge (deferred to analyze) must not change the run key.
+    after_runtime = key_for()
+    task.evaluators.append(Evaluator(name="j", type="judge", prompt="grade it"))
+    assert key_for() == after_runtime
 
 
 # --- RunCache store / lookup / materialize round-trip -------------------
 
 
-def _write_cell_artifacts(run_dir: Path, slug: str) -> None:
+def _write_cell_artifacts(run_dir: Path, slug: str, *, source_run_id: str = "run-a") -> None:
     (run_dir / f"{slug}.log").write_text("run log contents")
     (run_dir / f"{slug}.scores.json").write_text(
         json.dumps([{"name": "a", "type": "contains", "score": 1, "passed": True}])
@@ -137,7 +214,21 @@ def _write_cell_artifacts(run_dir: Path, slug: str) -> None:
     (out / "answer.txt").write_text("the answer")
     traces = run_dir / ".traces"
     traces.mkdir()
-    (traces / f"{slug}.jsonl").write_text('{"span": 1}\n')
+    # A realistic file-exporter span record carrying the *source* run id as an
+    # OTel resource tag — this is what materialize must re-home onto the new run.
+    span = {
+        "type": "span",
+        "traceId": "t0",
+        "spanId": "s0",
+        "name": "copilot.turn",
+        "resource": {
+            "attributes": {
+                "eval.run_id": source_run_id,
+                "eval.test_id": "original-test-id",
+            }
+        },
+    }
+    (traces / f"{slug}.jsonl").write_text(json.dumps(span) + "\n")
 
 
 def _success_result(run_dir: Path, slug: str) -> RunResult:
@@ -184,6 +275,52 @@ def test_store_and_materialize_round_trip(tmp_path):
     assert (run_b / ".traces" / f"{slug}.jsonl").exists()
     assert [s.name for s in result.scores] == ["a"]
 
+    # The reused trace was re-homed onto the new run id (its test_id preserved),
+    # so the file collector — which filters by run_id — will ingest it.
+    from eval.collectors.file_collector import parse_file_traces
+
+    traces = parse_file_traces(run_b / ".traces" / f"{slug}.jsonl")
+    assert len(traces) == 1
+    assert traces[0].resource_tags["eval.run_id"] == "run-b"
+    assert traces[0].resource_tags["eval.test_id"] == "original-test-id"
+
+
+def test_cached_trace_is_ingested_by_file_collector(tmp_path):
+    """End-to-end proof of the re-homing fix: a materialized cached cell's trace
+    survives the FileCollector's run-id filter under the *new* run id."""
+    from eval.collectors.file_collector import FileCollector
+    from eval.naming import run_slug
+    from eval.protocols import RunContext
+
+    run_a = tmp_path / "run-a"
+    run_a.mkdir()
+    slug = run_slug("t1", "baseline", 1, "")
+    _write_cell_artifacts(run_a, slug, source_run_id="run-a")
+
+    cache = RunCache(tmp_path / ".cache")
+    inputs = _base_inputs()
+    key = compute_cache_key(inputs)
+    cache.store(key, _success_result(run_a, slug), run_a, inputs)
+
+    run_b = tmp_path / "run-b"
+    run_b.mkdir()
+    cache.materialize(key, cache.lookup(key), run_b, run_id="run-b")
+
+    collected = FileCollector().collect(
+        RunContext(
+            run_id="run-b",
+            test_id="",
+            epoch=1,
+            run_dir=run_b,
+            task=_task("t1"),
+            variant=Variant(name="baseline"),
+            config=_config(tmp_path),
+        )
+    )
+    # Filtered by run_id="run-b"; the re-homed trace passes the filter.
+    assert len(collected) == 1
+    assert collected[0].resource_tags["eval.test_id"] == "original-test-id"
+
 
 def test_lookup_miss_returns_none(tmp_path):
     cache = RunCache(tmp_path / ".cache")
@@ -206,7 +343,42 @@ def test_store_skips_non_successful_cells(tmp_path):
     failed.exit_code = 1
     cache.store(key, failed, run_a, inputs)
 
-    assert cache.lookup(key) is None  # a failed cell is never cached
+    assert cache.lookup(key) is None  # an infra-failed cell is never cached
+
+
+def test_store_caches_completed_cell_even_when_eval_failed(tmp_path):
+    """A cell whose container ran to completion but whose evaluator failed is
+    still cached and reused one-for-one — caching only passing cells would bias
+    point estimates across repeated cached runs."""
+    from eval.naming import run_slug
+
+    run_a = tmp_path / "run-a"
+    run_a.mkdir()
+    slug = run_slug("t1", "baseline", 1, "")
+    _write_cell_artifacts(run_a, slug)
+
+    cache = RunCache(tmp_path / ".cache")
+    inputs = _base_inputs()
+    key = compute_cache_key(inputs)
+    completed_but_failed = _success_result(run_a, slug)
+    completed_but_failed.scores = [EvalScore(name="a", type="contains", score=0, passed=False)]
+    assert completed_but_failed.status == RunStatus.SUCCESS
+    assert completed_but_failed.passed is False
+
+    cache.store(key, completed_but_failed, run_a, inputs)
+    entry = cache.lookup(key)
+    assert entry is not None  # completed cells are cached regardless of pass/fail
+
+
+def test_lookup_ignores_malformed_entry(tmp_path):
+    """A corrupt/partial result.json is treated as a miss (re-execute), never a
+    crash."""
+    cache = RunCache(tmp_path / ".cache")
+    key = compute_cache_key(_base_inputs())
+    entry_dir = (tmp_path / ".cache") / key
+    entry_dir.mkdir(parents=True)
+    (entry_dir / "result.json").write_text('{"unexpected": "shape"}')  # missing keys
+    assert cache.lookup(key) is None
 
 
 # --- orchestrator run --cache end-to-end --------------------------------
@@ -328,6 +500,49 @@ def test_cache_disabled_by_default_never_reuses(tmp_path, monkeypatch):
     orchestrator.run_command(config, **_run_command_kwargs())
 
     # Default path: every cell runs both times (2 variants × 2 runs = 4).
+    assert len(calls) == 4
+
+
+def test_cache_skipped_when_image_digest_unresolved(tmp_path, monkeypatch):
+    """If the image digest can't be resolved, cells must NOT be cached or reused
+    — keying on the mutable tag could reuse a result from a different image."""
+    monkeypatch.setattr(orchestrator, "get_github_token", lambda: "tok")
+    monkeypatch.setattr(cache_service, "resolve_image_digest", lambda image: None)
+
+    config = _config(tmp_path, parallel="off")
+    config.tasks.append(_task("t1"))
+    cache_dir = str(tmp_path / "cache")
+
+    calls: list[str] = []
+    monkeypatch.setattr(orchestrator, "run_one", _fake_run_one_writing_log(calls))
+    orchestrator.run_command(config, **_run_command_kwargs(), cache=True, cache_dir=cache_dir)
+    assert sorted(calls) == ["baseline", "experimental"]
+
+    # Second run: nothing was cached (digest unresolved), so both re-execute.
+    calls.clear()
+    monkeypatch.setattr(orchestrator, "run_one", _fake_run_one_writing_log(calls))
+    orchestrator.run_command(config, **_run_command_kwargs(), cache=True, cache_dir=cache_dir)
+    assert sorted(calls) == ["baseline", "experimental"]
+
+
+def test_cache_disabled_for_non_file_collector(tmp_path, monkeypatch):
+    """Caching re-homes the exported trace file; the Jaeger backend keeps traces
+    server-side and can't be re-homed, so caching is disabled (not silently
+    dropping reused cells at analyze)."""
+    monkeypatch.setattr(orchestrator, "get_github_token", lambda: "tok")
+    monkeypatch.setattr(cache_service, "resolve_image_digest", lambda image: f"digest::{image}")
+    monkeypatch.setattr(orchestrator, "_ensure_jaeger", lambda config, jaeger_url=None: None)
+    config = _config(tmp_path, parallel="off")
+    config.runner.collector = "jaeger"
+    config.tasks.append(_task("t1"))
+    cache_dir = str(tmp_path / "cache")
+
+    calls: list[str] = []
+    monkeypatch.setattr(orchestrator, "run_one", _fake_run_one_writing_log(calls))
+    orchestrator.run_command(config, **_run_command_kwargs(), cache=True, cache_dir=cache_dir)
+    orchestrator.run_command(config, **_run_command_kwargs(), cache=True, cache_dir=cache_dir)
+
+    # Cache disabled → every cell runs both times (no reuse).
     assert len(calls) == 4
 
 

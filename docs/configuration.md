@@ -183,7 +183,8 @@ is required (the cache is a plain directory, `results/.cache` by default;
 `--cache-dir` overrides it and implies `--cache`).
 
 **Cache key (environment-complete).** A cell is only reused when *every* input
-that can change the agent's behavior matches. The key hashes:
+that can change the agent's behavior — or the artifacts scored later — matches.
+The key hashes:
 
 - the variant **image digest** (`docker image inspect`),
 - the fully-resolved **prompt** (post-interpolation, including the output
@@ -191,11 +192,20 @@ that can change the agent's behavior matches. The key hashes:
 - the **fixture content hash** (the same `fixtures.lock` hashing used by
   `--strict-fixtures`; see [Pinning fixtures](#pinning-fixtures-content-hash-integrity)),
 - **model**, **reasoning effort**, **max turns**, **timeout**, and **collector**,
+- the **run-time inputs that are mounted/read rather than baked into the image**:
+  the variant **run script**, the task **hooks** (`before_run` / `after_run`) and
+  **health check**, the **inline runtime evaluators** (`contains` / `regex` /
+  `script`, whose pass/fail is stored in the cached scores), the **`.env`** file,
+  and **`output_format`** / **`capture_content`** / container **resource limits**,
 - and the cell's **task / variant / epoch / fixture** identity.
 
 Change any of them — bump the image, edit the prompt, retouch a fixture, switch
-model or effort — and the affected cells are busted and re-executed; everything
-else is still reused.
+model or effort, edit a setup script or a `contains` assertion — and the affected
+cells are busted and re-executed; everything else is still reused. Judge/metric
+evaluators are deliberately **not** in the key: they run in `analyze` off the
+reused trace, so re-scoring them never needs a container re-run. If a cell's
+image digest can't be resolved (Docker unavailable), that cell is simply not
+cached — the mutable tag is never used as a fallback key.
 
 **Statistical-honesty guarantees.** Caching is designed so it can never
 fake-inflate confidence:
@@ -204,17 +214,26 @@ fake-inflate confidence:
   epoch *e* of a new run can only reuse epoch *e* of a prior run. Caching reuses
   whole prior-run cells one-for-one and **never collapses or dedupes epochs**
   within a run — the per-run sample size is preserved.
+- **All completed cells are cached, pass or fail.** Any cell whose container ran
+  to completion is stored and reused; caching never keeps only the *passing*
+  cells (which would bias point estimates upward as failures get re-rolled across
+  repeated cached runs). Infrastructure failures (`failed` / `timeout` /
+  `setup_failed`) are never cached, so a re-run always re-executes them.
+- **Reused traces are analyzed under the current run.** On a hit the exported
+  trace is re-homed onto the new `run_id` (its `test_id` and all other tags
+  preserved) so `analyze` ingests it exactly as if freshly produced. Because this
+  re-homing is only possible for the file exporter, caching requires
+  `runner.collector: file` (the zero-dependency default); with the Jaeger backend
+  the cache is skipped with a notice.
 - **Effective sample size is reported.** Cached cells are recorded in the
   manifest / `results.json` with `"cached": true`, and `analyze` reports the
-  **effective (non-cached) sample size** separately (`effective_variant_n` /
-  `effective_paired_n` in JSON, an "Effective (non-cached)" line in the
-  table/markdown, plus a `cached_samples` warning). Reused samples are **not**
-  independent draws, so CIs, power, and the `--min-epochs` gate are read against
-  the effective count — only genuinely fresh samples satisfy a power gate.
-
-Only successful cells are cached; a `failed`/`timeout`/`setup_failed` cell is
-never stored, so a re-run always re-executes it. A cached cell's reused trace
-keeps its original `test_id`, so `analyze` still correlates it correctly.
+  **effective (non-cached) sample size** alongside the total
+  (`effective_variant_n` / `effective_paired_n` in JSON, an "Effective
+  (non-cached)" line in the table/markdown, plus a `cached_samples` warning).
+  Point estimates and confidence intervals use *all* real samples (a cached cell
+  is a genuine prior draw), but the `--min-epochs` power gate is read against the
+  **effective** count — so a fully-cached run can never satisfy a "produce N fresh
+  epochs" requirement on stale evidence alone.
 
 ## Advanced Configuration
 

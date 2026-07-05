@@ -724,6 +724,15 @@ def run_command(
     cache_obj: RunCache | None = None
     cache_keys: dict[CellKey, str] = {}
     cache_inputs: dict[CellKey, CacheKeyInputs] = {}
+    if cache and config.runner.collector != "file":
+        # Reuse re-homes the exported trace file onto the new run id so analyze
+        # ingests it. The Jaeger backend keeps traces server-side under the
+        # original run id and can't be re-homed, so caching would silently drop
+        # reused cells at analyze. Skip it rather than mislead.
+        click.echo(
+            f"Cache: disabled — requires runner.collector 'file', got '{config.runner.collector}'."
+        )
+        cache = False
     if cache:
         cache_root = Path(cache_dir) if cache_dir else config.results_dir / CACHE_DIRNAME
         cache_obj = RunCache(cache_root)
