@@ -22,6 +22,9 @@ __pycache__/
 # Eval results (per-run data, regenerable)
 results/
 
+# Remote fixture cache (content-addressed downloads, regenerable — issue #122)
+.fixtures-cache/
+
 # Bicep param files may contain sensitive values (use .example instead)
 *.bicepparam
 !*.bicepparam.example

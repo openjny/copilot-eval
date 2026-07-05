@@ -49,3 +49,12 @@ class HookError(EvalError):
 
 class FixtureError(EvalError):
     """A task's fixture directory/files could not be prepared for a run."""
+
+
+class RemoteFixtureError(FixtureError):
+    """A remote "dataset-as-code" fixture could not be fetched or verified.
+
+    Covers a failed download, an unsupported/corrupt archive, or — most
+    importantly — a checksum mismatch, which must fail the run *closed* so an
+    eval never executes against unverified inputs (issue #122).
+    """

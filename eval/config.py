@@ -28,6 +28,8 @@ OUTPUT_FORMATS = ("text", "json")
 JUDGE_AGGREGATE_MODES = ("median", "mean", "majority")
 DEFAULT_OUTPUT_INSTRUCTION = "Save all output files under /workspace/output/."
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# A sha256 hex digest as written in a remote fixture declaration (issue #122).
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 # `docker run --cpus`: a positive (optionally fractional) number of CPUs.
 _CPUS_RE = re.compile(r"^\d+(\.\d+)?$")
 # `docker run --memory`: a positive integer optionally suffixed with a byte
@@ -158,6 +160,22 @@ class Hooks:
     on_failure: str = "fail"
 
 
+@dataclass(frozen=True)
+class RemoteFixture:
+    """A fixture declared as remote "dataset-as-code" (issue #122).
+
+    Instead of a local directory under ``fixtures/``, the fixture is fetched
+    from ``url`` and verified against ``sha256`` (the digest of the downloaded
+    bytes — the archive/file, not the extracted tree). ``name`` is the stable
+    fixture identity used in the eval matrix, ``fixtures.lock``, and the run
+    manifest; it is derived from the URL's filename unless declared explicitly.
+    """
+
+    name: str
+    url: str
+    sha256: str
+
+
 @dataclass
 class Task:
     name: str
@@ -168,6 +186,11 @@ class Task:
     # the task runs once per fixture (variant × fixture × epoch). Empty means
     # "single fixture" and falls back to `fixture` / the task name.
     fixtures: list[str] = field(default_factory=list)
+    # Remote fixtures declared via `{url, sha256}` (issue #122), keyed by their
+    # derived/declared name. A name appearing here is fetched + verified +
+    # cached instead of read from `fixtures/<name>/`. Both the singular
+    # `fixture:` mapping and `fixtures:` list entries populate this registry.
+    remote_fixtures: dict[str, RemoteFixture] = field(default_factory=dict)
     timeout_seconds: int | None = None
     health_check: str | None = None
     vars: dict[str, str] = field(default_factory=dict)
@@ -175,9 +198,10 @@ class Task:
     evaluators: list[Evaluator] = field(default_factory=list)
 
     def fixture_names(self) -> list[str]:
-        """Effective list of fixture directory names this task runs against.
+        """Effective list of fixture names this task runs against.
 
-        Falls back to the singular `fixture`, then to the task name, so a task
+        Falls back to the singular `fixture`, then a single remote fixture
+        declared via the `fixture:` mapping, then the task name — so a task
         with no fixture declared behaves exactly as before (one run per
         variant × epoch reading `fixtures/<task-name>/`).
         """
@@ -185,6 +209,8 @@ class Task:
             return list(self.fixtures)
         if self.fixture:
             return [self.fixture]
+        if self.remote_fixtures:
+            return list(self.remote_fixtures)
         return [self.name]
 
     @property
@@ -751,14 +777,15 @@ def _parse_task(p: dict[str, Any], fallback_name: str = "") -> Task:
     if not hooks_raw and p.get("reset_script"):
         hooks_raw = {"before_run": p["reset_script"]}
 
-    fixtures = _parse_fixtures(p.get("fixtures"), name)
+    fixture_name, fixtures, remote_fixtures = _parse_task_fixtures(p, name)
 
     return Task(
         name=name,
         prompt=prompt,
         enabled=p.get("enabled", True),
-        fixture=p.get("fixture"),
+        fixture=fixture_name,
         fixtures=fixtures,
+        remote_fixtures=remote_fixtures,
         timeout_seconds=p.get("timeout_seconds"),
         health_check=p.get("health_check"),
         vars={str(k): str(v) for k, v in (p.get("vars") or {}).items()},
@@ -767,11 +794,112 @@ def _parse_task(p: dict[str, Any], fallback_name: str = "") -> Task:
     )
 
 
-def _parse_fixtures(raw: Any, task_name: str) -> list[str]:
+def _derive_remote_name(url: str, explicit: Any, task_name: str, where: str) -> str:
+    """Resolve the identity name for a remote fixture.
+
+    Uses the declared ``name`` when present; otherwise derives a name from the
+    URL's filename with any recognized archive extension stripped (so
+    ``.../code-review-v3.tar.gz`` becomes ``code-review-v3``). The result must
+    match the standard name pattern; if it does not, the author is asked to set
+    an explicit ``name`` rather than the framework silently mangling it.
+    """
+    if explicit is not None:
+        if not isinstance(explicit, str) or not _NAME_RE.match(explicit.strip()):
+            raise ConfigError(
+                f"Task '{task_name}' {where} remote fixture 'name' is invalid: {explicit!r}. "
+                "Use letters, digits, '.', '_' or '-' and start with a letter or digit."
+            )
+        return explicit.strip()
+    base = url.rsplit("/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
+    for ext in (
+        ".tar.gz",
+        ".tgz",
+        ".tar.bz2",
+        ".tbz2",
+        ".tar.xz",
+        ".txz",
+        ".tar",
+        ".zip",
+        ".gz",
+    ):
+        if base.lower().endswith(ext):
+            base = base[: -len(ext)]
+            break
+    base = base.strip()
+    if not _NAME_RE.match(base):
+        raise ConfigError(
+            f"Task '{task_name}' {where} could not derive a valid fixture name from "
+            f"URL {url!r} (got {base!r}). Add an explicit 'name' to the remote fixture."
+        )
+    return base
+
+
+def _parse_remote_fixture(raw: dict[str, Any], task_name: str, where: str) -> RemoteFixture:
+    """Validate a ``{url, sha256, name?}`` remote-fixture mapping (issue #122)."""
+    unknown = set(raw) - {"url", "sha256", "name"}
+    if unknown:
+        raise ConfigError(
+            f"Task '{task_name}' {where} remote fixture has unknown key(s): "
+            f"{sorted(unknown)}. Allowed keys: url, sha256, name."
+        )
+    url = raw.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise ConfigError(
+            f"Task '{task_name}' {where} remote fixture requires a non-empty string 'url'."
+        )
+    url = url.strip()
+    sha_raw = raw.get("sha256")
+    sha = sha_raw.strip().lower() if isinstance(sha_raw, str) else None
+    if sha is None or not _SHA256_RE.match(sha):
+        raise ConfigError(
+            f"Task '{task_name}' {where} remote fixture requires 'sha256' as a 64-character "
+            f"hex digest of the downloaded file, got {sha_raw!r}."
+        )
+    name = _derive_remote_name(url, raw.get("name"), task_name, where)
+    return RemoteFixture(name=name, url=url, sha256=sha)
+
+
+def _parse_task_fixtures(
+    p: dict[str, Any], task_name: str
+) -> tuple[str | None, list[str], dict[str, RemoteFixture]]:
+    """Parse the `fixture` (singular) and `fixtures` (list) forms together.
+
+    Each may name a local directory (string) or declare a remote fixture
+    (`{url, sha256}` mapping, issue #122). Returns ``(fixture_name,
+    fixtures_list, remote_fixtures)`` where remote entries are collected into
+    the registry keyed by their derived/declared name.
+    """
+    remotes: dict[str, RemoteFixture] = {}
+
+    fixture_name: str | None = None
+    raw_fixture = p.get("fixture")
+    if isinstance(raw_fixture, dict):
+        rf = _parse_remote_fixture(raw_fixture, task_name, "'fixture'")
+        remotes[rf.name] = rf
+    elif raw_fixture is not None:
+        if not isinstance(raw_fixture, str) or not raw_fixture.strip():
+            raise ConfigError(
+                f"Task '{task_name}' 'fixture' must be a directory name or a "
+                f"{{url, sha256}} mapping, got {raw_fixture!r}."
+            )
+        fixture_name = raw_fixture.strip()
+        if not _NAME_RE.match(fixture_name):
+            raise ConfigError(
+                f"Task '{task_name}' fixture name '{fixture_name}' is invalid. Use letters, "
+                "digits, '.', '_' or '-' and start with a letter or digit."
+            )
+
+    fixtures = _parse_fixtures(p.get("fixtures"), task_name, remotes)
+    return fixture_name, fixtures, remotes
+
+
+def _parse_fixtures(raw: Any, task_name: str, remotes: dict[str, RemoteFixture]) -> list[str]:
     """Normalize the optional `fixtures` list into a list of fixture names.
 
-    Accepts a list of non-empty, unique strings. Returns [] when unset so the
-    task falls back to singular `fixture` / the task name.
+    Accepts a list whose entries are either non-empty, unique local directory
+    names (strings) or `{url, sha256}` remote-fixture mappings (issue #122);
+    remote entries are added to ``remotes``. Returns [] when unset so the task
+    falls back to singular `fixture` / a single remote fixture / the task name.
     """
     if raw is None:
         return []
@@ -783,20 +911,26 @@ def _parse_fixtures(raw: Any, task_name: str) -> list[str]:
     fixtures: list[str] = []
     seen: set[str] = set()
     for i, f in enumerate(raw):
-        if not isinstance(f, str) or not f.strip():
+        if isinstance(f, dict):
+            rf = _parse_remote_fixture(f, task_name, f"fixtures[{i}]")
+            name = rf.name
+            remotes[name] = rf
+        elif isinstance(f, str) and f.strip():
+            name = f.strip()
+            if not _NAME_RE.match(name):
+                raise ConfigError(
+                    f"Task '{task_name}' fixture name '{name}' is invalid. Use letters, digits, "
+                    f"'.', '_' or '-' and start with a letter or digit."
+                )
+        else:
             raise ConfigError(
-                f"Task '{task_name}' fixtures[{i}] must be a non-empty string, got {f!r}."
+                f"Task '{task_name}' fixtures[{i}] must be a non-empty string or a "
+                f"{{url, sha256}} mapping, got {f!r}."
             )
-        f = f.strip()
-        if not _NAME_RE.match(f):
-            raise ConfigError(
-                f"Task '{task_name}' fixture name '{f}' is invalid. Use letters, digits, "
-                f"'.', '_' or '-' and start with a letter or digit."
-            )
-        if f in seen:
-            raise ConfigError(f"Task '{task_name}' has a duplicate fixture '{f}'.")
-        seen.add(f)
-        fixtures.append(f)
+        if name in seen:
+            raise ConfigError(f"Task '{task_name}' has a duplicate fixture '{name}'.")
+        seen.add(name)
+        fixtures.append(name)
     return fixtures
 
 

@@ -21,7 +21,7 @@ import click
 import requests
 
 from eval.config import Config, Task, Variant
-from eval.exceptions import EvalError
+from eval.exceptions import EvalError, RemoteFixtureError
 from eval.naming import run_slug
 from eval.progress import NullProgress, ProgressReporter, create_reporter
 from eval.protocols import RunStatus
@@ -34,6 +34,7 @@ from eval.services.fixtures_service import (
     FixtureLockError,
     FixtureVerification,
     compact_hashes,
+    materialize_remote_fixtures,
     verify_fixtures,
 )
 from eval.services.manifest import (
@@ -452,6 +453,23 @@ def _print_summary(
     click.echo("=" * 50)
 
 
+def _materialize_remote_fixtures_or_abort(config: Config, tasks: list[Task]) -> None:
+    """Fetch + verify + cache remote fixtures before any run work (issue #122).
+
+    Done up front so a checksum mismatch or unreachable URL fails the run
+    *closed* — before Docker builds or agent invocations — and so the parallel
+    per-cell runs that follow all read a warm content-addressed cache instead
+    of racing to download. A cache hit performs no network access, so an
+    offline run against an already-cached fixture just works.
+    """
+    try:
+        resolved = materialize_remote_fixtures(config, tasks)
+    except RemoteFixtureError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if resolved:
+        click.echo(f"Remote fixtures ready ({len(resolved)} cached/verified).")
+
+
 def _verify_fixtures_or_abort(
     config: Config, tasks: list[Task], strict_fixtures: bool
 ) -> FixtureVerification:
@@ -601,6 +619,11 @@ def run_command(
     # forgotten re-pin fails fast in CI instead of after a long image build.
     # Runs for --dry-run too, so `run --dry-run --strict-fixtures` is a cheap
     # reproducibility gate. `current_hashes` is reused for the manifest below.
+    # Remote fixtures (issue #122): fetch + verify + cache before verification
+    # so a bad checksum / unreachable URL fails closed up front, and so the
+    # fixture content is on disk for the drift check below to hash.
+    _materialize_remote_fixtures_or_abort(config, tasks)
+
     verification = _verify_fixtures_or_abort(config, tasks, strict_fixtures)
 
     if dry_run:

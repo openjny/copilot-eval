@@ -22,13 +22,21 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import tarfile
+import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
+from urllib.error import URLError
+from urllib.request import urlopen
+from uuid import uuid4
 
 import yaml
 
-from eval.config import Config, Task
+from eval.config import Config, RemoteFixture, Task
+from eval.exceptions import RemoteFixtureError
 
 # Lockfile lives next to eval-config.yaml so it is versioned alongside the
 # fixtures it pins.
@@ -83,7 +91,376 @@ def explicit_fixtures(tasks: list[Task]) -> set[str]:
             names.update(task.fixtures)
         elif task.fixture:
             names.add(task.fixture)
+        # A single remote fixture declared via the `fixture:` mapping populates
+        # neither `fixtures` nor `fixture`, but is still explicitly declared.
+        names.update(task.remote_fixtures)
     return names
+
+
+# ---------------------------------------------------------------------------
+# Remote "dataset-as-code" fixtures (issue #122)
+#
+# A fixture may be declared by a remote ``url`` plus an expected ``sha256`` of
+# the downloaded bytes. On use it is fetched once, verified (fail-closed on
+# mismatch), extracted, and cached content-addressed under the config dir so
+# later runs reuse it offline without re-downloading. Extracted content is
+# then hashed/pinned/mounted through exactly the same machinery as local
+# fixtures, so remote fixtures interoperate with ``fixtures.lock`` and the run
+# manifest for free.
+# ---------------------------------------------------------------------------
+
+# Downloader signature: URL -> raw bytes. Injected in tests so the suite never
+# touches the network.
+Opener = Callable[[str], bytes]
+
+# Recognized archive suffixes, longest-first so ``.tar.gz`` wins over ``.gz``.
+_TAR_SUFFIXES = (".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar")
+_ZIP_SUFFIXES = (".zip",)
+
+# Network + extraction safety ceilings. The archive bytes are pinned by sha256
+# (fail-closed), so these caps are *not* a defense against a MITM swapping in a
+# bomb — that is already impossible. They bound the blast radius of an
+# honest-but-huge or maliciously authored (but trusted-by-config) fixture so a
+# single dataset cannot hang the run or exhaust the runner's memory/disk.
+# Generous by default; raise them in a fork if you legitimately pin large data.
+DOWNLOAD_TIMEOUT_SECONDS = 60
+MAX_DOWNLOAD_BYTES = 2 * 1024**3  # 2 GiB compressed-download ceiling
+MAX_EXTRACTED_BYTES = 8 * 1024**3  # 8 GiB total-uncompressed ceiling
+MAX_EXTRACTED_MEMBERS = 200_000  # archive entry-count ceiling
+
+
+def remote_cache_dir(config: Config) -> Path:
+    """Content-addressed cache root for fetched remote fixtures.
+
+    Lives under the config dir (not a global temp) so it is easy to inspect,
+    survives across runs for offline reuse, and can be wiped by deleting one
+    directory. Add it to ``.gitignore``.
+    """
+    return config.config_dir / ".fixtures-cache"
+
+
+def _blob_path(config: Config, sha256: str) -> Path:
+    return remote_cache_dir(config) / "blobs" / sha256
+
+
+def _extracted_base(config: Config, sha256: str) -> Path:
+    return remote_cache_dir(config) / "extracted" / sha256
+
+
+def remote_fixture_registry(tasks: list[Task]) -> dict[str, RemoteFixture]:
+    """Merge every task's remote fixtures into a single name→spec registry.
+
+    Raises :class:`RemoteFixtureError` if the same name is declared with a
+    different source across tasks, since the name is the fixture's identity in
+    the lockfile and manifest and must map to exactly one ``(url, sha256)``.
+    """
+    registry: dict[str, RemoteFixture] = {}
+    for task in tasks:
+        for name, rf in task.remote_fixtures.items():
+            existing = registry.get(name)
+            if existing is not None and (existing.url != rf.url or existing.sha256 != rf.sha256):
+                raise RemoteFixtureError(
+                    f"remote fixture '{name}' is declared with conflicting url/sha256 "
+                    "across tasks; give the sources distinct names or make them identical."
+                )
+            registry[name] = rf
+    return registry
+
+
+def _download(url: str) -> bytes:
+    """Default opener: fetch ``url`` into memory via urllib (stdlib only).
+
+    Uses an explicit timeout so a hung/slow server can never wedge the run, and
+    caps the read at :data:`MAX_DOWNLOAD_BYTES` so an oversized response cannot
+    exhaust memory before the checksum is even computed.
+    """
+    try:
+        with urlopen(url, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:  # noqa: S310 - url comes from trusted config
+            data = response.read(MAX_DOWNLOAD_BYTES + 1)
+    except (URLError, OSError, ValueError) as exc:
+        raise RemoteFixtureError(f"failed to download remote fixture from {url}: {exc}") from exc
+    if not isinstance(data, bytes):  # pragma: no cover - defensive
+        raise RemoteFixtureError(f"unexpected non-bytes response downloading {url}")
+    if len(data) > MAX_DOWNLOAD_BYTES:
+        raise RemoteFixtureError(
+            f"remote fixture from {url} exceeds the maximum download size of "
+            f"{MAX_DOWNLOAD_BYTES} bytes; refusing to buffer it."
+        )
+    return data
+
+
+def ensure_remote_blob(config: Config, rf: RemoteFixture, *, opener: Opener | None = None) -> Path:
+    """Ensure the verified raw download for ``rf`` is in the blob cache.
+
+    Cache-hit (``blobs/<sha256>`` exists) returns immediately with no network
+    access — the blob is content-addressed by the same sha256 we verify on
+    write, so its presence *is* proof of integrity. On a miss the file is
+    downloaded, hashed, and only written to the cache if the digest matches;
+    a mismatch raises :class:`RemoteFixtureError` (fail closed) and leaves
+    nothing behind.
+    """
+    blob = _blob_path(config, rf.sha256)
+    if blob.exists():
+        return blob
+    data = (opener or _download)(rf.url)
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != rf.sha256:
+        raise RemoteFixtureError(
+            f"checksum mismatch for remote fixture '{rf.name}' from {rf.url}: "
+            f"expected sha256 {rf.sha256}, got {digest}. Refusing to run against "
+            "unverified inputs — re-check the URL or update the declared sha256."
+        )
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    # Unique per-attempt temp name (pid + uuid) so concurrent or interrupted
+    # writers never collide on or clobber each other's in-progress download.
+    tmp = blob.parent / f"{rf.sha256}.tmp-{os.getpid()}-{uuid4().hex}"
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(blob)  # atomic on POSIX
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return blob
+
+
+def _safe_join(dest: Path, name: str) -> Path | None:
+    """Resolve archive member ``name`` under ``dest``, or None if it escapes.
+
+    Guards against path-traversal (``../``) and absolute members, so a hostile
+    archive can never write outside the extraction directory. The extraction
+    root itself (a member named ``.`` or one resolving to ``dest``) is rejected
+    too, so it is never mistaken for a writable file target.
+    """
+    if not name or name.startswith("/"):
+        return None
+    dest_resolved = dest.resolve()
+    target = (dest_resolved / name).resolve()
+    if target == dest_resolved or dest_resolved not in target.parents:
+        return None
+    return target
+
+
+class _ExtractionBudget:
+    """Running total-size / member-count guard against decompression bombs."""
+
+    def __init__(self, max_bytes: int, max_members: int) -> None:
+        self._max_bytes = max_bytes
+        self._max_members = max_members
+        self._total = 0
+        self._members = 0
+
+    def add_member(self, url: str) -> None:
+        self._members += 1
+        if self._members > self._max_members:
+            raise RemoteFixtureError(
+                f"remote fixture archive from {url} contains more than "
+                f"{self._max_members} entries; refusing to extract a suspected bomb."
+            )
+
+    def add_bytes(self, count: int, url: str) -> None:
+        self._total += count
+        if self._total > self._max_bytes:
+            raise RemoteFixtureError(
+                f"remote fixture archive from {url} expands beyond the "
+                f"{self._max_bytes}-byte extraction ceiling; refusing to extract a "
+                "suspected decompression bomb."
+            )
+
+
+def _copy_bounded(source: IO[bytes], out: IO[bytes], budget: _ExtractionBudget, url: str) -> None:
+    """Stream ``source`` into ``out`` in chunks, charging each against ``budget``."""
+    while True:
+        chunk = source.read(_CHUNK)
+        if not chunk:
+            break
+        budget.add_bytes(len(chunk), url)
+        out.write(chunk)
+
+
+def _extract_tar(blob: Path, dest: Path, budget: _ExtractionBudget, url: str) -> None:
+    """Extract regular files and directories from a tar archive into ``dest``.
+
+    Only regular files and directories are materialized (matching what
+    :func:`hash_fixture` hashes and what the runner copies); symlinks, devices,
+    hardlinks, and other special members are skipped, and traversal-unsafe
+    members are ignored via :func:`_safe_join`. Total extracted size and member
+    count are bounded by ``budget``.
+    """
+    with tarfile.open(blob, "r:*") as tf:
+        for member in tf.getmembers():
+            target = _safe_join(dest, member.name)
+            if target is None:
+                continue
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif member.isreg():
+                budget.add_member(url)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = tf.extractfile(member)
+                if source is None:  # pragma: no cover - defensive
+                    continue
+                with source, target.open("wb") as out:
+                    _copy_bounded(source, out, budget, url)
+
+
+def _extract_zip(blob: Path, dest: Path, budget: _ExtractionBudget, url: str) -> None:
+    """Extract regular files and directories from a zip archive into ``dest``."""
+    with zipfile.ZipFile(blob) as zf:
+        for info in zf.infolist():
+            target = _safe_join(dest, info.filename)
+            if target is None:
+                continue
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                budget.add_member(url)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as source, target.open("wb") as out:
+                    _copy_bounded(source, out, budget, url)
+
+
+def _plain_filename(url: str) -> str:
+    """Safe basename for a non-archive single-file fixture download."""
+    base = url.rsplit("/", 1)[-1].split("?", 1)[0].split("#", 1)[0].strip()
+    base = base.replace("\\", "/").rsplit("/", 1)[-1]
+    if not base or base in (".", ".."):
+        return "fixture"
+    return base
+
+
+def _extract_into(blob: Path, url: str, dest: Path) -> None:
+    """Materialize a downloaded blob into the extraction directory ``dest``.
+
+    Supports ``.tar.gz``/``.tgz``/``.tar``/``.zip`` archives (detected by URL
+    suffix, then by content sniffing as a fallback). Anything else is treated
+    as a plain single file and copied in under its URL basename. Archive
+    extraction is bounded by :data:`MAX_EXTRACTED_BYTES` /
+    :data:`MAX_EXTRACTED_MEMBERS` to defuse decompression bombs.
+    """
+    budget = _ExtractionBudget(MAX_EXTRACTED_BYTES, MAX_EXTRACTED_MEMBERS)
+    lower = url.lower().split("?", 1)[0].split("#", 1)[0]
+    if lower.endswith(_TAR_SUFFIXES):
+        _extract_tar(blob, dest, budget, url)
+    elif lower.endswith(_ZIP_SUFFIXES):
+        _extract_zip(blob, dest, budget, url)
+    elif tarfile.is_tarfile(blob):
+        _extract_tar(blob, dest, budget, url)
+    elif zipfile.is_zipfile(blob):
+        _extract_zip(blob, dest, budget, url)
+    else:
+        shutil.copyfile(blob, dest / _plain_filename(url))
+
+
+def ensure_remote_fixture(
+    config: Config, rf: RemoteFixture, *, opener: Opener | None = None
+) -> Path:
+    """Return the extracted content directory for ``rf``, fetching if needed.
+
+    Content is cached at ``extracted/<sha256>/content`` with a sibling
+    ``.ok`` completion marker; a present marker means an earlier run already
+    fetched + verified + extracted this exact content, so we return it without
+    any network access (offline reuse). Extraction happens in a unique temp
+    sibling directory that is atomically renamed into place only once complete,
+    so an interrupted extraction never leaves a half-populated entry that looks
+    valid, and a concurrent run that already published the entry is never
+    clobbered (we keep theirs and discard ours). Any download/extraction
+    failure raises :class:`RemoteFixtureError` and leaves nothing behind.
+    """
+    base = _extracted_base(config, rf.sha256)
+    content = base / "content"
+    marker = base / ".ok"
+    if marker.exists() and content.is_dir():
+        return content
+
+    blob = ensure_remote_blob(config, rf, opener=opener)
+
+    base.parent.mkdir(parents=True, exist_ok=True)
+    # Unique per-attempt temp dir (pid + uuid) so concurrent extractors never
+    # share or delete each other's in-progress directory.
+    tmp = base.parent / f"{rf.sha256}.tmp-{os.getpid()}-{uuid4().hex}"
+    try:
+        (tmp / "content").mkdir(parents=True)
+        try:
+            _extract_into(blob, rf.url, tmp / "content")
+        except RemoteFixtureError:
+            raise
+        except (tarfile.TarError, zipfile.BadZipFile, OSError, EOFError) as exc:
+            raise RemoteFixtureError(
+                f"failed to extract remote fixture '{rf.name}' from {rf.url}: {exc}. "
+                "The archive matched its declared sha256 but could not be unpacked; "
+                "re-check the source archive."
+            ) from exc
+        (tmp / ".ok").write_text("", encoding="utf-8")
+        try:
+            tmp.rename(base)
+        except OSError:
+            # Lost a publish race: a concurrent run already populated `base`
+            # with a complete entry. Never delete a cache dir another run may
+            # be reading — keep theirs, discard ours (cleaned in `finally`).
+            if not (marker.exists() and content.is_dir()):
+                raise RemoteFixtureError(
+                    f"remote fixture cache for '{rf.name}' at {base} is present but "
+                    "incomplete; delete that directory and re-run to repopulate it."
+                ) from None
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+    return content
+
+
+def _reject_local_shadow(config: Config, name: str) -> None:
+    """Fail if a remote fixture name also has a local ``fixtures/<name>`` dir.
+
+    The name is a fixture's identity in the lockfile/manifest, so a name that is
+    both remote (in one task) and a local directory (in another) would let the
+    two paths disagree about what content ``name`` refers to — pinning/verifying
+    the remote content while the runner mounts the local dir. Reject it early.
+    """
+    if (fixtures_dir(config) / name).is_dir():
+        raise RemoteFixtureError(
+            f"fixture '{name}' is declared as a remote fixture but a local "
+            f"fixtures/{name} directory also exists; a fixture name must map to a "
+            "single source — rename one or remove the local directory."
+        )
+
+
+def resolve_fixture_dir(
+    config: Config,
+    name: str,
+    remotes: dict[str, RemoteFixture],
+    *,
+    opener: Opener | None = None,
+) -> Path | None:
+    """Directory a fixture's content lives in, or None if a local one is absent.
+
+    Remote fixtures resolve to their (fetched + verified) extracted content
+    directory; local fixtures resolve to ``fixtures/<name>`` when it exists.
+    """
+    rf = remotes.get(name)
+    if rf is not None:
+        _reject_local_shadow(config, name)
+        return ensure_remote_fixture(config, rf, opener=opener)
+    path = fixtures_dir(config) / name
+    return path if path.is_dir() else None
+
+
+def materialize_remote_fixtures(
+    config: Config, tasks: list[Task], *, opener: Opener | None = None
+) -> dict[str, Path]:
+    """Fetch + verify + extract every remote fixture referenced by ``tasks``.
+
+    Called up front on the `run` path so a bad checksum or unreachable URL
+    fails the run *before* any Docker work, and so the parallel per-cell runs
+    that follow all hit a warm cache instead of racing to download. Returns a
+    name→content-dir map. Raises :class:`RemoteFixtureError` on any failure
+    (fail closed).
+    """
+    registry = remote_fixture_registry(tasks)
+    resolved: dict[str, Path] = {}
+    for name, rf in registry.items():
+        _reject_local_shadow(config, name)
+        resolved[name] = ensure_remote_fixture(config, rf, opener=opener)
+    return resolved
 
 
 def _hash_file(path: Path) -> tuple[str, int]:
@@ -145,6 +522,19 @@ def hash_fixture(fixture_path: Path) -> dict[str, Any]:
     return {"sha256": hasher.hexdigest(), "total_size": total_size, "files": files}
 
 
+def _hash_with_source(fixture_path: Path, rf: RemoteFixture | None) -> dict[str, Any]:
+    """Content hash for a fixture, tagging remote ones with their provenance.
+
+    Remote fixtures record a ``remote: {url, sha256}`` block alongside the
+    content hash so the lockfile / manifest tie the pinned *content* to the
+    remote source (URL + archive digest) it was fetched from (issue #122).
+    """
+    entry = hash_fixture(fixture_path)
+    if rf is not None:
+        entry["remote"] = {"url": rf.url, "sha256": rf.sha256}
+    return entry
+
+
 @dataclass
 class PinResult:
     """Outcome of :func:`pin_fixtures`."""
@@ -162,13 +552,13 @@ def pin_fixtures(config: Config, tasks: list[Task] | None = None) -> PinResult:
     runner, which tolerates a missing fixture directory).
     """
     tasks = config.tasks if tasks is None else tasks
-    root = fixtures_dir(config)
+    remotes = remote_fixture_registry(tasks)
     entries: dict[str, dict[str, Any]] = {}
     missing: list[str] = []
     for name in referenced_fixtures(tasks):
-        path = root / name
-        if path.is_dir():
-            entries[name] = hash_fixture(path)
+        path = resolve_fixture_dir(config, name, remotes)
+        if path is not None and path.is_dir():
+            entries[name] = _hash_with_source(path, remotes.get(name))
         else:
             missing.append(name)
 
@@ -283,12 +673,19 @@ def verify_fixtures(config: Config, tasks: list[Task] | None = None) -> FixtureV
     lock = load_lockfile(config)
     locked_fixtures: dict[str, Any] = lock.get("fixtures", {}) if lock else {}
     explicit = explicit_fixtures(tasks)
-    root = fixtures_dir(config)
+    remotes = remote_fixture_registry(tasks)
     result = FixtureVerification(lockfile_present=lock is not None)
 
     for name in referenced_fixtures(tasks):
-        path = root / name
-        current = hash_fixture(path) if path.is_dir() else None
+        # Remote fixtures resolve to their cached extracted content (already
+        # materialized up front on the run path, so this is a cache hit);
+        # local fixtures resolve to fixtures/<name> when present.
+        path = resolve_fixture_dir(config, name, remotes)
+        current = (
+            _hash_with_source(path, remotes.get(name))
+            if path is not None and path.is_dir()
+            else None
+        )
         if current is not None:
             result.current_hashes[name] = current
 
@@ -311,8 +708,9 @@ def verify_fixtures(config: Config, tasks: list[Task] | None = None) -> FixtureV
                 )
             continue
         if current is None:
+            display = path if path is not None else fixtures_dir(config) / name
             result.drifted.append(
-                f"fixture '{name}' is pinned but missing on disk (expected at {path})"
+                f"fixture '{name}' is pinned but missing on disk (expected at {display})"
             )
             continue
         if current["sha256"] == entry.get("sha256"):
@@ -325,12 +723,18 @@ def verify_fixtures(config: Config, tasks: list[Task] | None = None) -> FixtureV
 
 def _compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """Reduce a full fixture hash entry to the compact form recorded in the
-    run manifest (identity hash + size, without the per-file breakdown)."""
-    return {
+    run manifest (identity hash + size, without the per-file breakdown).
+
+    A remote fixture's ``remote: {url, sha256}`` provenance is carried through
+    so the manifest records where the content came from (issue #122)."""
+    compact: dict[str, Any] = {
         "sha256": entry["sha256"],
         "total_size": entry["total_size"],
         "file_count": len(entry["files"]),
     }
+    if "remote" in entry:
+        compact["remote"] = entry["remote"]
+    return compact
 
 
 def compact_hashes(full: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -345,11 +749,11 @@ def compute_fixture_hashes(config: Config, tasks: list[Task]) -> dict[str, dict[
     manifest only needs each fixture's ``sha256`` (plus size/file counts for a
     quick eyeball) recorded alongside the runs that consumed it.
     """
-    root = fixtures_dir(config)
+    remotes = remote_fixture_registry(tasks)
     hashes: dict[str, dict[str, Any]] = {}
     for name in referenced_fixtures(tasks):
-        path = root / name
-        if not path.is_dir():
+        path = resolve_fixture_dir(config, name, remotes)
+        if path is None or not path.is_dir():
             continue
-        hashes[name] = _compact_entry(hash_fixture(path))
+        hashes[name] = _compact_entry(_hash_with_source(path, remotes.get(name)))
     return hashes
