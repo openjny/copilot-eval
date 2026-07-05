@@ -318,7 +318,10 @@ def run_one(
                 fixture_label=fixture_label,
             )
 
-            logger.info("Running copilot in container...")
+            if config.runner.backend == "replay":
+                logger.info("Replaying pre-recorded run (offline replay runner)...")
+            else:
+                logger.info("Running copilot in container...")
             artifacts = runner.run(run_context)
             container_run_completed = True
             _print_summary(log_file)

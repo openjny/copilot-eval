@@ -35,7 +35,7 @@ from eval.services.judge_service import (
     _run_judges,
     _warn_unscored_judges,
 )
-from eval.services.manifest import load_manifest
+from eval.services.manifest import load_manifest, load_manifest_replayed
 from eval.services.metrics_service import _run_metric_evaluators
 from eval.services.orchestrator import _ensure_jaeger
 from eval.services.trace_service import (
@@ -185,6 +185,7 @@ def run_analysis(
         manifest_runs=manifest_runs,
         trace_test_ids=trace_test_ids,
         mc_correction=mc_correction,
+        replayed=load_manifest_replayed(results_dir),
     )
     if not reports:
         click.echo("No reports generated.", err=True)

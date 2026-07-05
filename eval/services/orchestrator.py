@@ -669,11 +669,18 @@ def run_command(
                 "Pre-flight validation failed. Fix the issues above and re-run."
             )
 
+    replayed = config.runner.backend == "replay"
     if config.runner.collector == "jaeger":
         _ensure_jaeger(config)
-    github_token = get_github_token()
-    if not no_build:
-        _ensure_images(config, github_token)
+    # The replay backend is an offline test/dev harness: it launches no
+    # container and calls no model, so it needs no GitHub token and no image
+    # build (issue #132). Keep the real Docker path completely unchanged.
+    if replayed:
+        github_token = ""
+    else:
+        github_token = get_github_token()
+        if not no_build:
+            _ensure_images(config, github_token)
 
     # Reuse the hashes computed during verification above (fixtures are hashed
     # once per run) as the manifest's fixture-identity record (issue #89).
@@ -690,6 +697,9 @@ def run_command(
         "variant_order": config.runner.variant_order,
         "seed": config.runner.seed,
     }
+    # Stamp the manifest as replayed/synthetic when the offline replay runner
+    # produced it (issue #132), so `analyze` can mark the report accordingly and
+    # a replayed run can never be confused with a real, isolated measurement.
     if resume:
         merged_runs = merge_manifest_runs(existing_index, results)
         # Preserve the fixture hashes of cells carried over from the original
@@ -697,7 +707,13 @@ def run_command(
         # the audit record for already-completed cells stays intact.
         merged_fixtures = {**load_manifest_fixtures(run_dir), **fixture_hashes}
         write_manifest_dicts(
-            run_dir, run_id, merged_runs, schedule, cost_estimate.to_dict(), merged_fixtures
+            run_dir,
+            run_id,
+            merged_runs,
+            schedule,
+            cost_estimate.to_dict(),
+            merged_fixtures,
+            replayed,
         )
         passed = sum(1 for r in merged_runs if r.get("passed"))
         click.echo(
@@ -705,6 +721,8 @@ def run_command(
             f"({len(results)} re-executed this run)"
         )
     else:
-        write_manifest(run_dir, run_id, results, schedule, cost_estimate.to_dict(), fixture_hashes)
+        write_manifest(
+            run_dir, run_id, results, schedule, cost_estimate.to_dict(), fixture_hashes, replayed
+        )
 
     _print_summary(config, run_id, results, config_dir)

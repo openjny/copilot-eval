@@ -21,16 +21,20 @@ from typing import Any
 
 from eval.protocols import AgentRunner
 from eval.runners.docker_cli_runner import DockerCLIRunner
+from eval.runners.replay_runner import ReplayRunner
 
 logger = getLogger(__name__)
 
 # `runner.backend: <key>` in eval-config.yaml selects the corresponding class
-# below. "docker" is the only built-in backend today, but it's registered like
-# any other so Docker isolation is one implementation of AgentRunner, not a
+# below. "docker" is the only built-in *isolated* backend, registered like any
+# other so Docker isolation is one implementation of AgentRunner, not a
 # hardcoded assumption (see docs/vision.md — "environment-isolated", not
-# "Docker-isolated").
+# "Docker-isolated"). "replay" is a test/dev-only harness (issue #132) that
+# replays recorded outputs/traces offline; it never produces a real, isolated
+# measurement and stamps everything it emits as replayed/synthetic.
 RUNNER_REGISTRY: dict[str, type[AgentRunner]] = {
     "docker": DockerCLIRunner,
+    "replay": ReplayRunner,
 }
 
 # Entry-point group third-party packages can use to register additional
@@ -88,6 +92,7 @@ __all__ = [
     "RUNNER_REGISTRY",
     "ENTRY_POINT_GROUP",
     "DockerCLIRunner",
+    "ReplayRunner",
     "create_runner",
     "get_runner_class",
     "load_runner_plugins",

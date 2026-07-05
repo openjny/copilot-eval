@@ -12,7 +12,8 @@
           "default": "docker",
           "description": "Agent execution backend. Third-party backends (issue #66) may register additional values not listed here via the `copilot_eval.runners` entry-point group.",
           "enum": [
-            "docker"
+            "docker",
+            "replay"
           ],
           "type": "string"
         },

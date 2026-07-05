@@ -604,10 +604,17 @@ def validate_readiness(
 
     Collects every result rather than raising on the first failure, so `run`
     can print a complete, actionable report in one shot.
+
+    The ``replay`` backend is an offline test/dev harness that launches no
+    container and calls no model, so the Docker-daemon, GitHub-token and
+    base-image checks don't apply — only the fixture and disk-space checks run.
     """
-    results = [check_docker_daemon(), check_github_token()]
+    replay = config.runner.backend == "replay"
+    results: list[CheckResult] = []
+    if not replay:
+        results.extend([check_docker_daemon(), check_github_token()])
     results.extend(check_fixtures(config, tasks))
     results.append(check_disk_space(config.project_dir))
-    if check_build:
+    if check_build and not replay:
         results.append(check_base_image(config))
     return results

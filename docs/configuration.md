@@ -263,7 +263,7 @@ runner:
   trace_fetch_limit: 2000        # analyze: max traces to request from Jaeger
   trace_fetch_retries: 5         # analyze: attempts to wait for trace ingestion
   trace_fetch_retry_delay: 2.0   # analyze: seconds between ingestion retries
-  backend: docker                # Agent execution backend (docker is the only built-in; see Extensibility)
+  backend: docker                # Agent execution backend: docker (default, isolated) | replay (test/dev-only offline harness; see Extensibility)
   resources:                    # Optional: Docker container resource limits (reduces metric noise)
     cpus: "2.0"                  # --cpus: number of CPUs available to the container
     memory: "4g"                 # --memory: memory limit (b|k|m|g units, or raw bytes)
@@ -386,10 +386,77 @@ a lighter-weight alternative that doesn't require packaging a plugin, see the
 [Python Evaluator](#python-evaluator) above, which calls a plain `module:func`
 in-process.
 
-`docker` (via `DockerCLIRunner`) is the only built-in runner backend today —
-it's registered like any other, not hardcoded, so the framework stays
+`docker` (via `DockerCLIRunner`) is the only built-in **isolated** runner
+backend — it's registered like any other, not hardcoded, so the framework stays
 "environment-isolated" rather than "Docker-isolated" (see
-[docs/vision.md](vision.md)).
+[docs/vision.md](vision.md)). A second built-in backend, `replay`, is a
+**test/dev-only harness** (see [Offline replay runner](#offline-replay-runner-testdev-harness)
+below) — it is not an eval execution mode and never produces a real measurement.
+
+## Offline replay runner (test/dev harness)
+
+> ⚠️ **Test/dev tooling only — not an eval mode.** The replay runner exists to
+> exercise the evaluator → report pipeline offline. It does **not** run Copilot,
+> does **not** provide environment isolation, and must **never** be used to
+> produce a real A/B conclusion. Everything it emits is stamped
+> replayed/synthetic (see the guarantee below).
+
+Exercising the evaluator + report pipeline normally requires a **real run**,
+which needs Docker *and* Copilot authentication. That makes it slow and costly
+to iterate on evaluator config (judge rubrics, regex/contains anchors, metric
+gates) and impossible to run the framework's own runner→evaluator→report
+regression tests where Docker/auth aren't available (e.g. lightweight CI).
+
+`runner.backend: replay` swaps `DockerCLIRunner` for `ReplayRunner`, which
+**replays pre-recorded agent outputs and OTel traces** through the exact same
+`run_one` → evaluator → report path, launching no container and calling no
+model. The recorded artifacts live in a `.replay/` subdirectory of the task's
+fixture (copied into the run's writable workspace like any other fixture), or in
+an absolute directory named by the `EVAL_REPLAY_DIR` environment variable:
+
+```
+fixtures/<name>/.replay/
+  transcript.txt   # optional — becomes the run log body (contains/regex read this)
+  traces.jsonl     # optional — Copilot file-exporter JSONL; resource tags are
+                   #            rewritten to THIS run so the file collector,
+                   #            metric evaluators, and report pick it up
+  output/          # optional — copied into the run's output/ dir (judge evidence)
+  meta.json        # optional — {"exit_code": 0}
+```
+
+Everything is optional, but the `.replay/` directory must exist and be
+non-empty, otherwise the run fails loudly with a `ReplayError` rather than
+silently emitting an empty run. Because replay is offline, it only supports the
+`file` collector.
+
+```yaml
+runner:
+  backend: replay      # test/dev harness — NOT a real eval
+  collector: file
+```
+
+```bash
+# Drive the evaluator/report pipeline entirely offline (no Docker, no auth):
+uv run copilot-eval run --config-dir <dir> --task <name>
+uv run copilot-eval analyze --run-id <id> -o table
+```
+
+### Synthetic-labelling guarantee
+
+A replayed run can **never** be mistaken for a real, isolated measurement. It is
+marked at every layer:
+
+- the run **log** opens with a loud `REPLAYED / SYNTHETIC RUN — NOT A REAL
+  MEASUREMENT` banner;
+- the run **manifest** (`results.json`) carries a top-level `"replayed": true`
+  marker;
+- every **report** format `analyze` renders (table, markdown, JSON, JUnit, HTML,
+  GHA summary) shows a replayed/synthetic banner — the JSON payload adds a
+  top-level `"replayed": true` — so the label survives whichever output a CI job
+  consumes.
+
+The real `docker` backend and its environment-as-variant isolation model are
+completely untouched; `replay` is an additional, clearly-separated backend.
 
 ## Variants
 
