@@ -141,6 +141,89 @@ def test_cost_metric_gate_none_when_tag_absent_or_sentinel():
     assert metric_value(m_sentinel, "cost") is None
 
 
+def _root_no_turn_count():
+    """A root span with the model tag but NO `github.copilot.turn_count` tag."""
+    return Span(
+        name="invoke_agent",
+        duration_s=12.5,
+        span_id="root",
+        parent_id=None,
+        tags={"gen_ai.request.model": "gpt-x"},
+    )
+
+
+def test_extract_metrics_token_availability_flags():
+    """Token aggregates are flagged available only when the backing tag is present
+    on every contributing chat span, distinguishing a genuine 0 from absent."""
+    # Genuine zeros: tags present with 0 → available (a real measurement).
+    m_zero = extract_metrics(
+        Trace(trace_id="z", spans=[_root(), _chat("c1", in_tok=0, out_tok=0, cache=0)])
+    )
+    assert m_zero is not None
+    assert m_zero.total_input_tokens == 0
+    assert m_zero.input_tokens_available is True
+    assert m_zero.output_tokens_available is True
+    assert m_zero.cache_tokens_available is True
+
+    # No chat spans at all → the token telemetry can't be measured → unavailable.
+    m_no_chats = extract_metrics(Trace(trace_id="n", spans=[_root()]))
+    assert m_no_chats is not None
+    assert m_no_chats.total_input_tokens == 0
+    assert m_no_chats.input_tokens_available is False
+    assert m_no_chats.output_tokens_available is False
+    assert m_no_chats.cache_tokens_available is False
+
+
+def test_extract_metrics_token_unavailable_when_tag_missing_on_a_span():
+    """If a contributing chat span is missing a token tag, the summed metric is
+    flagged unavailable so a `<=` gate on it fails CLOSED (the sum under-counts)."""
+    chat_missing_input = Span(
+        name="chat",
+        duration_s=1.0,
+        span_id="c1",
+        parent_id="root",
+        tags={
+            # gen_ai.usage.input_tokens intentionally absent
+            "gen_ai.usage.output_tokens": 10,
+            "gen_ai.usage.cache_read.input_tokens": 5,
+        },
+    )
+    m = extract_metrics(Trace(trace_id="p", spans=[_root(), chat_missing_input]))
+    assert m is not None
+    assert m.input_tokens_available is False
+    assert m.output_tokens_available is True
+    assert m.cache_tokens_available is True
+
+
+def test_int_tag_metric_gate_none_when_tag_absent():
+    """int-tag metrics (turn_count / total_tokens) must fail CLOSED via
+    metric_value → None when the backing tag is absent — the #121 fix — instead
+    of silently passing a `<=` gate on a coerced 0."""
+    from eval.trace import metric_value
+
+    # turn_count: present on _root() → available; absent → None (not 0).
+    m_turn = extract_metrics(Trace(trace_id="t1", spans=[_root()]))
+    assert m_turn is not None and m_turn.turn_count == 3
+    assert metric_value(m_turn, "turn_count") == 3.0
+    m_no_turn = extract_metrics(Trace(trace_id="t2", spans=[_root_no_turn_count()]))
+    assert m_no_turn is not None and m_no_turn.turn_count == 0
+    assert metric_value(m_no_turn, "turn_count") is None
+
+    # total_tokens: available only when both input and output halves are present.
+    m_tokens = extract_metrics(
+        Trace(trace_id="t3", spans=[_root(), _chat("c1", in_tok=100, out_tok=50)])
+    )
+    assert m_tokens is not None
+    assert metric_value(m_tokens, "total_tokens") == 150.0
+    # No chats → token tag absent → total_tokens gate value is None, NOT 0.
+    m_tokens_absent = extract_metrics(Trace(trace_id="t4", spans=[_root()]))
+    assert m_tokens_absent is not None and m_tokens_absent.total_input_tokens == 0
+    assert metric_value(m_tokens_absent, "total_tokens") is None
+    assert metric_value(m_tokens_absent, "total_input_tokens") is None
+    assert metric_value(m_tokens_absent, "total_output_tokens") is None
+    assert metric_value(m_tokens_absent, "total_cache_tokens") is None
+
+
 def test_extract_conversation_orders_by_span_id():
     spans = [
         _root(),
