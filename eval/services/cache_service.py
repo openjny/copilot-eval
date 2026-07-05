@@ -13,8 +13,9 @@ Design guardrails (from the review that approved the issue):
   new run can only reuse epoch *e* of a prior run. Caching therefore reuses
   whole prior-run cells one-for-one and never collapses or dedupes epochs
   within a run — the per-run sample size is preserved. Statistical honesty is
-  then completed in ``eval.report``, which reports the effective (non-cached)
-  sample size so CIs/power reflect genuinely independent draws.
+  then completed in ``eval.report``, which always surfaces the fresh/cached
+  sample breakdown (and warns when the cached fraction is high) so a run is
+  never misread as fully fresh, while genuine key-verified reuse still counts.
 - **Environment-complete key.** The key hashes the variant image digest, the
   fully-resolved prompt, the fixture content hash (reusing #89's fixture
   hashing), the model/effort/max-turns/timeout/collector, and every other input

@@ -85,9 +85,10 @@ class RunResult:
     # produced (0 = succeeded/failed on the first attempt). See issue #69.
     retry_count: int = 0
     # True when this cell was not freshly executed but reused verbatim from a
-    # prior run's cached result (issue #131, `run --cache`). Cached cells are
-    # statistically NOT independent draws, so `analyze` reports the effective
-    # (non-cached) sample size separately — see eval.report.
+    # prior run's cached result (issue #131, `run --cache`). Because the cache
+    # key is environment-complete, a cached cell is a genuine key-verified draw
+    # and counts toward statistics; `analyze` surfaces the fresh/cached split
+    # for transparency — see eval.report.
     cached: bool = False
 
     @property

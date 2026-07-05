@@ -36,6 +36,14 @@ CI_GATE_RECOMMENDED_N = 10
 # k=1, pass@k and pass^k are identical and just restate the raw success rate.
 MIN_RELIABLE_K = 3
 
+# Fraction of a variant's samples that may come from the content-hash cache
+# (issue #131) before `analyze` emits a high-cache warning. Cached cells are
+# genuine environment-key-verified draws that DO count toward CIs and the
+# `--min-epochs` power gate (Option C), but past this threshold a reader must
+# be told the run was mostly reused so a stale environment or a narrow fresh
+# re-test isn't mistaken for a fully fresh run.
+HIGH_CACHE_FRACTION = 0.5
+
 # Cohen's d effect sizes (small / medium / large) power is reported for. Medium
 # (0.5) is the headline number surfaced in the low-power banner.
 _EFFECT_SIZES = (0.2, 0.5, 0.8)
@@ -135,10 +143,12 @@ class Report:
     # Per-variant run count (traces with extracted metrics) and shared paired n.
     variant_n: dict[str, int] = field(default_factory=dict)
     paired_n: int = 0
-    # Effective (freshly-produced, non-cached) sample sizes (issue #131). When a
-    # run reuses cached cells (`run --cache`), those samples are NOT independent
-    # draws, so statistics must be read against these effective counts, not the
-    # apparent totals above. Equal to variant_n / paired_n when nothing is cached.
+    # Fresh vs cached sample breakdown (issue #131, Option C). When a run reuses
+    # cached cells (`run --cache`), those cells are genuine environment-key-
+    # verified draws, so they DO count toward variant_n / paired_n and the power
+    # gate. These fields disclose how many samples were freshly produced
+    # (effective_*) vs reused (cached_*) so the split is always transparent.
+    # effective_* equal variant_n / paired_n when nothing is cached.
     cached_variant_n: dict[str, int] = field(default_factory=dict)
     effective_variant_n: dict[str, int] = field(default_factory=dict)
     effective_paired_n: int = 0
@@ -977,11 +987,13 @@ def build_report(
             e1 = {r.epoch for r in by_variant[variants[1]]} - {"?"}
             paired_n = len(e0 & e1)
 
-        # Effective (non-cached) sample sizes (issue #131). Cells reused from a
-        # prior run via `run --cache` are recorded in the manifest with
+        # Fresh vs cached sample breakdown (issue #131, Option C). Cells reused
+        # from a prior run via `run --cache` are recorded in the manifest with
         # ``cached: true``; their reused trace carries the original test_id, so
         # matching the 8-char metric test_id against the manifest's cached
-        # test_ids tells us which surviving samples are NOT independent draws.
+        # test_ids tells us which surviving samples were reused. Cached cells are
+        # genuine environment-key-verified draws and still count toward the
+        # totals/power gate; this split is only for transparent disclosure.
         cached_prefixes = _cached_test_id_prefixes(manifest_runs)
         cached_variant_n = {
             v: sum(1 for r in by_variant[v] if r.test_id in cached_prefixes) for v in variants
@@ -1164,23 +1176,40 @@ def _build_cache_warning(
     cached_variant_n: dict[str, int],
     effective_variant_n: dict[str, int],
 ) -> dict[str, Any] | None:
-    """Warn when cached (reused) samples inflate the apparent sample size so the
-    effective independent sample size isn't misread (issue #131). Returns
-    ``None`` when nothing was cached."""
+    """Warn when a HIGH fraction of a variant's samples were reused from the
+    content-hash cache (issue #131, Option C).
+
+    Cached cells are genuine environment-key-verified draws, so they DO count
+    toward CIs and the ``--min-epochs`` power gate. The fresh/cached split is
+    always surfaced in the report regardless; this warning only fires once the
+    cached fraction of any variant exceeds :data:`HIGH_CACHE_FRACTION`, so a
+    reader is never misled into thinking a mostly-reused run was fully fresh.
+    Returns ``None`` when nothing was cached or the cached fraction is low.
+    """
     total_cached = sum(cached_variant_n.get(v, 0) for v in variants)
     if total_cached == 0:
         return None
-    detail = ", ".join(
-        f"{v}: {effective_variant_n.get(v, 0)}/{variant_n.get(v, 0)}"
+    high = [
+        v
         for v in variants
-        if cached_variant_n.get(v, 0)
+        if variant_n.get(v, 0) > 0
+        and cached_variant_n.get(v, 0) / variant_n[v] > HIGH_CACHE_FRACTION
+    ]
+    if not high:
+        return None
+    detail = ", ".join(
+        f"{v}: {cached_variant_n.get(v, 0)}/{variant_n.get(v, 0)} cached "
+        f"({effective_variant_n.get(v, 0)} fresh)"
+        for v in high
     )
+    pct = int(HIGH_CACHE_FRACTION * 100)
     return {
-        "type": "cached_samples",
+        "type": "high_cache_fraction",
         "message": (
-            f"{total_cached} sample(s) reused from the content-hash cache and are NOT "
-            f"independent draws. Effective (non-cached) sample size — {detail} — is what "
-            "CIs/power should be read against."
+            f"Over {pct}% of samples were reused from the content-hash cache — {detail}. "
+            "Cached cells are genuine environment-key-verified draws and do count toward "
+            "CIs and the power gate, but this run is mostly reused rather than freshly "
+            "produced; read it with that in mind."
         ),
         "cached_variant_n": {v: cached_variant_n.get(v, 0) for v in variants},
         "effective_variant_n": {v: effective_variant_n.get(v, 0) for v in variants},
@@ -1191,6 +1220,25 @@ def _has_cached_samples(report: Report) -> bool:
     """True when any of this report's surviving samples were reused from the
     content-hash cache (issue #131) — i.e. total and effective counts differ."""
     return any(report.cached_variant_n.get(v, 0) for v in report.variants)
+
+
+def _cache_composition(report: Report) -> str:
+    """Per-variant fresh/cached breakdown, e.g. ``baseline=10 (3 fresh, 7 cached)``
+    (issue #131, Option C). Always shown when the run reused any cached cell so a
+    reader can see how much of the sample was freshly produced."""
+    parts = [
+        f"{v}={report.variant_n.get(v, 0)} "
+        f"({report.effective_variant_n.get(v, 0)} fresh, {report.cached_variant_n.get(v, 0)} cached)"
+        for v in report.variants
+    ]
+    line = ", ".join(parts)
+    if report.aggregate == "paired" and len(report.variants) == 2:
+        line += (
+            f"; paired epochs: {report.paired_n} "
+            f"({report.effective_paired_n} fully fresh, "
+            f"{report.paired_n - report.effective_paired_n} involve cached)"
+        )
+    return line
 
 
 def _build_reliability(
@@ -1473,13 +1521,7 @@ def format_table(reports: list[Report], *, color: bool | None = None) -> str:
             sample_line += f"; paired epochs={report.paired_n}"
         lines.append("\n" + sample_line)
         if _has_cached_samples(report):
-            eff_desc = ", ".join(
-                f"{v}={report.effective_variant_n.get(v, 0)}" for v in report.variants
-            )
-            eff_line = f"Effective (non-cached): {eff_desc}"
-            if report.aggregate == "paired" and len(report.variants) == 2:
-                eff_line += f"; paired epochs={report.effective_paired_n}"
-            lines.append(eff_line)
+            lines.append(f"Sample composition: {_cache_composition(report)}")
         if mc_line := _mc_correction_line(report):
             lines.append(mc_line)
         for w in report.warnings:
@@ -1645,13 +1687,14 @@ def _report_json(report: Report) -> dict[str, Any]:
         "pass_k": [_summary_row_json(r, "metric") for r in report.pass_k],
         "judge_runtime": report.judge_runtime,
     }
-    # Effective (non-cached) sample sizes are only emitted when the cache
-    # actually reused samples (issue #131), so non-cached output stays
-    # byte-identical to before this feature (matching the golden files).
+    # The fresh/cached breakdown is only emitted when the cache actually reused
+    # samples (issue #131), so non-cached output stays byte-identical to before
+    # this feature (matching the golden files). Cached cells count toward
+    # variant_n/paired_n (Option C); these keys disclose how many were fresh.
     if _has_cached_samples(report):
         task_json["cached_variant_n"] = report.cached_variant_n
-        task_json["effective_variant_n"] = report.effective_variant_n
-        task_json["effective_paired_n"] = report.effective_paired_n
+        task_json["fresh_variant_n"] = report.effective_variant_n
+        task_json["fresh_paired_n"] = report.effective_paired_n
     return task_json
 
 
@@ -1668,13 +1711,7 @@ def format_markdown(reports: list[Report]) -> str:
             sample_line += f"; paired epochs={report.paired_n}"
         lines.append(sample_line)
         if _has_cached_samples(report):
-            eff_desc = ", ".join(
-                f"{v}={report.effective_variant_n.get(v, 0)}" for v in report.variants
-            )
-            eff_line = f"**Effective (non-cached):** {eff_desc}"
-            if report.aggregate == "paired" and len(report.variants) == 2:
-                eff_line += f"; paired epochs={report.effective_paired_n}"
-            lines.append(eff_line)
+            lines.append(f"**Sample composition:** {_cache_composition(report)}")
         if mc_line := _mc_correction_line(report):
             lines.append(f"**{mc_line}**")
         for w in report.warnings:
@@ -2032,6 +2069,25 @@ def format_junit(reports: list[Report]) -> str:
                 "skipped": "0",
             },
         )
+        # Disclose the content-hash cache fresh/cached split (issue #131) as
+        # testsuite properties so machine-readable JUnit consumers can see how
+        # much of the sample was reused. Only emitted when the cache was used,
+        # keeping non-cached JUnit output byte-identical.
+        if _has_cached_samples(report):
+            props = ET.SubElement(testsuite, "properties")
+            for v in report.variants:
+                ET.SubElement(
+                    props,
+                    "property",
+                    {
+                        "name": f"cache.{v}",
+                        "value": (
+                            f"total={report.variant_n.get(v, 0)};"
+                            f"fresh={report.effective_variant_n.get(v, 0)};"
+                            f"cached={report.cached_variant_n.get(v, 0)}"
+                        ),
+                    },
+                )
         for _, rows, hib in groups:
             for row in rows:
                 testsuite.append(_junit_testcase(row, task=report.task, higher_is_better=hib))
@@ -2173,6 +2229,11 @@ def format_html(reports: list[Report]) -> str:
         if report.aggregate == "paired" and len(report.variants) == 2:
             meta += f"; paired epochs={report.paired_n}"
         body.append(f'<p class="meta">{_html_escape(meta)}</p>')
+        if _has_cached_samples(report):
+            body.append(
+                f'<p class="meta">Sample composition: '
+                f"{_html_escape(_cache_composition(report))}</p>"
+            )
         if mc_line := _mc_correction_line(report):
             body.append(f'<p class="meta">{_html_escape(mc_line)}</p>')
         for w in report.warnings:

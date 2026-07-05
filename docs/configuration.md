@@ -225,15 +225,24 @@ fake-inflate confidence:
   re-homing is only possible for the file exporter, caching requires
   `runner.collector: file` (the zero-dependency default); with the Jaeger backend
   the cache is skipped with a notice.
-- **Effective sample size is reported.** Cached cells are recorded in the
-  manifest / `results.json` with `"cached": true`, and `analyze` reports the
-  **effective (non-cached) sample size** alongside the total
-  (`effective_variant_n` / `effective_paired_n` in JSON, an "Effective
-  (non-cached)" line in the table/markdown, plus a `cached_samples` warning).
-  Point estimates and confidence intervals use *all* real samples (a cached cell
-  is a genuine prior draw), but the `--min-epochs` power gate is read against the
-  **effective** count — so a fully-cached run can never satisfy a "produce N fresh
-  epochs" requirement on stale evidence alone.
+- **Cached cells count as real data — the fresh/cached split is always
+  surfaced.** Because the cache key is environment-complete (image digest +
+  fixture hash + resolved prompt + model + reasoning effort + the run-time
+  inputs above), a cache hit is a *genuine* independent draw from the identical,
+  key-verified distribution — not a fabricated or duplicated sample. So cached
+  cells **count toward point estimates, confidence intervals, and the
+  `--min-epochs` power gate**, exactly like fresh ones. This makes the primary
+  "reuse the baseline, iterate only the experiment" workflow satisfy a
+  satisfiable `--min-epochs` gate.
+
+  Statistical honesty is preserved by **transparency**, not by discounting real
+  data: cached cells are recorded in the manifest / `results.json` with
+  `"cached": true`, and `analyze` **always** reports the fresh/cached breakdown
+  (`cached_variant_n` / `fresh_variant_n` / `fresh_paired_n` in JSON, a `cache.*`
+  property per variant in JUnit, and a `Sample composition: baseline=10 (3 fresh,
+  7 cached); …` line in the table/markdown/HTML). When a variant's cached
+  fraction exceeds **50%**, a `high_cache_fraction` warning fires so a
+  mostly-reused run is never mistaken for a fully fresh one.
 
 ## Advanced Configuration
 

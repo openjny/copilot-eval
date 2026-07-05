@@ -565,7 +565,7 @@ def run_command(
     is skipped and its whole result reused (``cache_dir`` overrides the default
     ``results/.cache``). Off by default, so the golden path is unchanged. Caching
     only ever reuses whole prior cells one-for-one per epoch — it never collapses
-    epochs — and ``analyze`` reports the effective (non-cached) sample size.
+    epochs — and ``analyze`` always surfaces the fresh/cached sample breakdown.
     """
     resolved_epochs = epochs or config.runner.epochs
 
@@ -763,8 +763,8 @@ def run_command(
         store_fresh_results(cache_obj, run_dir, results, cache_keys, cache_inputs)
         # Cached cells are part of this run's results for manifest/summary
         # purposes; the scheduler skipped executing them but they still cover
-        # their matrix cells (marked cached=True so analyze reports the
-        # effective, non-cached sample size).
+        # their matrix cells (marked cached=True so analyze surfaces the
+        # fresh/cached sample breakdown).
         results = results + cache_hits
 
     schedule = {

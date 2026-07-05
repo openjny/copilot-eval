@@ -1,8 +1,9 @@
 """Tests for the opt-in content-hash run cache (issue #131): cache-key
 computation and invalidation, the on-disk RunCache round-trip (store →
 materialize), the orchestrator `run --cache` flow (miss = fresh run, hit = cell
-skipped + result reused), and that `analyze`/`build_report` reports the
-effective (non-cached) sample size so cached reuse can't fake-inflate confidence.
+skipped + result reused), and that `analyze`/`build_report` always surfaces the
+fresh/cached sample breakdown (and warns past a high-cache threshold) while
+cached cells still count toward the totals and the power gate (Option C).
 
 External execution is fully mocked: `run_one` is monkeypatched and the Docker
 image-digest resolver is stubbed, so no Docker daemon is required.
@@ -582,9 +583,13 @@ def _manifest_row(variant: str, epoch: int, test_id: str, cached: bool) -> dict:
     }
 
 
-def test_report_surfaces_effective_non_cached_sample_size():
-    """A run that reused 1 of 2 epochs per variant must report the effective
-    (non-cached) sample size, not just the inflated total."""
+def test_report_surfaces_fresh_cached_breakdown():
+    """A run that reused 1 of 2 epochs per variant must surface the fresh/cached
+    breakdown (issue #131, Option C). Cached cells still count toward the totals
+    and the power gate; at exactly 50% cached the high-cache warning stays quiet."""
+    from eval.report import _cache_composition, format_json
+    from eval.services.analyze_service import _gate_epochs
+
     metrics = [
         _metric("baseline", "1", "aaaaaaaa"),
         _metric("baseline", "2", "bbbbbbbb"),
@@ -606,15 +611,105 @@ def test_report_surfaces_effective_non_cached_sample_size():
     )
     report = reports[0]
 
+    # Totals count ALL real samples (fresh + cached); the split is disclosed.
     assert report.variant_n == {"baseline": 2, "experimental": 2}
     assert report.cached_variant_n == {"baseline": 1, "experimental": 1}
     assert report.effective_variant_n == {"baseline": 1, "experimental": 1}
     assert report.paired_n == 2
     assert report.effective_paired_n == 1  # only epoch 2 is fresh on both sides
-    assert any(w["type"] == "cached_samples" for w in report.warnings)
+
+    # Power gate counts all real samples (Option C), not just the fresh ones.
+    assert _gate_epochs(report) == 2
+
+    # The fresh/cached breakdown is always surfaced when the cache was used.
+    comp = _cache_composition(report)
+    assert "1 fresh, 1 cached" in comp
+    assert "fully fresh" in comp
+
+    # Exactly 50% cached is not "high", so no warning fires.
+    assert not any(w["type"] == "high_cache_fraction" for w in report.warnings)
+
+    # Machine-readable JSON carries the breakdown.
+    payload = json.loads(format_json(reports))
+    task_json = payload["tasks"][0]
+    assert task_json["cached_variant_n"] == {"baseline": 1, "experimental": 1}
+    assert task_json["fresh_variant_n"] == {"baseline": 1, "experimental": 1}
+    assert task_json["fresh_paired_n"] == 1
+
+
+def test_reuse_baseline_workflow_passes_min_epochs_gate():
+    """The primary workflow — reuse the baseline from cache, freshly re-run only
+    the experiment — must satisfy a satisfiable `--min-epochs` gate (issue #131,
+    Option C). Before Option C the both-sides-fresh restriction forced the paired
+    effective count to 0 and blocked this gate."""
+    from eval.services.analyze_service import _gate_epochs
+
+    metrics = [
+        _metric("baseline", "1", "aaaaaaaa"),
+        _metric("baseline", "2", "bbbbbbbb"),
+        _metric("experimental", "1", "cccccccc"),
+        _metric("experimental", "2", "dddddddd"),
+    ]
+    manifest = [
+        # baseline fully reused from a prior run; experiment freshly produced.
+        _manifest_row("baseline", 1, "aaaaaaaa", cached=True),
+        _manifest_row("baseline", 2, "bbbbbbbb", cached=True),
+        _manifest_row("experimental", 1, "cccccccc", cached=False),
+        _manifest_row("experimental", 2, "dddddddd", cached=False),
+    ]
+    reports = build_report(
+        metrics,
+        variant_order=["baseline", "experimental"],
+        manifest_runs=manifest,
+        trace_test_ids={"aaaaaaaa", "bbbbbbbb", "cccccccc", "dddddddd"},
+    )
+    report = reports[0]
+
+    # 2 paired epochs are compared; the gate counts them all despite the reuse.
+    assert report.paired_n == 2
+    assert _gate_epochs(report) == 2
+    assert _gate_epochs(report) >= 2  # a --min-epochs 2 gate would pass
+    """Past the high-cache threshold (>50% reused) `analyze` must warn so a
+    mostly-reused run isn't misread as fully fresh (issue #131, Option C)."""
+    metrics = [
+        _metric("baseline", "1", "aaaaaaaa"),
+        _metric("baseline", "2", "bbbbbbbb"),
+        _metric("baseline", "3", "eeeeeeee"),
+        _metric("experimental", "1", "cccccccc"),
+        _metric("experimental", "2", "dddddddd"),
+        _metric("experimental", "3", "ffffffff"),
+    ]
+    manifest = [
+        _manifest_row("baseline", 1, "aaaaaaaa", cached=True),
+        _manifest_row("baseline", 2, "bbbbbbbb", cached=True),
+        _manifest_row("baseline", 3, "eeeeeeee", cached=False),
+        _manifest_row("experimental", 1, "cccccccc", cached=True),
+        _manifest_row("experimental", 2, "dddddddd", cached=True),
+        _manifest_row("experimental", 3, "ffffffff", cached=False),
+    ]
+    reports = build_report(
+        metrics,
+        variant_order=["baseline", "experimental"],
+        manifest_runs=manifest,
+        trace_test_ids={
+            "aaaaaaaa",
+            "bbbbbbbb",
+            "eeeeeeee",
+            "cccccccc",
+            "dddddddd",
+            "ffffffff",
+        },
+    )
+    report = reports[0]
+
+    warning = next((w for w in report.warnings if w["type"] == "high_cache_fraction"), None)
+    assert warning is not None
+    assert "count toward" in warning["message"]
 
 
 def test_report_no_cache_effective_equals_total():
+    from eval.report import _has_cached_samples
+
     metrics = [
         _metric("baseline", "1", "aaaaaaaa"),
         _metric("experimental", "1", "cccccccc"),
@@ -633,4 +728,5 @@ def test_report_no_cache_effective_equals_total():
 
     assert report.effective_variant_n == report.variant_n
     assert report.cached_variant_n == {"baseline": 0, "experimental": 0}
-    assert not any(w["type"] == "cached_samples" for w in report.warnings)
+    assert not any(w["type"] == "high_cache_fraction" for w in report.warnings)
+    assert not _has_cached_samples(report)
