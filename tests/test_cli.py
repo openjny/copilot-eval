@@ -1024,6 +1024,68 @@ def test_analyze_allow_empty_exits_zero_on_unknown_run(tmp_path: Path, monkeypat
     assert result.exit_code == 0, result.output
 
 
+def test_analyze_allow_empty_still_fails_metric_gate(tmp_path: Path, monkeypatch):
+    """Safety property (Q2): --allow-empty bypasses ONLY the pure empty-run
+    failure, never a metric gate. A metric-gated run with no telemetry/manifest
+    still fails CLOSED even with --allow-empty (preserves the #64/#121 guarantee)."""
+    from eval.services import analyze_service
+
+    config = _analyze_gate_config(tmp_path, budget_threshold=0.5)
+    monkeypatch.setattr(analyze_service, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr(analyze_service, "_collect_file_traces", lambda *a, **k: [])
+
+    result = CliRunner().invoke(
+        main, ["analyze", "--run-id", "typo-run", "--skip-eval", "--allow-empty"]
+    )
+
+    assert result.exit_code != 0, result.output
+    assert "Metric gate failed" in result.output
+
+
+def test_analyze_reports_no_analyzable_data_for_unparseable_traces(tmp_path: Path, monkeypatch):
+    """When traces were collected but none parse into metrics (and there is no
+    manifest / results dir), the run existed — so it must fail as "no analyzable
+    data", NOT be mislabeled "not found" (the Jaeger / unparseable-trace case)."""
+    from eval.services import analyze_service
+
+    config = _no_gate_config(tmp_path)
+    # results/<run_id> NOT created, but a raw (unparseable) trace was collected.
+    monkeypatch.setattr(analyze_service, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr(
+        analyze_service, "_collect_file_traces", lambda *a, **k: [_metric_trace_no_root()]
+    )
+
+    result = CliRunner().invoke(main, ["analyze", "--run-id", "real-run", "--skip-eval"])
+
+    assert result.exit_code != 0, result.output
+    assert "no analyzable data" in result.output
+    assert "not found" not in result.output
+
+
+def test_analyze_manifest_only_run_does_not_fail_closed(tmp_path: Path, monkeypatch):
+    """A known run with a manifest but no surviving traces (and no metric gate)
+    must NOT hit the new unknown/empty fail path — it reports reliability from the
+    manifest and exits 0, preserving prior behavior."""
+    config = _no_gate_config(tmp_path)
+    manifest = [
+        {
+            "task": "t",
+            "variant": "v",
+            "epoch": 0,
+            "fixture": "",
+            "test_id": "gone",
+            "status": "success",
+        }
+    ]
+    run_id = _patch_analyze_with(tmp_path, monkeypatch, config, [], manifest=manifest)
+
+    result = CliRunner().invoke(main, ["analyze", "--run-id", run_id, "--skip-eval"])
+
+    assert result.exit_code == 0, result.output
+    assert "not found" not in result.output
+    assert "no analyzable data" not in result.output
+
+
 # --- analyze --min-epochs (statistical power CI gate) ---
 
 

@@ -149,11 +149,19 @@ def run_analysis(
         # Fail CLOSED so a mistyped/never-executed --run-id can't pass a CI gate
         # with exit 0 (issue #126), mirroring the `resume` "Run not found"
         # precedent in orchestrator.py. Distinguish an unknown run (results dir
-        # absent) from a known run that produced nothing analyzable, and offer
-        # --allow-empty as an explicit escape hatch.
+        # absent AND nothing was even collected) from a known run that produced
+        # nothing analyzable, and offer --allow-empty as an explicit escape hatch.
+        # NOTE: this is only reachable for configs WITHOUT a metric gate — a
+        # metric-gated run with no telemetry/manifest already raised above via the
+        # synthesized "unverifiable" failed_gate (fail-closed per #64/#121), which
+        # --allow-empty deliberately does NOT bypass.
         if allow_empty:
             return
-        if not results_dir.exists():
+        # Only "not found" when nothing was collected AND no results dir exists:
+        # with the Jaeger collector (or separate CI jobs) traces can be fetched
+        # while no local results dir exists, so raw traces present — even if none
+        # parsed into metrics — means the run existed and is "empty", not unknown.
+        if not results_dir.exists() and not traces:
             raise click.ClickException(
                 f"Run '{run_id}' not found under {config.results_dir}. "
                 "Pass an existing --run-id to analyze, or --allow-empty to treat "
