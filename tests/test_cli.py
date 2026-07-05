@@ -515,6 +515,82 @@ def test_run_metric_evaluators_manifest_run_with_trace_not_double_counted(tmp_pa
     assert len([s for s in all_scores if s["name"] == "budget"]) == 1
 
 
+def _metric_trace_int_tags_absent():
+    """A trace whose root lacks `github.copilot.turn_count` and whose chat span
+    carries NO token-usage tags. Drives the real `extract_metrics` path where the
+    int-tag metrics coerce to 0 but are flagged unavailable (#121) — so a
+    `turn_count <= N` / `total_tokens <= N` gate must fail CLOSED, not pass on a
+    coerced 0 <= N."""
+    from eval.trace import Span, Trace
+
+    root = Span(
+        name="invoke_agent",
+        duration_s=42.0,
+        span_id="r",
+        parent_id=None,
+        tags={"gen_ai.request.model": "m"},  # no turn_count tag
+    )
+    chat = Span(
+        name="chat",
+        duration_s=1.0,
+        span_id="c1",
+        parent_id="r",
+        tags={},  # no gen_ai.usage.* token tags → token telemetry absent
+    )
+    return Trace(
+        trace_id="tr",
+        spans=[root, chat],
+        resource_tags={
+            "eval.scenario": "t",
+            "eval.variant": "v",
+            "eval.epoch": "0",
+            "eval.test_id": "abc",
+        },
+    )
+
+
+def test_run_metric_evaluators_int_tag_absent_fails_closed(tmp_path: Path):
+    """#121: absent int-tag telemetry (tokens / turn_count) must make a `<=` gate
+    fail CLOSED via the real extract_metrics path — not silently pass on a coerced
+    0 (0 <= N)."""
+    from eval.config import Evaluator, Task
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    task = Task(
+        name="t",
+        prompt="p",
+        evaluators=[
+            Evaluator(
+                name="tokens", type="metric", metric="total_tokens", op="<=", threshold=1000.0
+            ),
+            Evaluator(name="turns", type="metric", metric="turn_count", op="<=", threshold=10.0),
+        ],
+    )
+    config = Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[task],
+        variants=_variants("v"),
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+
+    failed = _run_metric_evaluators(config, [_metric_trace_int_tags_absent()], results_dir)
+
+    assert len(failed) == 2
+    joined = " ".join(failed)
+    assert "tokens" in joined and "turns" in joined
+    assert "unavailable" in joined
+
+    # Both gates persist a null (score=None, passed=False) score, not a passing 0.
+    scores = {
+        s["name"]: s for s in json.loads((results_dir / "t_v_epoch0.scores.json").read_text())
+    }
+    assert scores["tokens"]["score"] is None and scores["tokens"]["passed"] is False
+    assert scores["turns"]["score"] is None and scores["turns"]["passed"] is False
+
+
 def _metric_trace_fx(fixture: str, duration: float):
     """A metric trace tagged with eval.fixture (multi-fixture input-coverage axis)."""
     from eval.trace import Span, Trace
@@ -802,6 +878,41 @@ def test_analyze_exits_nonzero_when_manifest_run_missing_telemetry(tmp_path: Pat
     assert result.exit_code != 0, result.output
     assert "Metric gate failed" in result.output
     assert "budget" in result.output
+
+
+def test_analyze_exits_nonzero_when_int_tag_absent(tmp_path: Path, monkeypatch):
+    """#121 end-to-end: a `total_tokens <= N` gate whose token telemetry is absent
+    must make `analyze` exit non-zero — even with a threshold the coerced 0 would
+    have passed (0 <= 1000)."""
+    from click.testing import CliRunner
+
+    from eval.cli import main
+    from eval.config import Evaluator, Task
+
+    task = Task(
+        name="t",
+        prompt="p",
+        evaluators=[
+            Evaluator(
+                name="tokens", type="metric", metric="total_tokens", op="<=", threshold=1000.0
+            )
+        ],
+    )
+    config = Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[task],
+        variants=_variants("v"),
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+    run_id = _patch_analyze_with(tmp_path, monkeypatch, config, [_metric_trace_int_tags_absent()])
+
+    result = CliRunner().invoke(main, ["analyze", "--run-id", run_id, "--skip-eval"])
+
+    assert result.exit_code != 0, result.output
+    assert "Metric gate failed" in result.output
+    assert "tokens" in result.output
 
 
 def test_run_metric_evaluators_missing_telemetry_fails_closed_regardless_of_status(tmp_path: Path):

@@ -65,6 +65,22 @@ class RunMetrics:
     # lets a `cost` metric gate fail CLOSED — treat cost as unavailable (→ None)
     # rather than silently passing a `cost < X` budget on missing telemetry.
     cost_available: bool = True
+    # #121 extends #64's "distinguish genuine 0 from absent" treatment to the
+    # integer telemetry-tag metrics. The int fields above stay non-nullable ints
+    # (rendered as 0 when the backing tag is absent on a partial trace), while
+    # these flags let the corresponding metric gates fail CLOSED — the accessor
+    # yields None instead of a coerced 0 that would silently pass a `<=`/`<` gate
+    # on missing telemetry. `turn_count` and the REQUIRED per-chat usage tags
+    # (input/output tokens) are unavailable when the tag is missing where it
+    # should appear; `cache_tokens` tracks the OPTIONAL cache_read tag, which
+    # healthy traces legitimately omit, so it is unavailable only when the run has
+    # no usage telemetry at all (no chat spans) — not merely because a turn had no
+    # cache hit. tool_count / tool_duration / duration are derived from span
+    # structure (not a tag) so they are always available and have no flag.
+    turn_count_available: bool = True
+    input_tokens_available: bool = True
+    output_tokens_available: bool = True
+    cache_tokens_available: bool = True
     # Reporting fixture label ("" for single-fixture tasks). Distinguishes runs
     # along the input-coverage axis when a task declares multiple fixtures.
     fixture: str = ""
@@ -81,20 +97,35 @@ def _parse_float(value: object) -> float | None:
 # Numeric RunMetrics fields a `metric` evaluator can assert on. Maps the public
 # metric name (used in eval-config.yaml) to how its numeric value is derived from
 # a RunMetrics instance. `duration_seconds` is an alias for `duration` and
-# `total_tokens` is derived (input + output). `cost` returns None when the
-# `github.copilot.cost` tag was absent or the "?" sentinel (`cost_available`
-# False), so a `cost` budget gate fails CLOSED instead of silently passing on a
-# run whose cost telemetry is missing.
+# `total_tokens` is derived (input + output). Tag-backed metrics return None when
+# their backing telemetry tag was absent (or the "?" sentinel for `cost`), so the
+# gate fails CLOSED instead of silently passing on a run whose telemetry is
+# missing: `cost` keys off `cost_available` (#64); `turn_count` and the token
+# aggregates key off the #121 availability flags. `total_tokens` is unavailable
+# when either of its input/output halves is. `tool_count` / `tool_duration` /
+# `duration` are structural (span counts/durations, not tags) and always avail.
 _METRIC_ACCESSORS: dict[str, Callable[[RunMetrics], float | None]] = {
     "duration": lambda m: float(m.duration),
     "duration_seconds": lambda m: float(m.duration),
-    "turn_count": lambda m: float(m.turn_count),
+    "turn_count": lambda m: float(m.turn_count) if m.turn_count_available else None,
     "tool_count": lambda m: float(m.tool_count),
     "tool_duration": lambda m: float(m.tool_duration),
-    "total_input_tokens": lambda m: float(m.total_input_tokens),
-    "total_output_tokens": lambda m: float(m.total_output_tokens),
-    "total_cache_tokens": lambda m: float(m.total_cache_tokens),
-    "total_tokens": lambda m: float(m.total_input_tokens + m.total_output_tokens),
+    "total_input_tokens": (
+        lambda m: float(m.total_input_tokens) if m.input_tokens_available else None
+    ),
+    "total_output_tokens": (
+        lambda m: float(m.total_output_tokens) if m.output_tokens_available else None
+    ),
+    "total_cache_tokens": (
+        lambda m: float(m.total_cache_tokens) if m.cache_tokens_available else None
+    ),
+    "total_tokens": (
+        lambda m: (
+            float(m.total_input_tokens + m.total_output_tokens)
+            if m.input_tokens_available and m.output_tokens_available
+            else None
+        )
+    ),
     "cost": lambda m: _parse_float(m.cost) if m.cost_available else None,
 }
 
@@ -164,9 +195,54 @@ def extract_metrics(trace: Trace) -> RunMetrics | None:
     chats = trace.chats
     tools = trace.tools
 
-    def int_tag(span: Span, key: str) -> int:
-        v = span.tags.get(key, 0)
-        return int(v) if v else 0
+    def int_tag(span: Span, key: str) -> tuple[int, bool]:
+        # Returns (value, available). An absent tag reports 0 — so the integer
+        # metric still renders as 0 per #58's non-nullable ints — but is flagged
+        # unavailable so a `<=`/`<` gate on it fails CLOSED (#121) rather than
+        # silently passing on a partial trace whose telemetry tag is missing. A
+        # genuine 0 (tag present and numeric) stays available, distinguishing it
+        # from an absent tag exactly as #64 did for cost.
+        v = span.tags.get(key)
+        if v is None or v == "":
+            return 0, False
+        try:
+            return int(v), True
+        except (TypeError, ValueError):
+            return 0, False
+
+    def sum_required_int_tag(spans: list[Span], key: str) -> tuple[int, bool]:
+        # Aggregate a REQUIRED per-span usage tag (input/output tokens, which every
+        # chat span emits). Available only when there is at least one contributing
+        # span AND every one carries the tag numerically: an empty span set can't
+        # measure the metric, and the tag missing on a span that should have it
+        # means the sum under-counts, so the gate must fail CLOSED rather than pass
+        # on an incomplete total.
+        if not spans:
+            return 0, False
+        total = 0
+        available = True
+        for s in spans:
+            value, present = int_tag(s, key)
+            total += value
+            available = available and present
+        return total, available
+
+    def sum_optional_int_tag(spans: list[Span], key: str) -> tuple[int, bool]:
+        # Aggregate an OPTIONAL per-span usage tag. `cache_read.input_tokens` is
+        # legitimately omitted on healthy traces — a turn with no cache hit (or a
+        # cache_creation turn) simply doesn't emit it (see the real-trace fixture
+        # tests/fixtures/file-exporter-sample.jsonl) — so a missing tag counts as 0
+        # rather than flipping availability, which would spuriously fail a
+        # `total_cache_tokens <= N` gate on a complete run. The metric is only
+        # unavailable when the run produced no usage telemetry at all (no chat
+        # spans), matching the required-tag path's "no telemetry → fail CLOSED".
+        if not spans:
+            return 0, False
+        total = 0
+        for s in spans:
+            value, _ = int_tag(s, key)
+            total += value
+        return total, True
 
     def float_tag(span: Span, key: str) -> tuple[float, bool]:
         # Returns (value, available). Cost may be absent or the "?" sentinel on
@@ -181,6 +257,14 @@ def extract_metrics(trace: Trace) -> RunMetrics | None:
         except (TypeError, ValueError):
             return 0.0, False
 
+    turn_count, turn_count_available = int_tag(root, "github.copilot.turn_count")
+    input_tokens, input_tokens_available = sum_required_int_tag(chats, "gen_ai.usage.input_tokens")
+    output_tokens, output_tokens_available = sum_required_int_tag(
+        chats, "gen_ai.usage.output_tokens"
+    )
+    cache_tokens, cache_tokens_available = sum_optional_int_tag(
+        chats, "gen_ai.usage.cache_read.input_tokens"
+    )
     cost_value, cost_available = float_tag(root, "github.copilot.cost")
 
     return RunMetrics(
@@ -190,16 +274,20 @@ def extract_metrics(trace: Trace) -> RunMetrics | None:
         test_id=trace.resource_tags.get("eval.test_id", "?")[:8],
         total_spans=len(trace.spans),
         duration=root.duration_s,
-        turn_count=int(root.tags.get("github.copilot.turn_count", 0)),
+        turn_count=turn_count,
         tool_count=len(tools),
         tool_names=[str(s.tags.get("gen_ai.tool.name", "?")) for s in tools],
         tool_duration=sum(s.duration_s for s in tools),
-        total_input_tokens=sum(int_tag(c, "gen_ai.usage.input_tokens") for c in chats),
-        total_output_tokens=sum(int_tag(c, "gen_ai.usage.output_tokens") for c in chats),
-        total_cache_tokens=sum(int_tag(c, "gen_ai.usage.cache_read.input_tokens") for c in chats),
+        total_input_tokens=input_tokens,
+        total_output_tokens=output_tokens,
+        total_cache_tokens=cache_tokens,
         model=str(root.tags.get("gen_ai.request.model", "?")),
         cost=cost_value,
         cost_available=cost_available,
+        turn_count_available=turn_count_available,
+        input_tokens_available=input_tokens_available,
+        output_tokens_available=output_tokens_available,
+        cache_tokens_available=cache_tokens_available,
         fixture=trace.resource_tags.get("eval.fixture", ""),
     )
 

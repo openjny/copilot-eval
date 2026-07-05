@@ -720,11 +720,14 @@ def eval_metric(ev: Evaluator, metrics: RunMetrics) -> EvalScore:
     Deterministic pass/fail (1/0), evaluated from parsed telemetry at ``analyze``
     time. Returns ``score=None`` (and ``passed=False``) when the metric value
     can't be derived from the trace, mirroring how judges surface an unusable
-    score rather than silently passing. This includes a ``cost`` gate when the
-    ``github.copilot.cost`` tag was absent or the ``"?"`` sentinel: ``cost`` is
-    rendered as ``0.0`` for reporting but ``cost_available`` is False, so the
-    accessor yields ``None`` and the gate fails CLOSED instead of passing a
-    ``cost < X`` budget on missing telemetry.
+    score rather than silently passing. This includes any telemetry-tag-backed
+    gate whose tag was absent on a partial trace: ``cost`` (absent or the ``"?"``
+    sentinel) and the #121 integer-tag metrics — ``turn_count`` and the token
+    aggregates (``total_input_tokens`` / ``total_output_tokens`` /
+    ``total_cache_tokens`` / ``total_tokens``). Each is rendered as its coerced
+    ``0`` for reporting, but its availability flag is False, so the accessor
+    yields ``None`` and the gate fails CLOSED instead of passing a ``<=``/``<``
+    threshold on missing telemetry.
     """
     metric_name = ev.metric or ""
     value = metric_value(metrics, metric_name)
