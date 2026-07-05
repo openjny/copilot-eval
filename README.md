@@ -71,6 +71,7 @@ uv run copilot-eval --log-level warning --log-format json run --config-dir examp
 | Command | Description |
 |---------|-------------|
 | `init --config-dir <dir> [--template minimal] [--force]` | Scaffold a minimal, runnable eval project (config, one task, two variants, fixture, Dockerfile, `.env.example`, `.gitignore`) — fails if files already exist unless `--force` |
+| `suggest-evaluators --task-prompt <text> --output <file> [--fixture <dir>] [--sample-output <file>]... [--task-name NAME] [--judge-model MODEL] [--config-dir <dir>] [--dry-run]` | Ask the judge model to propose evaluator YAML for a task — structured judge rubrics (scoring anchors) plus deterministic regex/contains anchors and metric gates. Works in prompt-only mode (no samples); the generated task file is guaranteed to pass `validate`. `--dry-run` prints the meta-prompt without calling the model |
 | `list --config-dir <dir>` | List tasks and variants |
 | `validate --config-dir <dir>` | Check config schema, fixtures, script/variant references, and var interpolation (warnings for non-blocking issues, e.g. missing optional fixtures) |
 | `build --config-dir <dir> [--variant NAME]` | Build Docker images |
