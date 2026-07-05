@@ -29,7 +29,18 @@ from eval.runner import RunResult, get_github_token, run_one
 from eval.services.build_service import _ensure_images
 from eval.services.check_report import print_check_results
 from eval.services.cost_service import estimate_run_cost, format_cost_report
-from eval.services.manifest import write_manifest, write_manifest_dicts
+from eval.services.fixtures_service import (
+    FIXTURE_LOCKFILE_NAME,
+    FixtureLockError,
+    FixtureVerification,
+    compact_hashes,
+    verify_fixtures,
+)
+from eval.services.manifest import (
+    load_manifest_fixtures,
+    write_manifest,
+    write_manifest_dicts,
+)
 from eval.services.resume_service import (
     CellKey,
     cell_key,
@@ -441,6 +452,51 @@ def _print_summary(
     click.echo("=" * 50)
 
 
+def _verify_fixtures_or_abort(
+    config: Config, tasks: list[Task], strict_fixtures: bool
+) -> FixtureVerification:
+    """Verify the run's fixtures against ``fixtures.lock`` (issue #89).
+
+    Drift is a non-blocking warning by default; ``--strict-fixtures`` turns any
+    drift (or a missing/unreadable lockfile, or referenced-but-unpinned
+    fixtures) into a hard abort so CI can gate reproducibility. Returns the
+    :class:`FixtureVerification` so the caller can reuse its freshly computed
+    ``current_hashes`` for the run manifest (fixtures are hashed only once).
+    """
+    try:
+        verification = verify_fixtures(config, tasks)
+    except FixtureLockError as exc:
+        if strict_fixtures:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"WARNING: {exc} (skipping fixture verification)", err=True)
+        return FixtureVerification(lockfile_present=False)
+
+    if not verification.lockfile_present:
+        if strict_fixtures:
+            raise click.ClickException(
+                f"--strict-fixtures set but no {FIXTURE_LOCKFILE_NAME} found. "
+                "Run `copilot-eval pin-fixtures` first."
+            )
+        return verification
+
+    for message in verification.problems:
+        prefix = "Fixture drift" if strict_fixtures else "WARNING: fixture drift"
+        click.echo(f"{prefix}: {message}", err=True)
+
+    if verification.has_problems:
+        if strict_fixtures:
+            raise click.ClickException(
+                "Fixture drift detected (--strict-fixtures). Re-pin with "
+                "`copilot-eval pin-fixtures` or restore the fixtures to match the lockfile."
+            )
+    elif verification.matched:
+        click.echo(
+            f"Fixtures verified against {FIXTURE_LOCKFILE_NAME}: "
+            f"{len(verification.matched)} fixture(s) match."
+        )
+    return verification
+
+
 def run_command(
     config: Config,
     *,
@@ -456,6 +512,7 @@ def run_command(
     estimate: bool = False,
     yes: bool = False,
     budget_limit: float | None = None,
+    strict_fixtures: bool = False,
 ) -> None:
     """Business logic for the `run` CLI command: select tasks, print the plan,
     pre-flight, build/ensure images, schedule runs, and persist the manifest.
@@ -539,6 +596,13 @@ def run_command(
             f"{remaining} to retry (plus any missing cells)"
         )
 
+    # Fixture integrity (issue #89): verify against fixtures.lock (warn on
+    # drift, or abort under --strict-fixtures) *before* any Docker work so a
+    # forgotten re-pin fails fast in CI instead of after a long image build.
+    # Runs for --dry-run too, so `run --dry-run --strict-fixtures` is a cheap
+    # reproducibility gate. `current_hashes` is reused for the manifest below.
+    verification = _verify_fixtures_or_abort(config, tasks, strict_fixtures)
+
     if dry_run:
         full_total = (
             sum(len(p.fixture_names()) for p in tasks) * resolved_epochs * len(config.variants)
@@ -588,6 +652,10 @@ def run_command(
     if not no_build:
         _ensure_images(config, github_token)
 
+    # Reuse the hashes computed during verification above (fixtures are hashed
+    # once per run) as the manifest's fixture-identity record (issue #89).
+    fixture_hashes = compact_hashes(verification.current_hashes)
+
     reporter = create_reporter(no_progress=no_progress)
     results = _execute_schedule(
         config, tasks, resolved_epochs, run_id, run_dir, github_token, reporter, skip_cells
@@ -601,13 +669,19 @@ def run_command(
     }
     if resume:
         merged_runs = merge_manifest_runs(existing_index, results)
-        write_manifest_dicts(run_dir, run_id, merged_runs, schedule, cost_estimate.to_dict())
+        # Preserve the fixture hashes of cells carried over from the original
+        # run; only the fixtures re-executed this resume get fresh values, so
+        # the audit record for already-completed cells stays intact.
+        merged_fixtures = {**load_manifest_fixtures(run_dir), **fixture_hashes}
+        write_manifest_dicts(
+            run_dir, run_id, merged_runs, schedule, cost_estimate.to_dict(), merged_fixtures
+        )
         passed = sum(1 for r in merged_runs if r.get("passed"))
         click.echo(
             f" Resume merged: {passed}/{len(merged_runs)} cell(s) passing overall "
             f"({len(results)} re-executed this run)"
         )
     else:
-        write_manifest(run_dir, run_id, results, schedule, cost_estimate.to_dict())
+        write_manifest(run_dir, run_id, results, schedule, cost_estimate.to_dict(), fixture_hashes)
 
     _print_summary(config, run_id, results, config_dir)

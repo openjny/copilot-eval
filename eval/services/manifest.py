@@ -26,9 +26,12 @@ def write_manifest(
     results: list[RunResult],
     schedule: dict[str, Any] | None = None,
     cost_estimate: dict[str, Any] | None = None,
+    fixtures: dict[str, Any] | None = None,
 ) -> None:
     """Persist the full set of runs so `analyze` can detect missing/failed ones."""
-    write_manifest_dicts(run_dir, run_id, [r.to_dict() for r in results], schedule, cost_estimate)
+    write_manifest_dicts(
+        run_dir, run_id, [r.to_dict() for r in results], schedule, cost_estimate, fixtures
+    )
 
 
 def write_manifest_dicts(
@@ -37,6 +40,7 @@ def write_manifest_dicts(
     runs: list[dict[str, Any]],
     schedule: dict[str, Any] | None = None,
     cost_estimate: dict[str, Any] | None = None,
+    fixtures: dict[str, Any] | None = None,
 ) -> None:
     """Same as :func:`write_manifest`, but takes already-serialized run dicts.
 
@@ -50,6 +54,10 @@ def write_manifest_dicts(
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "schedule": schedule or {},
+        # Fixture identity (issue #89): content hashes of the fixtures consumed
+        # by this run, so a later audit can prove two runs used identical
+        # inputs even if the fixture directories were modified afterwards.
+        "fixtures": fixtures or {},
         # Cost governance (issue #70): the pre-flight estimate computed before
         # this run started, plus the judge token usage actually observed
         # across this run's scores (see eval.judge_executor).
@@ -93,3 +101,19 @@ def load_manifest(results_dir: Path) -> list[dict[str, Any]] | None:
         return None
     runs = data.get("runs") if isinstance(data, dict) else None
     return runs if isinstance(runs, list) else None
+
+
+def load_manifest_fixtures(results_dir: Path) -> dict[str, Any]:
+    """Load the top-level ``fixtures`` block from a run's manifest (empty if
+    absent/unreadable). Used by `run --resume` to carry forward the fixture
+    hashes of cells that already completed in the original run instead of
+    overwriting them with values recomputed at resume time (issue #89)."""
+    manifest_file = results_dir / MANIFEST_NAME
+    if not manifest_file.exists():
+        return {}
+    try:
+        data = json.loads(manifest_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    fixtures = data.get("fixtures") if isinstance(data, dict) else None
+    return fixtures if isinstance(fixtures, dict) else {}

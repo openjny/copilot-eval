@@ -72,6 +72,11 @@ from eval.services.orchestrator import run_command
     help="Abort if the pre-flight cost estimate (USD) exceeds this value (overrides runner.budget_limit)",
 )
 @click.option(
+    "--strict-fixtures",
+    is_flag=True,
+    help="Fail the run if fixtures drift from fixtures.lock (see `pin-fixtures`)",
+)
+@click.option(
     "--config-dir",
     default=None,
     type=click.Path(exists=True),
@@ -89,6 +94,7 @@ def run(
     estimate: bool,
     yes: bool,
     budget_limit: float | None,
+    strict_fixtures: bool,
     config_dir: str | None,
 ) -> None:
     """Run A/B eval for one or more tasks."""
@@ -107,4 +113,5 @@ def run(
         estimate=estimate,
         yes=yes,
         budget_limit=budget_limit,
+        strict_fixtures=strict_fixtures,
     )
