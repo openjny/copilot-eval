@@ -309,6 +309,160 @@ def test_path_traversal_member_is_skipped(tmp_path: Path) -> None:
     assert not (content / ".." / "evil.txt").exists()
 
 
+def test_zip_slip_member_is_skipped(tmp_path: Path) -> None:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("../evil.txt", "pwned")
+        zf.writestr("safe.txt", "ok")
+    data = buf.getvalue()
+    rf = _remote("ds", "https://example.com/ds.zip", data)
+    config = _Config(tmp_path)
+
+    content = fx.ensure_remote_fixture(config, rf, opener=CountingOpener({rf.url: data}))
+
+    assert (content / "safe.txt").read_text() == "ok"
+    assert not (content.parent / "evil.txt").exists()
+    assert not (tmp_path / "evil.txt").exists()
+
+
+def test_symlink_member_is_skipped(tmp_path: Path) -> None:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        link = tarfile.TarInfo("link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/etc/passwd"
+        tf.addfile(link)
+        payload = b"ok"
+        reg = tarfile.TarInfo("file.txt")
+        reg.size = len(payload)
+        tf.addfile(reg, io.BytesIO(payload))
+    data = buf.getvalue()
+    rf = _remote("ds", "https://example.com/ds.tar.gz", data)
+    config = _Config(tmp_path)
+
+    content = fx.ensure_remote_fixture(config, rf, opener=CountingOpener({rf.url: data}))
+
+    assert (content / "file.txt").read_text() == "ok"
+    assert not (content / "link").exists()
+    assert not (content / "link").is_symlink()
+
+
+def test_safe_join_rejects_root_and_escape(tmp_path: Path) -> None:
+    assert fx._safe_join(tmp_path, ".") is None
+    assert fx._safe_join(tmp_path, "") is None
+    assert fx._safe_join(tmp_path, "/abs") is None
+    assert fx._safe_join(tmp_path, "../escape") is None
+    ok = fx._safe_join(tmp_path, "sub/file.txt")
+    assert ok is not None and ok == (tmp_path.resolve() / "sub" / "file.txt")
+
+
+# --- resource limits: decompression bombs, oversized download, timeout -------
+
+
+def test_extraction_size_cap_rejects_bomb(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fx, "MAX_EXTRACTED_BYTES", 4)
+    data = _make_targz({"big.txt": "way too many bytes"})
+    rf = _remote("ds", "https://example.com/ds.tar.gz", data)
+    config = _Config(tmp_path)
+
+    with pytest.raises(RemoteFixtureError, match="extraction ceiling"):
+        fx.ensure_remote_fixture(config, rf, opener=CountingOpener({rf.url: data}))
+
+    # Fail closed: no usable extracted entry is left behind.
+    assert not (fx._extracted_base(config, rf.sha256) / ".ok").exists()
+
+
+def test_extraction_member_cap_rejects_bomb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fx, "MAX_EXTRACTED_MEMBERS", 1)
+    data = _make_zip({"a.txt": "1", "b.txt": "2"})
+    rf = _remote("ds", "https://example.com/ds.zip", data)
+    config = _Config(tmp_path)
+
+    with pytest.raises(RemoteFixtureError, match="entries"):
+        fx.ensure_remote_fixture(config, rf, opener=CountingOpener({rf.url: data}))
+
+
+def test_corrupt_archive_is_wrapped(tmp_path: Path) -> None:
+    # Bytes that match their declared sha256 but are not a valid tar.
+    data = b"this is not a tar archive"
+    rf = _remote("ds", "https://example.com/ds.tar.gz", data)
+    config = _Config(tmp_path)
+
+    with pytest.raises(RemoteFixtureError, match="could not be unpacked|failed to extract"):
+        fx.ensure_remote_fixture(config, rf, opener=CountingOpener({rf.url: data}))
+
+    assert not (fx._extracted_base(config, rf.sha256) / ".ok").exists()
+
+
+class _FakeResponse:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def read(self, amt: int = -1) -> bytes:
+        return self._payload
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+def test_download_rejects_oversized_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fx, "MAX_DOWNLOAD_BYTES", 4)
+    monkeypatch.setattr(fx, "urlopen", lambda url, timeout=None: _FakeResponse(b"too many bytes"))
+    with pytest.raises(RemoteFixtureError, match="maximum download size"):
+        fx._download("https://example.com/big.tar.gz")
+
+
+def test_download_passes_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_urlopen(url: str, timeout: object = None) -> _FakeResponse:
+        seen["timeout"] = timeout
+        return _FakeResponse(b"x")
+
+    monkeypatch.setattr(fx, "urlopen", fake_urlopen)
+    fx._download("https://example.com/x")
+    assert seen["timeout"] == fx.DOWNLOAD_TIMEOUT_SECONDS
+
+
+# --- local/remote name-collision guard ---------------------------------------
+
+
+def test_local_shadow_rejected_on_resolve(tmp_path: Path) -> None:
+    config = _Config(tmp_path)
+    (fx.fixtures_dir(config) / "ds").mkdir(parents=True)
+    data = _make_targz({"a.txt": "x"})
+    rf = _remote("ds", "https://example.com/ds.tar.gz", data)
+
+    with pytest.raises(RemoteFixtureError, match="single source"):
+        fx.resolve_fixture_dir(config, "ds", {"ds": rf}, opener=CountingOpener({rf.url: data}))
+
+
+def test_local_shadow_rejected_on_materialize(tmp_path: Path) -> None:
+    data = _make_targz({"a.txt": "x"})
+    rf = _remote("shared", "https://example.com/ds.tar.gz", data)
+    config = load_inline(
+        tmp_path,
+        {
+            "tasks": [
+                {
+                    "name": "t1",
+                    "prompt": "p",
+                    "fixture": {"url": rf.url, "sha256": rf.sha256, "name": "shared"},
+                }
+            ]
+        },
+    )
+    (fx.fixtures_dir(config) / "shared").mkdir(parents=True)
+
+    with pytest.raises(RemoteFixtureError, match="single source"):
+        fx.materialize_remote_fixtures(config, config.tasks, opener=CountingOpener({rf.url: data}))
+
+
 # --- registry / materialize --------------------------------------------------
 
 
