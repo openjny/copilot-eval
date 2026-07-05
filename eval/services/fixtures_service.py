@@ -300,9 +300,7 @@ def verify_fixtures(config: Config, tasks: list[Task] | None = None) -> FixtureV
         entry = locked_fixtures.get(name)
         if entry is None:
             if current is not None:
-                result.unpinned.append(
-                    f"fixture '{name}' is not pinned in {FIXTURE_LOCKFILE_NAME}"
-                )
+                result.unpinned.append(f"fixture '{name}' is not pinned in {FIXTURE_LOCKFILE_NAME}")
             elif name in explicit:
                 # Explicitly declared, but neither on disk nor pinned — a real
                 # misconfiguration that strict mode should catch. (An implicit

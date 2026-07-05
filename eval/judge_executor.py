@@ -24,6 +24,7 @@ from typing import Any
 from eval.config import Config
 from eval.config import Evaluator as EvaluatorConfig
 from eval.env_utils import collect_secrets, mask_secrets
+from eval.exceptions import JudgeInvocationError
 from eval.protocols import EvalScore
 
 # Per-call judge result: (score, masked_reason, outcome, sample_meta). outcome
@@ -567,3 +568,39 @@ class JudgeExecutor:
             )
             for ev in evaluators
         ]
+
+    def complete(self, prompt: str, token: str | None) -> str:
+        """Run the judge model once on an arbitrary prompt and return raw text.
+
+        Unlike :meth:`execute_single`/:meth:`execute_batch`, this makes no
+        assumption about the response shape (no score-JSON contract) and does no
+        aggregation. It reuses the same Copilot CLI command construction
+        (``--model`` override) and environment (OTel disabled) as scoring calls,
+        so meta-prompt tasks like ``suggest-evaluators`` (issue #93) invoke the
+        judge model through a single shared code path.
+
+        Returns the process's stdout on a clean (returncode 0) run. Raises
+        :class:`JudgeInvocationError` on timeout, a missing Copilot CLI, an OS
+        error, or a non-zero exit, so callers can surface an actionable message.
+        """
+        try:
+            proc = subprocess.run(
+                self._cmd(prompt),
+                capture_output=True,
+                text=True,
+                timeout=self.config.runner.judge_timeout_seconds,
+                env=self._judge_env(token),
+            )
+        except subprocess.TimeoutExpired as exc:
+            timeout_s = self.config.runner.judge_timeout_seconds
+            raise JudgeInvocationError(f"judge model timed out after {timeout_s}s") from exc
+        except FileNotFoundError as exc:
+            raise JudgeInvocationError("copilot CLI not found on host") from exc
+        except OSError as exc:
+            raise JudgeInvocationError(f"judge model invocation failed: {exc}") from exc
+        if proc.returncode != 0:
+            secrets = collect_secrets(self.config, token)
+            stderr = mask_secrets((proc.stderr or "").strip(), secrets) or ""
+            detail = f" — {stderr[:_STDERR_SNIPPET_CHARS]}" if stderr else ""
+            raise JudgeInvocationError(f"judge model exited with rc={proc.returncode}{detail}")
+        return proc.stdout or ""

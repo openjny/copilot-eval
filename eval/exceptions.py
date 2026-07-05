@@ -33,6 +33,16 @@ class JudgeParseError(EvalError):
     """A judge evaluator's response could not be parsed into a usable score."""
 
 
+class JudgeInvocationError(EvalError):
+    """A judge-model Copilot invocation failed (timeout, missing CLI, non-zero exit).
+
+    Distinct from :class:`JudgeParseError`: the model was never reached or
+    exited abnormally, so there is no response to parse. Raised by
+    :meth:`eval.judge_executor.JudgeExecutor.complete` and surfaced by callers
+    such as the ``suggest-evaluators`` command (issue #93).
+    """
+
+
 class HookError(EvalError):
     """A before_run/after_run/health_check hook script failed to execute."""
 

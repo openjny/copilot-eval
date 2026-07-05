@@ -62,6 +62,48 @@ directly (see [Secrets & `.env`](#secrets--env) below for what an actual
 `validate`, then `run --dry-run`, to confirm it works before wiring up your
 own tasks and variants.
 
+## Suggesting evaluators (`suggest-evaluators`)
+
+Writing a good judge rubric from scratch is the hardest part of authoring an
+eval — the blank-page problem. `suggest-evaluators` asks the judge model to
+propose a starting evaluator set for a task and writes it as a ready-to-edit
+task file:
+
+```bash
+uv run copilot-eval suggest-evaluators \
+  --task-prompt "Review this PR for security vulnerabilities" \
+  --fixture fixtures/sample-pr/ \
+  --output tasks/security-review.yaml
+```
+
+The generated file bundles the task prompt with a mix of evaluators:
+
+- **judge rubrics** in the structured `criterion` + `rubric` form (integer
+  score → anchor descriptions), so the scale is calibrated and editable;
+- **deterministic anchors** (`regex`/`contains`) that pin objective, LLM-free
+  signals;
+- **metric gates** (e.g. a `cost` threshold) where applicable.
+
+It always emits at least one judge rubric *and* at least one deterministic
+anchor (adding sensible defaults if the model omits one), and every proposed
+evaluator is validated the same way the config loader validates them — so the
+output is guaranteed to pass `validate`. Drop the file into your project's
+`tasks/` directory, review the anchors, and run.
+
+Key options:
+
+- `--task-prompt <text>` / `--task-prompt-file <path>` — the task prompt (exactly one).
+- `--output <file>` — where to write the task YAML (required).
+- `--fixture <dir>` — summarize a fixture directory as task-input context.
+- `--sample-output <file>` (repeatable) — sample agent outputs to inform the
+  rubric. Omit all of them for **prompt-only mode**.
+- `--task-name NAME` — task name (default: derived from the output filename).
+- `--judge-model MODEL` — override the judge model (default: `runner.judge_model`).
+- `--dry-run` — print the meta-prompt sent to the judge and exit (no model call).
+
+This is a starting point, not a final rubric: the anchors and checks are meant
+to be reviewed and tightened before you rely on the scores.
+
 ## Validation
 
 Before running an eval, catch config typos and missing references early with:
