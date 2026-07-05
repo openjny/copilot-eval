@@ -29,5 +29,5 @@ uv run copilot-eval run --config-dir examples/advanced-features --dry-run
 ```
 
 The dry-run prints the run banner (note `Order: counterbalance`) followed by the
-matrix size — `4 epoch(s) × 2 variants × 2 fixtures = 16 runs total` — without
-touching Docker.
+matrix size — `4 epoch(s) × 2 variants × fixtures for each task (16 runs total)`,
+i.e. 4 × 2 × 2 fixtures — without touching Docker.

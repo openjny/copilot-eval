@@ -11,7 +11,7 @@ vars:
   language: English
 
 runner:
-  epochs: 4                    # a multiple of the variant count → full counterbalance
+  epochs: 4                    # a multiple of the variant count so counterbalance visits every position evenly
 
   # (1) Variant ordering — rotate which variant runs first each epoch so
   #     order effects (cache warmup, rate limits, time-of-day drift) don't

@@ -134,9 +134,11 @@ working eval and want less measurement noise or broader input coverage:
 | **Output instruction** | Customize or disable the sentence appended to every prompt (`output_instruction`) | [Output Instruction](#output-instruction) |
 | **Per-task health check** | Gate a run on an environment-readiness script (`health_check`) | [Health Check](#health-check) |
 
-A runnable, dependency-free config that exercises **all six** at once lives in
-[`examples/advanced-features/`](../examples/advanced-features/) — `validate` it
-and `run --dry-run` it to see the knobs in action without touching Docker.
+A runnable, dependency-free config that exercises the config-level knobs (variant
+ordering, multi-fixture, self-consistency, output instruction, health check) lives
+in [`examples/advanced-features/`](../examples/advanced-features/) — `validate` it,
+then `run --dry-run` it (the sixth feature) to see the whole matrix without
+touching Docker.
 
 ## eval-config.yaml
 
@@ -508,7 +510,13 @@ Rules:
 Single-shot judge scores are noisy. Set `runner.judge_samples > 1` to sample each
 judge multiple times and aggregate the successful scores via `runner.judge_aggregate`
 (`median` — default, `mean`, or `majority`). Each sample's outcome is classified as
-`ok` / `parse_error` / `timeout` / `error`.
+`ok` / `parse_error` / `timeout` / `error` (among others).
+
+Scores are integers, so `median`/`mean` round to the nearest integer using
+**round-half-up** (an average of `6.5` becomes `7`, not Python's banker's-rounding
+`6`), and `majority` breaks ties toward the **lower** score for determinism. Pick
+`median` (robust to outliers) unless you specifically want the mean's sensitivity
+or a mode-style `majority` vote.
 
 The aggregated `.scores.json` entry for a judge records this metadata (additive — older
 consumers ignore the extra keys):
@@ -755,9 +763,11 @@ tasks:
 - **Exit code 0 → ready**, the run proceeds. **Non-zero → the run is skipped**
   with `status: setup_failed` (it is never executed, and no telemetry/output is
   produced for that cell). Script stdout/stderr is appended to the run log.
-- If the script itself fails to *launch* (e.g. not executable / interpreter
-  missing), that raises a `HookError` for the cell, which the runner isolates as
-  `setup_failed` — it never aborts the rest of the batch.
+- If the script itself fails to *launch* (e.g. `bash` is unavailable or the OS
+  refuses to start the subprocess), that raises a `HookError` for the cell,
+  which the runner isolates as `setup_failed` — it never aborts the rest of the
+  batch. (The script is invoked as `bash <script>`, so a missing execute bit or
+  shebang does not by itself cause a launch failure.)
 
 **Interaction with hooks:** the order per run is `before_run` hook →
 `health_check` → container. The hook sets the environment up; the health check
@@ -850,12 +860,17 @@ check Docker, auth, disk space, or that fixture directories exist — use
 [`validate`](#validation) for on-disk reference checks. It also skips image
 builds and never executes hooks, health checks, or Copilot.
 
+**Budget gate still applies:** the one thing that happens before the dry-run
+early-return is the pre-flight cost estimate. It is always computed, and if it
+exceeds `runner.budget_limit` / `--budget-limit` the command **aborts with an
+error even under `--dry-run`** (see [Cost governance](#cost-governance)). With no
+budget limit set (the default), dry-run always prints the plan.
+
 **With `--resume`:** dry-run reports how many cells remain versus the full
 matrix, e.g. `[dry-run] Would run 5 cell(s) out of 16 in the matrix (skipping 11
 already completed).`
 
-**With `--estimate`:** the pre-flight cost estimate is still computed and printed,
-and a run whose estimate exceeds the budget limit is still aborted — but dry-run
+**With `--estimate`:** the full cost breakdown is additionally printed, but dry-run
 skips the interactive "Proceed?" confirmation, since nothing runs anyway.
 
 ## Variant Order (reducing measurement bias)
