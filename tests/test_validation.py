@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,12 +15,14 @@ from eval.cli import main
 from eval.config import ConfigError
 from eval.validation import (
     any_failed,
+    any_warnings,
     check_base_image,
     check_config_schema,
     check_disk_space,
     check_docker_daemon,
     check_fixtures,
     check_github_token,
+    check_json_schema,
     check_script_references,
     check_var_interpolation,
     format_results,
@@ -418,12 +421,13 @@ def test_validate_readiness_collects_all_and_skips_build_check(tmp_path: Path):
 
         mock_base.assert_not_called()
     # docker + token (both blocking failures) + 1 fixture (no fixture
-    # configured, task falls back to task name -> missing, but that's a
-    # non-blocking warning) + disk_space = 4 results.
+    # configured, task falls back to task name -> missing, but that's the
+    # benign "no fixture declared" case, a passing check) + disk_space = 4.
     assert len(results) == 4
     assert any_failed(results)
     fixture_result = next(r for r in results if r.name == "fixture:t1")
-    assert not fixture_result.blocking
+    assert fixture_result.passed
+    assert "No fixture declared" in fixture_result.message
 
 
 def test_validate_readiness_includes_base_image_when_check_build_true(tmp_path: Path):
@@ -600,12 +604,14 @@ def test_cli_run_check_build_matches_no_build_flag(
 
 
 def test_cli_run_proceeds_despite_missing_fixture_warning(tmp_path: Path):
-    """Regression test for the reviewer-flagged azure-skills `compliance-audit`
-    scenario: a task with no fixture dir on disk (relying solely on a
-    `before_run` hook) must still be allowed to run — a missing fixture is a
-    warning, not a blocking pre-flight failure."""
+    """Regression: a task that *explicitly declares* a fixture whose directory is
+    absent must still be allowed to run — a missing fixture is a warning, not a
+    blocking pre-flight failure."""
     config_dir = tmp_path / "cfg"
-    _write_yaml_config(config_dir, {"tasks": [{"name": "compliance-audit", "prompt": "audit"}]})
+    _write_yaml_config(
+        config_dir,
+        {"tasks": [{"name": "compliance-audit", "prompt": "audit", "fixture": "gone"}]},
+    )
     runner = CliRunner()
 
     with (
@@ -667,3 +673,240 @@ def test_cli_run_skip_preflight_bypasses_checks_entirely(tmp_path: Path):
     assert result.exit_code == 0, result.output
     mock_validate.assert_not_called()
     assert "skipped" in result.output.lower()
+
+
+# --- check_json_schema: split-file strict validation (issue #127) ---
+
+
+def _write_split_config(
+    config_dir: Path,
+    top: dict,
+    tasks: dict[str, dict] | None = None,
+    variants: dict[str, dict] | None = None,
+) -> None:
+    """Write an eval-config.yaml plus optional tasks/*.yaml and variants/*.yaml."""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "eval-config.yaml").write_text(yaml.safe_dump(top), encoding="utf-8")
+    for name, body in (tasks or {}).items():
+        (config_dir / "tasks").mkdir(exist_ok=True)
+        (config_dir / "tasks" / f"{name}.yaml").write_text(yaml.safe_dump(body), encoding="utf-8")
+    for name, body in (variants or {}).items():
+        (config_dir / "variants").mkdir(exist_ok=True)
+        (config_dir / "variants" / f"{name}.yaml").write_text(
+            yaml.safe_dump(body), encoding="utf-8"
+        )
+
+
+def test_check_json_schema_inline_valid(tmp_path: Path):
+    write_config(tmp_path, {"tasks": [{"name": "t1", "prompt": "hi"}]})
+    result = check_json_schema(tmp_path)
+    assert result.passed
+    assert "eval-config.yaml" in result.message
+
+
+def test_check_json_schema_inline_typo_is_blocking(tmp_path: Path):
+    write_config(tmp_path, {"runner": {"timeout_secods": 300}})
+    result = check_json_schema(tmp_path)
+    assert not result.passed
+    assert result.blocking
+    assert "timeout_secods" in result.message
+
+
+def test_check_json_schema_split_valid(tmp_path: Path):
+    _write_split_config(
+        tmp_path,
+        {"vars": {}},
+        tasks={"good": {"name": "good", "prompt": "do a thing"}},
+        variants={"baseline": {"name": "baseline", "description": "x"}},
+    )
+    result = check_json_schema(tmp_path)
+    assert result.passed
+    # Split files are covered, not skipped/degraded to a warning.
+    assert "tasks/*.yaml" in result.message
+    assert "variants/*.yaml" in result.message
+
+
+def test_check_json_schema_split_task_typo_is_blocking(tmp_path: Path):
+    _write_split_config(
+        tmp_path,
+        {"vars": {}},
+        tasks={"typo": {"prompt": "hi", "timeout_secods": 30}},
+    )
+    result = check_json_schema(tmp_path)
+    assert not result.passed
+    assert result.blocking
+    assert "tasks/typo.yaml" in result.message
+    assert "timeout_secods" in result.message
+
+
+def test_check_json_schema_split_variant_typo_is_blocking(tmp_path: Path):
+    _write_split_config(
+        tmp_path,
+        {"vars": {}},
+        variants={"v": {"name": "baseline", "descriptn": "typo"}},
+    )
+    result = check_json_schema(tmp_path)
+    assert not result.passed
+    assert result.blocking
+    assert "variants/v.yaml" in result.message
+    assert "descriptn" in result.message
+
+
+def test_check_json_schema_split_task_without_name_is_allowed(tmp_path: Path):
+    # A split task file may omit `name` (the loader falls back to the file stem),
+    # so a name-less-but-otherwise-valid task must not be flagged.
+    _write_split_config(
+        tmp_path,
+        {"vars": {}},
+        tasks={"nameless": {"prompt": "do a thing"}},
+    )
+    result = check_json_schema(tmp_path)
+    assert result.passed
+
+
+def test_cli_validate_fails_for_split_file_typo(tmp_path: Path):
+    config_dir = tmp_path / "cfg"
+    _write_split_config(
+        config_dir,
+        {"vars": {}},
+        tasks={"typo": {"prompt": "hi", "judge_batch": "tru"}},
+    )
+    runner = CliRunner()
+    result = runner.invoke(main, ["validate", "--config-dir", str(config_dir)])
+    assert result.exit_code == 1
+    assert "json_schema" in result.output
+    assert "tasks/typo.yaml" in result.output
+
+
+# --- check_fixtures: implicit vs explicit (issue #129) ---
+
+
+def test_check_fixtures_implicit_missing_is_benign(tmp_path: Path):
+    """A task with no declared fixture whose task-name dir is absent is the
+    benign fixed-answer case: a passing check, not a warning (issue #129)."""
+    write_config(tmp_path, {"tasks": [{"name": "calib-high", "prompt": "hi"}]})
+    from eval.config import load_config
+
+    config = load_config(tmp_path)
+    results = check_fixtures(config)
+    assert len(results) == 1
+    assert results[0].passed
+    assert "No fixture declared" in results[0].message
+
+
+def test_check_fixtures_explicit_missing_warns_with_clear_wording(tmp_path: Path):
+    write_config(tmp_path, {"tasks": [{"name": "t1", "prompt": "hi", "fixture": "gone"}]})
+    from eval.config import load_config
+
+    config = load_config(tmp_path)
+    results = check_fixtures(config)
+    assert len(results) == 1
+    r = results[0]
+    assert not r.passed
+    assert not r.blocking  # still non-blocking
+    # Wording makes the non-blocking nature + fix obvious.
+    assert "non-blocking" in r.message
+    assert "remove the 'fixture:' declaration" in r.remediation
+
+
+def test_cli_validate_judge_calibration_example_has_no_warnings():
+    """The canonical judge-calibration example must validate cleanly (issue #129)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    example = repo_root / "examples" / "judge-calibration"
+    runner = CliRunner()
+    result = runner.invoke(main, ["validate", "--config-dir", str(example)])
+    assert result.exit_code == 0, result.output
+    assert "warning" not in result.output.lower()
+    assert "All checks passed" in result.output
+
+
+# --- --strict flag (issue #128) ---
+
+
+def _make_config_with_warning(config_dir: Path):
+    from eval.config import load_config
+
+    write_config(config_dir, {"tasks": [{"name": "t1", "prompt": "hi", "fixture": "gone"}]})
+    return load_config(config_dir)
+
+
+def test_any_warnings_true_for_missing_fixture(tmp_path: Path):
+    config = _make_config_with_warning(tmp_path)
+    results = check_fixtures(config)
+    assert any_warnings(results)
+    assert not any_failed(results)
+
+
+def test_cli_validate_strict_promotes_warning_to_failure(tmp_path: Path):
+    config_dir = tmp_path / "cfg"
+    _write_yaml_config(
+        config_dir,
+        {"tasks": [{"name": "t1", "prompt": "hi", "fixture": "gone"}]},
+    )
+    runner = CliRunner()
+    # Without --strict: warning, exit 0.
+    lenient = runner.invoke(main, ["validate", "--config-dir", str(config_dir)])
+    assert lenient.exit_code == 0, lenient.output
+    # With --strict: same warning is promoted to a non-zero exit.
+    strict = runner.invoke(main, ["validate", "--config-dir", str(config_dir), "--strict"])
+    assert strict.exit_code == 1, strict.output
+    assert "promoted to failure" in strict.output
+
+
+def test_cli_validate_strict_auto_enabled_under_ci(tmp_path: Path, monkeypatch):
+    config_dir = tmp_path / "cfg"
+    _write_yaml_config(
+        config_dir,
+        {"tasks": [{"name": "t1", "prompt": "hi", "fixture": "gone"}]},
+    )
+    runner = CliRunner()
+    monkeypatch.setenv("CI", "1")
+    # CI set -> strict on by default -> non-zero on the warning.
+    auto = runner.invoke(main, ["validate", "--config-dir", str(config_dir)])
+    assert auto.exit_code == 1, auto.output
+    # --no-strict overrides the CI default.
+    override = runner.invoke(main, ["validate", "--config-dir", str(config_dir), "--no-strict"])
+    assert override.exit_code == 0, override.output
+
+
+def test_cli_validate_strict_passes_when_no_warnings(tmp_path: Path):
+    config_dir = tmp_path / "cfg"
+    _write_yaml_config(config_dir, {"tasks": [{"name": "t1", "prompt": "hi"}]})
+    (config_dir / "fixtures" / "t1").mkdir(parents=True)
+    runner = CliRunner()
+    result = runner.invoke(main, ["validate", "--config-dir", str(config_dir), "--strict"])
+    assert result.exit_code == 0, result.output
+
+
+# --- readable Dockerfile/script paths (issue #130) ---
+
+
+def test_check_script_references_renders_readable_dockerfile_path(tmp_path: Path):
+    """An out-of-tree config dir must not render a deep ../../.. cwd-relative
+    walk; the path should be config-dir-relative or absolute (issue #130)."""
+    config_dir = tmp_path / "cfg"
+    (config_dir / "docker").mkdir(parents=True)
+    (config_dir / "docker" / "Dockerfile.exp").write_text("FROM x\n")
+    # Store the dockerfile the way `init` does: relative to the project/repo dir
+    # (so the Docker build context resolves), which yields a ../../.. walk.
+    from eval.config import load_config
+
+    write_config(
+        config_dir,
+        {
+            "tasks": [{"name": "t1", "prompt": "hi"}],
+            "variants": [{"name": "exp", "build": {"dockerfile": "docker/Dockerfile.exp"}}],
+        },
+    )
+    config = load_config(config_dir)
+    # Force the project_dir/dockerfile round-trip to produce a ../.. relative path.
+    import os
+
+    rel = os.path.relpath(config_dir / "docker" / "Dockerfile.exp", config.project_dir)
+    config.variants[0] = replace(config.variants[0], dockerfile=rel)
+
+    results = check_script_references(config)
+    dockerfile_result = next(r for r in results if r.name.endswith(":dockerfile"))
+    assert dockerfile_result.passed
+    assert ".." not in dockerfile_result.message
+    assert dockerfile_result.message == "Found docker/Dockerfile.exp"

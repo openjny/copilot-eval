@@ -9,6 +9,27 @@ native test report, a GitHub Actions step summary, and a self-contained
 dashboard, respectively — all still driven by the same `analyze` command and
 its statistical gates (`--min-epochs`, metric evaluators).
 
+## Pre-run config gate (`validate --strict`)
+
+Before spending CI minutes on a Docker run, gate the config itself. `validate`
+checks the schema (both the inline `eval-config.yaml` and the split-file
+`tasks/*.yaml` / `variants/*.yaml` layout), fixtures, script/variant references,
+and `{var}` interpolation. By default it exits non-zero only on *blocking*
+problems and prints everything else as warnings.
+
+`--strict` promotes those warnings — a missing fixture directory, an unresolved
+`{var}`, a schema check that had to be skipped — to a non-zero exit, so a
+drifted config can't sail through CI. It is **auto-enabled when the `CI` env var
+is set** (which GitHub Actions and most other providers set), and overridable
+with `--no-strict`:
+
+```bash
+# Fail the job on any suspicious config issue (implicit under CI):
+uv run copilot-eval validate --config-dir my-eval --strict
+```
+
+Run it as an early, fast, zero-dependency step ahead of `run`/`analyze`.
+
 ## Compact vs. full markdown
 
 `-o markdown` (no `--compact`) renders the full report: per-metric tables,

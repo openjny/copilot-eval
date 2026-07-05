@@ -33,9 +33,11 @@ uv run python scripts/generate_schema.py
 generator's output, or if any config under `examples/` (or the root
 `eval-config.yaml`) stops validating against it.
 
-> **Note**: the schema only covers the inline/top-level `eval-config.yaml`
-> shape. Configs that split tasks/variants into `tasks/*.yaml` /
-> `variants/*.yaml` files aren't schema-checked per-file (yet).
+> **Note**: `validate` applies the strict JSON Schema to **both** config
+> layouts — the inline/top-level `eval-config.yaml` *and* the split-file layout
+> (`tasks/*.yaml` / `variants/*.yaml`), where each split document is checked
+> against the relevant `Task`/`Variant` item sub-schema. Typo'd keys are caught
+> in either layout.
 
 ## Scaffolding a new project (`init`)
 
