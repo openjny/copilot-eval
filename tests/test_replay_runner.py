@@ -207,7 +207,7 @@ def test_run_missing_replay_dir_raises(tmp_path: Path):
     run_dir.mkdir()
     # No `.replay/` recording created.
     config = _config(tmp_path, _replay_task())
-    with pytest.raises(ReplayError, match="missing or empty"):
+    with pytest.raises(ReplayError, match="missing"):
         ReplayRunner().run(_run_context(tmp_path, config, run_dir, work_dir))
 
 
@@ -410,11 +410,30 @@ def test_judge_evaluators_driven_offline(tmp_path: Path, monkeypatch: pytest.Mon
     assert judge_scores and judge_scores[0]["score"] == 5
 
 
+# ---------------------------------------------------------------------------
+# Council review fixes (issue #132): non-goal safety + robustness
+# ---------------------------------------------------------------------------
+
+
+def test_is_synthetic_capability_and_helper() -> None:
+    """The offline harness is identified by an optional ``is_synthetic``
+    capability, not a hardcoded backend string, so orchestration/validation can
+    branch on the runner rather than the literal name (and third-party offline
+    runners can opt in)."""
+    from eval.runners import DockerCLIRunner, runner_is_synthetic
+
+    assert ReplayRunner.is_synthetic is True
+    assert DockerCLIRunner.is_synthetic is False
+    assert runner_is_synthetic("replay") is True
+    assert runner_is_synthetic("docker") is False
+    # Unknown/non-declaring backend defaults to False (real, isolated) — the
+    # safe default: it keeps the full Docker/token pre-flight.
+    assert runner_is_synthetic("does-not-exist") is False
+
+
 def test_readiness_skips_docker_and_token_for_replay(tmp_path: Path, monkeypatch: Any) -> None:
     """The replay backend is offline, so pre-flight must not require Docker or a
-    GitHub token — otherwise it couldn't run without auth. Guard against any
-    Docker/token check sneaking back in for replay (the real `docker` backend
-    keeps them)."""
+    GitHub token — otherwise it couldn't run without auth."""
     from eval import validation
 
     def _boom(*_args: Any, **_kwargs: Any) -> Any:  # pragma: no cover - must not run
@@ -430,9 +449,291 @@ def test_readiness_skips_docker_and_token_for_replay(tmp_path: Path, monkeypatch
 
     results = validation.validate_readiness(config, tasks=[task], check_build=True)
 
-    # No docker/token/base-image checks for replay; fixture + disk checks remain.
     check_names = {r.name for r in results}
     assert "docker_daemon" not in check_names
     assert "github_token" not in check_names
     assert not any(r.name == "base_image" for r in results)
     assert any("disk" in r.name for r in results)
+
+
+def test_replay_with_jaeger_collector_rejected_without_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A synthetic runner + jaeger collector must fail loudly BEFORE any Docker/
+    Jaeger work — never spin up a container just to reject the config."""
+    import click
+
+    from eval.config import Config, RunnerConfig, Variant
+    from eval.services import orchestrator
+
+    def _boom_jaeger(*_a: Any, **_k: Any) -> Any:  # pragma: no cover - must not run
+        raise AssertionError("Jaeger/Docker must not start for a synthetic runner")
+
+    monkeypatch.setattr(orchestrator, "_ensure_jaeger", _boom_jaeger)
+
+    task = _replay_task()
+    _write_recording(tmp_path / "fixtures" / "replay_task" / ".replay", transcript="hi")
+    config = Config(
+        vars={},
+        runner=RunnerConfig(backend="replay", collector="jaeger"),
+        tasks=[task],
+        variants=[Variant(name="baseline")],
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+
+    with pytest.raises(click.ClickException, match="jaeger"):
+        orchestrator.run_command(
+            config,
+            task=None,
+            epochs=1,
+            dry_run=False,
+            no_build=True,
+            skip_preflight=True,
+            config_dir=None,
+            no_progress=True,
+        )
+
+
+def test_resume_never_drops_replayed_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resuming a replayed run with a REAL backend must not launder the
+    carried-over synthetic cells: the merged manifest stays replayed."""
+    from eval.protocols import RunStatus
+    from eval.runner import RunResult
+    from eval.services import orchestrator
+    from eval.services.manifest import MANIFEST_NAME
+
+    def _fake_run_one(
+        task: Any,
+        variant: Any,
+        epoch: int,
+        config: Any,
+        run_id: str,
+        run_dir: Path,
+        github_token: str,
+        order_index: Any = None,
+        fixture: Any = None,
+    ) -> RunResult:
+        return RunResult(
+            task=task.name,
+            variant=variant.name,
+            epoch=epoch,
+            test_id="t",
+            run_id=run_id,
+            log_file=run_dir / "x.log",
+            exit_code=0,
+            status=RunStatus.SUCCESS,
+            duration_seconds=1.0,
+        )
+
+    monkeypatch.setattr(orchestrator, "run_one", _fake_run_one)
+    monkeypatch.setattr(orchestrator, "get_github_token", lambda: "tok")
+
+    from eval.config import Config, RunnerConfig, Variant
+
+    def _mk_config(backend: str) -> Config:
+        return Config(
+            vars={},
+            runner=RunnerConfig(backend=backend, collector="file", parallel="off"),
+            tasks=[_replay_task()],
+            variants=[Variant(name="baseline")],
+            project_dir=tmp_path,
+            config_dir=tmp_path,
+        )
+
+    kwargs = dict(
+        task=None,
+        epochs=1,
+        dry_run=False,
+        no_build=True,
+        skip_preflight=True,
+        config_dir=None,
+        no_progress=True,
+    )
+
+    # First pass: replay backend → manifest stamped replayed.
+    orchestrator.run_command(_mk_config("replay"), **kwargs)
+    run_dir = next((tmp_path / "results").iterdir())
+    run_id = run_dir.name
+    assert json.loads((run_dir / MANIFEST_NAME).read_text())["replayed"] is True
+
+    # Resume with a REAL (docker) backend. The marker must survive.
+    orchestrator.run_command(_mk_config("docker"), resume=True, run_id=run_id, **kwargs)
+    assert json.loads((run_dir / MANIFEST_NAME).read_text())["replayed"] is True
+
+
+def test_save_baseline_refuses_replayed_run(tmp_path: Path) -> None:
+    """A baseline snapshotted from a replayed run would leak synthetic numbers
+    into a later real comparison — refuse it outright."""
+    from eval.services.baseline_service import BaselineError, save_baseline
+
+    config = _config(tmp_path, _replay_task())
+    with pytest.raises(BaselineError, match="synthetic"):
+        save_baseline(config, "RUN", "b", [], replayed=True)
+
+
+def test_synthetic_baseline_forces_report_banner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Even a REAL run must render the synthetic banner when compared against a
+    replayed/synthetic baseline — synthetic data can never pass as genuine in a
+    cross-run comparison."""
+    from eval import runner as runner_mod
+    from eval.services import analyze_service
+    from eval.services.baseline_service import baseline_path, save_baseline
+    from eval.services.manifest import write_manifest
+    from eval.services.trace_service import load_run_metrics
+
+    task = _replay_task()
+    config = _config(tmp_path, task)
+    _write_recording(
+        tmp_path / "fixtures" / "replay_task" / ".replay", transcript="The answer is 42."
+    )
+
+    run_id = "RUN-REAL"
+    run_dir = config.results_dir / run_id
+    run_dir.mkdir(parents=True)
+    result = runner_mod.run_one(
+        task,
+        config.variants[0],
+        epoch=1,
+        config=config,
+        run_id=run_id,
+        run_dir=run_dir,
+        github_token="",
+        runner=ReplayRunner(),
+    )
+    # This run is treated as REAL: its own manifest is NOT replayed.
+    write_manifest(run_dir, run_id, [result], replayed=False)
+
+    metrics = load_run_metrics(config, run_id)
+    save_baseline(config, run_id, "synth", metrics, replayed=False)
+    # Simulate a synthetic baseline that slipped in (or an older snapshot):
+    bpath = baseline_path(config, "synth")
+    data = json.loads(bpath.read_text())
+    assert data["replayed"] is False  # save_baseline persisted the marker
+    data["replayed"] = True
+    bpath.write_text(json.dumps(data))
+
+    monkeypatch.setattr(analyze_service, "load_config", lambda _cd: config)
+    analyze_service.run_analysis(
+        run_id=run_id,
+        output="table",
+        aggregate="paired",
+        jaeger_url=None,
+        config_dir=None,
+        skip_eval=True,
+        re_eval=False,
+        no_progress=True,
+        baseline_name="synth",
+    )
+    out = capsys.readouterr().out
+    assert "REPLAYED / SYNTHETIC" in out
+
+
+def test_cost_history_excludes_replayed_runs(tmp_path: Path) -> None:
+    """Replayed token traces must not skew a later real run's cost estimate."""
+    from eval.collectors.file_collector import TRACE_FILE
+    from eval.services.cost_service import load_historical_costs
+
+    results_dir = tmp_path / "results"
+
+    def _make_run(name: str, replayed: bool) -> None:
+        run_dir = results_dir / name
+        (run_dir / TRACE_FILE.parent).mkdir(parents=True)
+        (run_dir / TRACE_FILE).write_text(
+            "\n".join(json.dumps(rec) for rec in _RECORDED_TRACE) + "\n", encoding="utf-8"
+        )
+        (run_dir / "results.json").write_text(json.dumps({"replayed": replayed}))
+
+    # Only a replayed run present → no usable historical cost data.
+    _make_run("run-replay", replayed=True)
+    assert load_historical_costs(results_dir) is None
+
+    # Add a real run → it (and only it) contributes.
+    _make_run("run-real", replayed=False)
+    hist = load_historical_costs(results_dir)
+    assert hist is not None
+    assert hist.avg_input_tokens_per_cell == 100.0  # from the single real run
+
+
+# --- replay input robustness -----------------------------------------------
+
+
+def test_replay_empty_dir_with_only_stray_file_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recording with no recognized artifact (only a stray .DS_Store) must
+    fail loudly instead of yielding a silent empty 'passing' run."""
+    from eval.exceptions import ReplayError
+
+    work_dir = tmp_path / "work"
+    replay = work_dir / ".replay"
+    replay.mkdir(parents=True)
+    (replay / ".DS_Store").write_text("junk")
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+    config = _config(tmp_path, _replay_task())
+
+    with pytest.raises(ReplayError, match="no usable recording"):
+        ReplayRunner().run(_run_context(tmp_path, config, run_dir, work_dir))
+
+
+def test_replay_non_object_meta_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A meta.json that is valid JSON but not an object must fail loudly rather
+    than silently defaulting to exit 0."""
+    from eval.exceptions import ReplayError
+
+    work_dir = tmp_path / "work"
+    replay = work_dir / ".replay"
+    replay.mkdir(parents=True)
+    (replay / "transcript.txt").write_text("hi")
+    (replay / "meta.json").write_text(json.dumps([1, 2, 3]))
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+    config = _config(tmp_path, _replay_task())
+
+    with pytest.raises(ReplayError, match="expected a JSON object"):
+        ReplayRunner().run(_run_context(tmp_path, config, run_dir, work_dir))
+
+
+def test_replay_wrong_typed_artifact_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An artifact that exists but is the wrong type (a directory named
+    traces.jsonl) must fail loudly, not be silently skipped."""
+    from eval.exceptions import ReplayError
+
+    work_dir = tmp_path / "work"
+    replay = work_dir / ".replay"
+    replay.mkdir(parents=True)
+    (replay / "transcript.txt").write_text("hi")
+    (replay / "traces.jsonl").mkdir()  # wrong type
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+    config = _config(tmp_path, _replay_task())
+
+    with pytest.raises(ReplayError, match="not a regular file"):
+        ReplayRunner().run(_run_context(tmp_path, config, run_dir, work_dir))
+
+
+def test_replay_malformed_trace_line_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupt traces.jsonl line must fail loudly rather than being passed
+    through and yielding a run with no usable telemetry."""
+    from eval.exceptions import ReplayError
+
+    work_dir = tmp_path / "work"
+    replay = work_dir / ".replay"
+    replay.mkdir(parents=True)
+    (replay / "transcript.txt").write_text("hi")
+    (replay / "traces.jsonl").write_text('{"type":"span","spanId":"a"}\n{ this is not json\n')
+    run_dir = tmp_path / "results"
+    run_dir.mkdir()
+    config = _config(tmp_path, _replay_task())
+
+    with pytest.raises(ReplayError, match="malformed JSON"):
+        ReplayRunner().run(_run_context(tmp_path, config, run_dir, work_dir))

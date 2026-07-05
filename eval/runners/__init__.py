@@ -79,6 +79,24 @@ def get_runner_class(backend: str) -> type[AgentRunner] | None:
     return RUNNER_REGISTRY.get(backend)
 
 
+def runner_is_synthetic(backend: str) -> bool:
+    """Whether ``runner.backend`` names a *synthetic* (offline test/dev) runner.
+
+    ``is_synthetic`` is an **optional** runner capability (not part of the
+    ``AgentRunner`` protocol, so third-party runners keep structural typing
+    without declaring it). It is read defensively off the registered class and
+    defaults to ``False`` — i.e. an unknown or non-declaring backend is treated
+    as a real, isolated runner (the safe default: it still goes through the full
+    Docker/token pre-flight). A synthetic runner (``is_synthetic = True``, e.g.
+    :class:`~eval.runners.replay_runner.ReplayRunner`) is offline: it needs no
+    Docker and no GitHub token, and its output is stamped replayed/synthetic so
+    it can never be confused with a genuine measurement. Third-party offline
+    runners can opt in by setting ``is_synthetic = True`` on their class.
+    """
+    runner_cls = RUNNER_REGISTRY.get(backend)
+    return bool(getattr(runner_cls, "is_synthetic", False))
+
+
 def create_runner(runner_type: str, **kwargs: Any) -> AgentRunner:
     """Create a runner instance by backend name (convenience factory)."""
     runner_cls = RUNNER_REGISTRY.get(runner_type)
@@ -95,5 +113,6 @@ __all__ = [
     "ReplayRunner",
     "create_runner",
     "get_runner_class",
+    "runner_is_synthetic",
     "load_runner_plugins",
 ]

@@ -42,10 +42,30 @@ def baseline_path(config: Config, name: str) -> Path:
     return baselines_dir(config) / f"{name}.json"
 
 
-def save_baseline(config: Config, run_id: str, name: str, metrics: list[RunMetrics]) -> Path:
+def save_baseline(
+    config: Config,
+    run_id: str,
+    name: str,
+    metrics: list[RunMetrics],
+    *,
+    replayed: bool = False,
+) -> Path:
     """Serialize `metrics` (already-extracted RunMetrics for `run_id`) into a
     named baseline snapshot, grouped by task -> variant -> per-epoch metric dict.
+
+    A baseline saved from a *replayed/synthetic* run (``replayed=True``) is
+    refused outright (issue #132): a baseline is a cross-run measurement that a
+    later real run compares against, so allowing a synthetic snapshot would let
+    replayed numbers silently leak into a genuine A/B comparison. The offline
+    replay runner exists to test the pipeline, never to produce a baseline.
     """
+    if replayed:
+        raise BaselineError(
+            f"Run {run_id!r} was produced by the offline replay/synthetic runner "
+            "(runner.backend: replay) and cannot be saved as a baseline. Baselines "
+            "are real cross-run measurements; a synthetic snapshot would leak into "
+            "later comparisons as if genuine."
+        )
     if not metrics:
         raise BaselineError(f"No metrics found for run {run_id!r}; nothing to save as a baseline.")
 
@@ -64,6 +84,10 @@ def save_baseline(config: Config, run_id: str, name: str, metrics: list[RunMetri
         "name": name,
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        # Persisted defensively (always False here, since replayed snapshots are
+        # refused above): a consumer that ever encounters a synthetic baseline
+        # can still detect and label it rather than treating it as genuine.
+        "replayed": bool(replayed),
         "tasks": tasks,
     }
 

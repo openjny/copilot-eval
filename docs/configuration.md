@@ -424,10 +424,17 @@ fixtures/<name>/.replay/
   meta.json        # optional — {"exit_code": 0}
 ```
 
-Everything is optional, but the `.replay/` directory must exist and be
-non-empty, otherwise the run fails loudly with a `ReplayError` rather than
-silently emitting an empty run. Because replay is offline, it only supports the
-`file` collector.
+Everything is optional, but the `.replay/` directory must exist and contain at
+least one recognized artifact (`transcript.txt`, `traces.jsonl`, a non-empty
+`output/` dir, or `meta.json`); otherwise the run fails loudly with a
+`ReplayError` rather than silently emitting an empty "passing" run.
+Present-but-malformed artifacts (a non-object `meta.json`, a wrong-typed
+artifact, or a corrupt `traces.jsonl` line) also raise `ReplayError`. Because
+replay is offline, it only supports the `file` collector — configuring
+`collector: jaeger` with `backend: replay` is rejected up front (Jaeger needs
+Docker). Setting `EVAL_REPLAY_DIR` points every matrix cell at the *same* single
+recording; the per-fixture `.replay/` path is the mechanism for distinct
+recordings across a multi-cell matrix.
 
 ```yaml
 runner:
@@ -443,8 +450,9 @@ uv run copilot-eval analyze --run-id <id> -o table
 
 ### Synthetic-labelling guarantee
 
-A replayed run can **never** be mistaken for a real, isolated measurement. It is
-marked at every layer:
+A replayed run can **never** be mistaken for a real, isolated measurement, and
+its synthetic numbers can **never** silently leak into a real comparison. It is
+marked and firewalled at every layer:
 
 - the run **log** opens with a loud `REPLAYED / SYNTHETIC RUN — NOT A REAL
   MEASUREMENT` banner;
@@ -453,10 +461,20 @@ marked at every layer:
 - every **report** format `analyze` renders (table, markdown, JSON, JUnit, HTML,
   GHA summary) shows a replayed/synthetic banner — the JSON payload adds a
   top-level `"replayed": true` — so the label survives whichever output a CI job
-  consumes.
+  consumes;
+- **cross-run baselines** are firewalled: `baseline save` refuses a replayed run
+  outright, and `analyze --baseline` still emits the synthetic banner if it ever
+  encounters a synthetic baseline snapshot, so replayed numbers can't sneak into
+  a real regression comparison;
+- **cost estimation** ignores replayed runs when averaging historical token
+  usage, so synthetic traces never skew a later real run's pre-flight estimate;
+- **resume** never drops the marker — resuming a replayed run (even with a real
+  backend) keeps the manifest `"replayed": true`.
 
 The real `docker` backend and its environment-as-variant isolation model are
-completely untouched; `replay` is an additional, clearly-separated backend.
+completely untouched; `replay` is an additional, clearly-separated backend
+identified by an `is_synthetic` runner capability (not a hardcoded name), so
+Docker/token pre-flight and image build are skipped only for offline runners.
 
 ## Variants
 

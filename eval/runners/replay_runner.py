@@ -37,9 +37,17 @@ variable::
       output/          # optional — copied into work_dir/output/ (judge evidence)
       meta.json        # optional — {"exit_code": 0}
 
-All parts are optional, but the replay *directory* must exist and be non-empty;
-otherwise a :class:`eval.exceptions.ReplayError` is raised so a misconfigured
-recording fails loudly instead of silently emitting an empty run.
+All parts are optional, but the replay *directory* must exist and contain at
+least one recognized artifact (``transcript.txt``, ``traces.jsonl``, a non-empty
+``output/`` dir, or ``meta.json``); otherwise a
+:class:`eval.exceptions.ReplayError` is raised so a misconfigured or empty
+recording fails loudly instead of silently emitting an empty "passing" run.
+Present-but-malformed artifacts (a non-object ``meta.json``, a wrong-typed
+artifact, or a corrupt ``traces.jsonl`` line) also raise ``ReplayError``.
+
+``EVAL_REPLAY_DIR``, when set, points every matrix cell at the *same* single
+recording (re-stamped per run); the per-fixture ``.replay/`` path is the
+mechanism for distinct recordings across a multi-cell matrix.
 """
 
 from __future__ import annotations
@@ -83,6 +91,12 @@ SYNTHETIC_LOG_BANNER = (
 
 class ReplayRunner:
     """Replay recorded agent outputs/traces instead of running a container."""
+
+    # Capability marker (see eval.runners.runner_is_synthetic): a synthetic
+    # runner is an offline test/dev harness — it needs no Docker and no GitHub
+    # token, and everything it produces is stamped replayed/synthetic so it can
+    # never be mistaken for a real, isolated measurement.
+    is_synthetic = True
 
     def __init__(self, github_token: str | None = None) -> None:
         # Accept (and ignore) a token so the plugin registry factory can
@@ -145,23 +159,64 @@ class ReplayRunner:
     def _resolve_replay_dir(self, work_dir: Path) -> Path:
         override = os.environ.get(REPLAY_DIR_ENV)
         replay_dir = Path(override).expanduser() if override else work_dir / REPLAY_DIR_NAME
-        if not replay_dir.is_dir() or not any(replay_dir.iterdir()):
+        if not replay_dir.is_dir():
             raise ReplayError(
-                f"replay directory '{replay_dir}' is missing or empty. Provide recorded "
+                f"replay directory '{replay_dir}' is missing. Provide recorded "
                 f"artifacts (transcript.txt / traces.jsonl / output/) under a "
                 f"'{REPLAY_DIR_NAME}/' subdir of the fixture, or set {REPLAY_DIR_ENV}."
             )
+        # Guard against a silent empty/"passing" run: require at least one
+        # *recognized* artifact rather than merely a non-empty directory, so a
+        # recording that contains only stray files (e.g. .DS_Store, .gitkeep) or
+        # an empty output/ dir fails loudly instead of yielding an empty run.
+        if not self._has_usable_artifact(replay_dir):
+            raise ReplayError(
+                f"replay directory '{replay_dir}' has no usable recording. Expected at "
+                f"least one of: {_TRANSCRIPT_FILE}, {_TRACES_FILE}, a non-empty "
+                f"{_OUTPUT_DIR}/ dir, or {_META_FILE}."
+            )
         return replay_dir
+
+    @staticmethod
+    def _has_usable_artifact(replay_dir: Path) -> bool:
+        if (replay_dir / _TRANSCRIPT_FILE).is_file():
+            return True
+        if (replay_dir / _TRACES_FILE).is_file():
+            return True
+        if (replay_dir / _META_FILE).is_file():
+            return True
+        output_dir = replay_dir / _OUTPUT_DIR
+        return output_dir.is_dir() and any(output_dir.iterdir())
+
+    @staticmethod
+    def _require_file_if_exists(path: Path) -> bool:
+        """Return True if ``path`` is a usable file. Raise ``ReplayError`` if it
+        exists but is the wrong type (e.g. a directory named ``traces.jsonl``),
+        so a mis-shaped recording fails loudly instead of being silently
+        skipped. Return False when the (optional) artifact is simply absent."""
+        if not path.exists():
+            return False
+        if not path.is_file():
+            raise ReplayError(
+                f"replay artifact '{path}' exists but is not a regular file "
+                f"(found a {'directory' if path.is_dir() else 'special file'})."
+            )
+        return True
 
     def _replay_exit_code(self, replay_dir: Path) -> int:
         meta_path = replay_dir / _META_FILE
-        if not meta_path.is_file():
+        if not self._require_file_if_exists(meta_path):
             return 0
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
             raise ReplayError(f"failed to read replay meta '{meta_path}': {exc}") from exc
-        code = meta.get("exit_code", 0) if isinstance(meta, dict) else 0
+        if not isinstance(meta, dict):
+            raise ReplayError(
+                f"invalid replay meta '{meta_path}': expected a JSON object, got "
+                f"{type(meta).__name__}."
+            )
+        code = meta.get("exit_code", 0)
         try:
             return int(code)
         except (TypeError, ValueError) as exc:
@@ -171,22 +226,29 @@ class ReplayRunner:
         src = replay_dir / _OUTPUT_DIR
         dest = work_dir / _OUTPUT_DIR
         dest.mkdir(parents=True, exist_ok=True)
+        if src.exists() and not src.is_dir():
+            raise ReplayError(
+                f"replay artifact '{src}' exists but is not a directory; "
+                f"'{_OUTPUT_DIR}' must be a directory of output files."
+            )
         if src.is_dir():
             shutil.copytree(src, dest, dirs_exist_ok=True)
 
     def _replay_trace(self, replay_dir: Path, work_dir: Path, run_context: RunContext) -> None:
         src = replay_dir / _TRACES_FILE
-        if not src.is_file():
+        if not self._require_file_if_exists(src):
             return
         dest = work_dir / TRACE_FILE
         dest.parent.mkdir(parents=True, exist_ok=True)
-        rewritten = _rewrite_trace_resource_tags(src.read_text(encoding="utf-8"), run_context)
+        rewritten = _rewrite_trace_resource_tags(
+            src.read_text(encoding="utf-8"), run_context, source=src
+        )
         dest.write_text(rewritten, encoding="utf-8")
 
     def _write_log(self, replay_dir: Path, log_file: Path, run_context: RunContext) -> None:
         transcript_path = replay_dir / _TRANSCRIPT_FILE
         body = ""
-        if transcript_path.is_file():
+        if self._require_file_if_exists(transcript_path):
             body = transcript_path.read_text(encoding="utf-8")
         source = os.environ.get(REPLAY_DIR_ENV) or f"{REPLAY_DIR_NAME}/ (fixture-embedded)"
         header = (
@@ -204,15 +266,22 @@ class ReplayRunner:
                     lf.write("\n")
 
 
-def _rewrite_trace_resource_tags(text: str, run_context: RunContext) -> str:
+def _rewrite_trace_resource_tags(
+    text: str, run_context: RunContext, *, source: Path | None = None
+) -> str:
     """Rewrite ``resource.attributes`` on every recorded span so the file
     collector associates the trace with *this* run.
 
     The file collector filters traces by ``eval.run_id`` and the report keys
     reliability off the per-run ``eval.*`` tags, so a static recording (whose
     tags belong to whatever run captured it) has to be re-stamped with the
-    current run's identity to flow through the pipeline. Non-span / unparsable
-    lines are passed through untouched.
+    current run's identity to flow through the pipeline.
+
+    A malformed (non-empty, non-JSON) line raises :class:`ReplayError` rather
+    than being silently passed through: a corrupt recording that yielded no
+    usable telemetry would otherwise complete as a misleadingly "successful"
+    empty run. Blank lines and valid non-span JSON records (e.g. resource/scope
+    lines) are preserved untouched.
     """
     tags = {
         "eval.test_id": run_context.test_id,
@@ -222,17 +291,20 @@ def _rewrite_trace_resource_tags(text: str, run_context: RunContext) -> str:
         "eval.fixture": run_context.fixture_label,
         "eval.run_id": run_context.run_id,
     }
+    where = f" in '{source}'" if source is not None else ""
     out_lines: list[str] = []
-    for line in text.splitlines():
+    for lineno, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped:
             out_lines.append(line)
             continue
         try:
             record = json.loads(stripped)
-        except json.JSONDecodeError:
-            out_lines.append(line)
-            continue
+        except json.JSONDecodeError as exc:
+            raise ReplayError(
+                f"malformed JSON on line {lineno}{where}: {exc}. Each traces.jsonl "
+                f"line must be a single JSON span record (Copilot file-exporter format)."
+            ) from exc
         if isinstance(record, dict) and record.get("type") == "span":
             resource = record.get("resource")
             if not isinstance(resource, dict):

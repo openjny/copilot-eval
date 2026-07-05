@@ -22,6 +22,7 @@ from typing import Any
 
 from eval.collectors.file_collector import TRACE_FILE, parse_file_traces
 from eval.config import Config, RunnerConfig, Task, Variant
+from eval.services.manifest import load_manifest_replayed
 from eval.trace import extract_metrics
 
 # --- Pricing constants ------------------------------------------------------
@@ -122,6 +123,11 @@ def load_historical_costs(
     total_output = 0
     count = 0
     for run_dir in run_dirs:
+        # Exclude replayed/synthetic runs (issue #132): their token counts come
+        # from pre-recorded traces, not a real agent, so folding them into the
+        # historical average would skew a later real run's cost estimate.
+        if load_manifest_replayed(run_dir):
+            continue
         traces_dir = run_dir / TRACE_FILE.parent
         if not traces_dir.is_dir():
             continue

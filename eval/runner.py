@@ -318,7 +318,7 @@ def run_one(
                 fixture_label=fixture_label,
             )
 
-            if config.runner.backend == "replay":
+            if getattr(runner, "is_synthetic", False):
                 logger.info("Replaying pre-recorded run (offline replay runner)...")
             else:
                 logger.info("Running copilot in container...")

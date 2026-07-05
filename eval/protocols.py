@@ -70,6 +70,15 @@ class AgentRunner(Protocol):
     @property
     def supported_collectors(self) -> tuple[str, ...]: ...
 
+    # Optional capability (NOT a required protocol member, so third-party
+    # runners keep structural typing without declaring it): a runner may set the
+    # class attribute ``is_synthetic = True`` to mark itself as an offline
+    # test/dev harness that needs no Docker and no GitHub token and whose output
+    # must be labelled replayed/synthetic. It is read defensively via
+    # ``eval.runners.runner_is_synthetic`` and defaults to False (real, isolated)
+    # so orchestration keeps the full Docker/token pre-flight for any runner that
+    # does not explicitly opt out.
+
 
 @runtime_checkable
 class TraceCollector(Protocol):
