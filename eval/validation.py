@@ -24,6 +24,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -54,14 +55,17 @@ class CheckResult:
     remediation: str | None = None
     blocking: bool = True
 
-    def format(self) -> str:
+    def format(self, strict: bool = False) -> str:
+        promoted = strict and not self.passed and not self.blocking
         if self.passed:
             icon = "✓"
-        elif self.blocking:
+        elif self.blocking or promoted:
             icon = "✗"
         else:
             icon = "⚠"
         line = f"  {icon} {self.name}: {self.message}"
+        if promoted:
+            line += " [promoted to failure by --strict]"
         if not self.passed and self.remediation:
             line += f"\n      → {self.remediation}"
         return line
@@ -82,6 +86,9 @@ def _warn(name: str, message: str, remediation: str) -> CheckResult:
     directory or an undefined prompt `{var}` — both silently pass through
     rather than erroring), so `validate`/pre-flight never abort a run that
     would otherwise succeed.
+
+    `validate --strict` (and CI, by default) promotes these to a non-zero exit
+    without changing this default, non-blocking behavior (issue #128).
     """
     return CheckResult(
         name=name, passed=False, message=message, remediation=remediation, blocking=False
@@ -91,6 +98,15 @@ def _warn(name: str, message: str, remediation: str) -> CheckResult:
 def any_failed(results: list[CheckResult]) -> bool:
     """True when at least one *blocking* check failed. Warnings don't count."""
     return any(not r.passed and r.blocking for r in results)
+
+
+def any_warnings(results: list[CheckResult]) -> bool:
+    """True when at least one *non-blocking* (warning) check did not pass.
+
+    Under `validate --strict` these are promoted to a non-zero CI gate; in the
+    default/interactive mode they are surfaced but never affect the exit code.
+    """
+    return any(not r.passed and not r.blocking for r in results)
 
 
 def format_results(results: list[CheckResult]) -> str:
@@ -130,17 +146,52 @@ def check_config_schema(config_dir: Path | None) -> tuple[Config | None, CheckRe
     return config, _ok("config_schema", "eval-config.yaml is valid")
 
 
-def check_json_schema(config_dir: Path | None) -> CheckResult:
-    """Validate the raw `eval-config.yaml` against `schemas/eval-config.schema.json`.
+def _item_subschema(schema: dict[str, Any], key: str) -> dict[str, Any] | None:
+    """Extract the per-item sub-schema for a `tasks`/`variants` split file.
 
-    This is a *structural* check on the file as written (before the dataclass
+    The generated schema (`eval/schema.py`) inlines the task/variant item shape
+    under `properties.<key>` — as `items` for `variants`, and inside an `anyOf`
+    array branch for `tasks`. Split files hold a *single* task/variant body, so
+    we validate each document against that item schema directly, with `name`
+    dropped from `required` (a split file's `name` is optional — the loader
+    falls back to the file stem). `required` is derived from the item schema
+    (minus `name`) rather than hardcoded, so a future required field is honored
+    automatically. All `$ref`s in the generated schema are already inlined, so
+    the extracted sub-schema is self-contained.
+    """
+    node = schema.get("properties", {}).get(key, {})
+    item: dict[str, Any] | None = None
+    if isinstance(node.get("items"), dict):
+        item = node["items"]
+    else:
+        for branch in node.get("anyOf", []):
+            if branch.get("type") == "array" and isinstance(branch.get("items"), dict):
+                item = branch["items"]
+                break
+    if item is None:
+        return None
+    required = [r for r in item.get("required", []) if r != "name"]
+    return {**item, "required": required}
+
+
+def check_json_schema(config_dir: Path | None) -> CheckResult:
+    """Validate the config against `schemas/eval-config.schema.json`.
+
+    This is a *structural* check on the files as written (before the dataclass
     coercion `check_config_schema` performs), so it catches typo'd keys and
     wrong value types (e.g. `timeout_secods: 300`, `judge_batch: "tru"`) even
     when they'd otherwise be silently accepted as unknown/default fields.
-    Non-blocking: a missing/unreadable schema file, missing `jsonschema`
-    dependency, or a config that only uses `tasks/*.yaml` / `variants/*.yaml`
-    external files (not covered by this top-level check) all degrade to a
-    warning rather than failing `validate`.
+
+    Coverage spans **both** config layouts: the inline/top-level
+    `eval-config.yaml` *and* the split-file layout (`tasks/*.yaml` /
+    `variants/*.yaml`), which the project's conventions call the primary layout.
+    Each split document is validated against the relevant item sub-schema (with
+    `name` optional, since the loader falls back to the file stem).
+
+    Non-blocking only for genuinely unavailable prerequisites: a missing
+    `jsonschema` dependency, an unreadable schema file, or no `eval-config.yaml`
+    at all — these degrade to a warning rather than failing `validate`. A config
+    that merely *splits* its tasks/variants is fully validated, not skipped.
     """
     try:
         import jsonschema
@@ -163,9 +214,14 @@ def check_json_schema(config_dir: Path | None) -> CheckResult:
         return _warn(
             "json_schema",
             f"Skipped: no eval-config.yaml at {config_path}.",
-            "Only the inline eval-config.yaml is schema-checked (not tasks/*.yaml "
-            "or variants/*.yaml files).",
+            "Create an eval-config.yaml (or pass --config-dir pointing to one) "
+            "to enable JSON Schema validation.",
         )
+
+    validator = jsonschema.Draft202012Validator(schema)
+    # (source label, schema error) tuples, so each problem points at its file.
+    problems: list[tuple[str, Any]] = []
+    covered: list[str] = []
 
     try:
         raw = yaml.safe_load(config_path.read_text()) or {}
@@ -173,21 +229,62 @@ def check_json_schema(config_dir: Path | None) -> CheckResult:
         # check_config_schema already reports YAML syntax errors as blocking.
         return _warn("json_schema", "Skipped: eval-config.yaml has a YAML syntax error.", "")
 
-    validator = jsonschema.Draft202012Validator(schema)
-    errors = sorted(validator.iter_errors(raw), key=lambda e: list(e.path))
-    if not errors:
-        return _ok("json_schema", "eval-config.yaml matches schemas/eval-config.schema.json")
+    # Split-file layouts: gather each tasks/*.yaml and variants/*.yaml. This
+    # mirrors eval.config._load_tasks / _load_variants, which read these
+    # directories as the *primary* layout. Two loader rules are mirrored here so
+    # a valid config is never falsely blocked:
+    #   1. Empty / comment-only documents are skipped (loader's `if p:` / `if v:`).
+    #   2. When a split dir yields at least one real document, it *shadows* the
+    #      inline `tasks:` / `variants:` block (loader's `if not tasks:` fallback),
+    #      so the stale inline block must not be validated at the top level.
+    split_docs: dict[str, list[tuple[str, Any]]] = {}
+    for key in ("tasks", "variants"):
+        split_dir = directory / key
+        if not split_dir.is_dir():
+            continue
+        docs: list[tuple[str, Any]] = []
+        for yaml_file in sorted(split_dir.glob("*.yaml")):
+            rel = f"{key}/{yaml_file.name}"
+            try:
+                doc = yaml.safe_load(yaml_file.read_text())
+            except yaml.YAMLError:
+                return _warn("json_schema", f"Skipped: {rel} has a YAML syntax error.", "")
+            if not doc:  # empty / comment-only file — loader skips it
+                continue
+            docs.append((rel, doc))
+        if docs:
+            split_docs[key] = docs
 
+    # Validate the top-level config, dropping any key that a split dir shadows.
+    top_level = {k: v for k, v in raw.items() if k not in split_docs}
+    covered.append("eval-config.yaml")
+    for e in validator.iter_errors(top_level):
+        problems.append(("eval-config.yaml", e))
+
+    for key, docs in split_docs.items():
+        subschema = _item_subschema(schema, key)
+        if subschema is None:
+            continue
+        sub_validator = jsonschema.Draft202012Validator(subschema)
+        covered.append(f"{key}/*.yaml")
+        for rel, doc in docs:
+            for e in sub_validator.iter_errors(doc):
+                problems.append((rel, e))
+
+    if not problems:
+        return _ok("json_schema", f"{' + '.join(covered)} match schemas/eval-config.schema.json")
+
+    problems.sort(key=lambda pe: (pe[0], list(pe[1].path)))
     lines = []
-    for e in errors[:10]:
+    for source, e in problems[:10]:
         where = ".".join(str(p) for p in e.path) or "<root>"
-        lines.append(f"{where}: {e.message}")
+        lines.append(f"{source} → {where}: {e.message}")
     summary = "; ".join(lines)
-    if len(errors) > 10:
-        summary += f" (+{len(errors) - 10} more)"
+    if len(problems) > 10:
+        summary += f" (+{len(problems) - 10} more)"
     return _fail(
         "json_schema",
-        f"eval-config.yaml does not match the JSON Schema: {summary}",
+        f"Config does not match the JSON Schema: {summary}",
         "Fix the field(s) above, or see schemas/eval-config.schema.json / "
         "docs/configuration.md for the expected shape.",
     )
@@ -202,9 +299,24 @@ def check_fixtures(config: Config, tasks: list[Task] | None = None) -> list[Chec
     as a hard error would abort runs that currently succeed (e.g. a task that
     relies solely on a `before_run` hook, with no fixture directory at all).
     Reported as a warning so typos are still surfaced without blocking `run`.
+
+    A missing directory is only *warned* about when the task **explicitly**
+    declares a fixture (`fixture:` / `fixtures:`). When the fixture name is
+    merely the implicit fallback to the task name (a fixed-answer task that
+    writes its own output and consumes no input), a missing directory is the
+    expected, benign case and is reported as a passing check — so canonical
+    fixed-answer examples validate cleanly instead of shipping alarming
+    warnings (issue #129).
     """
     tasks = config.tasks if tasks is None else tasks
     fixtures_dir = config.config_dir / "fixtures"
+    # Fixtures a task explicitly opts into (vs. the implicit task-name fallback).
+    explicit: set[str] = set()
+    for task in tasks:
+        if task.fixtures:
+            explicit.update(task.fixtures)
+        elif task.fixture:
+            explicit.add(task.fixture)
     results: list[CheckResult] = []
     seen: set[str] = set()
     for task in tasks:
@@ -222,12 +334,23 @@ def check_fixtures(config: Config, tasks: list[Task] | None = None) -> list[Chec
             path = fixtures_dir / fixture
             if path.is_dir():
                 results.append(_ok(f"fixture:{fixture}", f"Found at {path}"))
-            else:
+            elif fixture in explicit:
                 results.append(
                     _warn(
                         f"fixture:{fixture}",
-                        f"Fixture '{fixture}' not found (run will proceed without it)",
-                        f"Expected at: {path}",
+                        f"Declared fixture '{fixture}' has no directory yet — the run "
+                        "will start without a fixture (non-blocking)",
+                        f"Create {path}/ with the fixture's files, or remove the "
+                        "'fixture:' declaration if this task needs no fixture.",
+                    )
+                )
+            else:
+                # No fixture declared: the name is just the task-name fallback,
+                # and the task provides its own input / writes fixed output.
+                results.append(
+                    _ok(
+                        f"fixture:{fixture}",
+                        "No fixture declared; task runs without one",
                     )
                 )
     return results
@@ -242,38 +365,68 @@ def _resolve_script(config: Config, script: str) -> Path:
     return config.project_dir / script
 
 
+def _display_path(resolved: Path, config_dir: Path) -> str:
+    """Render a resolved file path readably for `validate` output.
+
+    Some config values (notably `build.dockerfile`, which `init` writes relative
+    to the repo/project dir so the Docker build context resolves) round-trip into
+    long `../../../..`-style cwd-relative walks. Prefer a config-dir-relative path
+    when the file lives under the config dir, otherwise fall back to an absolute
+    path — whichever is shorter — so paths stay short and verifiable (issue #130).
+    """
+    resolved = resolved.resolve()
+    abs_str = str(resolved)
+    try:
+        rel_str = str(resolved.relative_to(config_dir.resolve()))
+    except ValueError:
+        return abs_str
+    return rel_str if len(rel_str) <= len(abs_str) else abs_str
+
+
 def check_script_references(config: Config) -> list[CheckResult]:
     """Verify variant build/run files and task hook/health_check/evaluator
-    script paths referenced by the config exist on disk."""
+    script paths referenced by the config exist on disk.
+
+    Found paths are echoed in a readable form (config-dir-relative or absolute,
+    whichever is shorter) rather than the raw config value, which can be a deep
+    `../../..` walk for out-of-tree config dirs (issue #130).
+    """
     results: list[CheckResult] = []
+    config_dir = config.config_dir
 
     for variant in config.variants:
         if variant.dockerfile:
             path = (config.project_dir / variant.dockerfile).resolve()
             if path.is_file():
                 results.append(
-                    _ok(f"variant:{variant.name}:dockerfile", f"Found {variant.dockerfile}")
+                    _ok(
+                        f"variant:{variant.name}:dockerfile",
+                        f"Found {_display_path(path, config_dir)}",
+                    )
                 )
             else:
                 results.append(
                     _fail(
                         f"variant:{variant.name}:dockerfile",
                         f"Dockerfile '{variant.dockerfile}' not found for variant '{variant.name}'",
-                        f"Expected at: {path}",
+                        f"Expected at: {_display_path(path, config_dir)}",
                     )
                 )
         if variant.run_script:
             path = (config.project_dir / variant.run_script).resolve()
             if path.is_file():
                 results.append(
-                    _ok(f"variant:{variant.name}:run_script", f"Found {variant.run_script}")
+                    _ok(
+                        f"variant:{variant.name}:run_script",
+                        f"Found {_display_path(path, config_dir)}",
+                    )
                 )
             else:
                 results.append(
                     _fail(
                         f"variant:{variant.name}:run_script",
                         f"Run script '{variant.run_script}' not found for variant '{variant.name}'",
-                        f"Expected at: {path}",
+                        f"Expected at: {_display_path(path, config_dir)}",
                     )
                 )
 
@@ -288,7 +441,7 @@ def check_script_references(config: Config) -> list[CheckResult]:
             path = _resolve_script(config, script)
             check_name = f"task:{task.name}:{label}"
             if path.is_file():
-                results.append(_ok(check_name, f"Found {script}"))
+                results.append(_ok(check_name, f"Found {_display_path(path, config_dir)}"))
             else:
                 results.append(
                     _fail(
@@ -304,7 +457,7 @@ def check_script_references(config: Config) -> list[CheckResult]:
             path = _resolve_script(config, ev.script)
             check_name = f"task:{task.name}:evaluator:{ev.name}"
             if path.is_file():
-                results.append(_ok(check_name, f"Found {ev.script}"))
+                results.append(_ok(check_name, f"Found {_display_path(path, config_dir)}"))
             else:
                 results.append(
                     _fail(

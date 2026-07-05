@@ -16,6 +16,21 @@ def strip_quotes(value: str) -> str:
     return value
 
 
+# Values a CI provider might set that should NOT be read as "running in CI".
+# Most CI systems set CI=true, but a developer may export CI=false locally.
+_CI_FALSEY = {"", "0", "false", "no", "off"}
+
+
+def ci_env_enabled(name: str = "CI") -> bool:
+    """Return True when the given env var signals a CI environment.
+
+    Treats common falsey spellings (unset, empty, ``0``, ``false``, ``no``,
+    ``off``, case-insensitive) as *not* CI, so ``CI=false`` does not
+    accidentally flip on CI-only behavior like ``validate --strict``.
+    """
+    return os.environ.get(name, "").strip().lower() not in _CI_FALSEY
+
+
 def load_env_file(env_file: Path) -> dict[str, str]:
     """Parse a .env file into a dict, ignoring comments and empty lines."""
     env: dict[str, str] = {}

@@ -33,9 +33,11 @@ uv run python scripts/generate_schema.py
 generator's output, or if any config under `examples/` (or the root
 `eval-config.yaml`) stops validating against it.
 
-> **Note**: the schema only covers the inline/top-level `eval-config.yaml`
-> shape. Configs that split tasks/variants into `tasks/*.yaml` /
-> `variants/*.yaml` files aren't schema-checked per-file (yet).
+> **Note**: `validate` applies the strict JSON Schema to **both** config
+> layouts — the inline/top-level `eval-config.yaml` *and* the split-file layout
+> (`tasks/*.yaml` / `variants/*.yaml`), where each split document is checked
+> against the relevant `Task`/`Variant` item sub-schema. Typo'd keys are caught
+> in either layout.
 
 ## Scaffolding a new project (`init`)
 
@@ -688,6 +690,8 @@ in `examples/prompt-language` and `examples/judge-calibration`.
 ## Fixtures
 
 Place files under `<config-dir>/fixtures/<fixture-name>/`. They are copied to a temp directory and mounted at `/workspace` inside the container (read-write). An `output/` subdirectory is automatically created. A fixture can also be a [remote dataset](#remote-fixtures-dataset-as-code) declared by `url` + `sha256` instead of a local directory.
+
+> **`validate` and implicit fixtures.** When a task has no `fixture:`/`fixtures:` of its own, it falls back to a fixture named after the task. That implicit fallback is treated as "runs without a fixture" and is **not** checked for a matching directory, so fixed-answer tasks validate cleanly. The flip side: a typo'd *task name* won't be caught as a missing fixture. If a task genuinely depends on `fixtures/<name>/`, declare `fixture: <name>` explicitly — then `validate` warns when the directory is absent (and `validate --strict` fails on it).
 
 ### Multiple fixtures per task (input-coverage axis)
 
