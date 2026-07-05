@@ -1289,6 +1289,10 @@ def _stdout_supports_color(stream: Any = None) -> bool:
     Honors the ``NO_COLOR`` convention, ``TERM=dumb``, and non-TTY (piped /
     redirected) output so escape codes never leak into files, pipes, or CI
     logs. This keeps the colored path opt-in to interactive terminals only.
+
+    Per the no-color.org spec, ``NO_COLOR`` disables color only when *present
+    and non-empty* — so ``NO_COLOR=""`` intentionally does not disable color
+    (the falsy ``.get()`` check below is deliberate, not a bug).
     """
     if os.environ.get("NO_COLOR"):
         return False
@@ -1311,13 +1315,25 @@ def _colorize_delta(
     for lower-is-better metrics (duration, cost, tokens…) a decrease is an
     improvement; for higher-is-better metrics (judge scores, pass@k) an
     increase is.
+
+    Direction is read from the paired-delta CI (the same signal the issue's
+    spec names: "CI excludes zero, direction positive/negative"), so a
+    tiny-but-significant delta that rounds to ``+0.0%`` in the printed string
+    is still colored by its true sign.
     """
     if not enabled or not text.strip():
         return text
     if row.significant is True:
-        # A significant delta has a CI that excludes 0, so it is entirely
-        # below (decreased) or entirely above (increased) zero.
-        decreased = row.ci_high is not None and row.ci_high < 0
+        # A significant delta has a CI that excludes 0, so both bounds share a
+        # sign. Derive the direction from whichever bound proves it; if neither
+        # does (should be impossible for significant rows), leave it uncolored
+        # rather than guess a color.
+        if row.ci_high is not None and row.ci_high < 0:
+            decreased = True
+        elif row.ci_low is not None and row.ci_low > 0:
+            decreased = False
+        else:
+            return text
         improved = decreased if lower_is_better else not decreased
         return click.style(text, fg="green" if improved else "red", bold=True)
     if row.significant is False:

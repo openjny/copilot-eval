@@ -1253,6 +1253,66 @@ def test_format_table_auto_detect_disables_color_when_piped():
     assert "\x1b[" not in format_table(reports)
 
 
+def test_format_table_colors_higher_is_better_metric_direction():
+    # Judge scores are higher-is-better: a significant *increase* is an
+    # improvement (green), a significant *decrease* is a regression (red).
+    # This covers the `lower_is_better=False` branch of _colorize_delta, which
+    # the summary-metric tests above (lower-is-better) never exercise.
+    from eval.report import Report, SummaryRow, format_table
+
+    def _report_with_judge(row: SummaryRow) -> Report:
+        return Report(
+            task="t",
+            runs=[],
+            variants=["baseline", "candidate"],
+            summary=[],
+            tool_patterns={},
+            judge_scores=[row],
+        )
+
+    improved = SummaryRow(
+        metric="thoroughness",
+        values={"baseline": 6.9, "candidate": 8.1},
+        delta="+17.4%",
+        n={"baseline": 5, "candidate": 5},
+        paired_n=5,
+        ci_low=0.8,
+        ci_high=1.6,  # CI entirely > 0 -> score increased
+        significant=True,
+    )
+    out = format_table([_report_with_judge(improved)], color=True)
+    line = next(ln for ln in out.splitlines() if ln.startswith("thoroughness"))
+    assert "\x1b[32m" in line and "\x1b[1m" in line  # green + bold
+
+    regressed = SummaryRow(
+        metric="thoroughness",
+        values={"baseline": 8.1, "candidate": 6.9},
+        delta="-14.8%",
+        n={"baseline": 5, "candidate": 5},
+        paired_n=5,
+        ci_low=-1.6,
+        ci_high=-0.8,  # CI entirely < 0 -> score decreased
+        significant=True,
+    )
+    out = format_table([_report_with_judge(regressed)], color=True)
+    line = next(ln for ln in out.splitlines() if ln.startswith("thoroughness"))
+    assert "\x1b[31m" in line and "\x1b[1m" in line  # red + bold
+
+
+def test_stdout_supports_color_empty_no_color_does_not_disable(monkeypatch):
+    # Per the no-color.org spec, NO_COLOR disables color only when present AND
+    # non-empty. An empty value must NOT disable it. Lock that behavior in.
+    from eval.report import _stdout_supports_color
+
+    class _Tty:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setenv("TERM", "xterm")
+    monkeypatch.setenv("NO_COLOR", "")
+    assert _stdout_supports_color(_Tty()) is True
+
+
 def test_stdout_supports_color_honors_no_color(monkeypatch):
     from eval.report import _stdout_supports_color
 
