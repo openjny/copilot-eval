@@ -51,6 +51,7 @@ from eval.protocols import (
 from eval.protocols import (
     status_from_exit_code as _status_from_exit_code,
 )
+from eval.services.fixtures_service import resolve_fixture_dir
 from eval.trace import RunMetrics, metric_value
 
 logger = getLogger(__name__)
@@ -267,10 +268,14 @@ def run_one(
                         retry_count=attempt,
                     )
 
-            # Writable workspace: copy fixture to tmpdir so Copilot can read AND write
+            # Writable workspace: copy fixture to tmpdir so Copilot can read AND write.
+            # Remote fixtures (issue #122) resolve to their content-addressed
+            # extracted cache dir (already materialized before the run); local
+            # fixtures resolve to fixtures/<name>. resolve_fixture_dir returns
+            # None when a local fixture directory is simply absent.
             work_dir = Path(tempfile.mkdtemp(prefix="eval-work-"))
-            fixture_dir = (config.config_dir / "fixtures" / fixture_dir_name).resolve()
-            if fixture_dir.is_dir():
+            fixture_dir = resolve_fixture_dir(config, fixture_dir_name, task.remote_fixtures)
+            if fixture_dir is not None and fixture_dir.is_dir():
                 try:
                     shutil.copytree(fixture_dir, work_dir, dirs_exist_ok=True)
                 except OSError as exc:

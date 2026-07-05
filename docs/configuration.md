@@ -172,6 +172,7 @@ working eval and want less measurement noise or broader input coverage:
 | **Dry-run mode** | Preview the plan + matrix size without building images or running anything | [Dry-Run Mode](#dry-run-mode) |
 | **Variant ordering** | Rotate/shuffle which variant runs first per epoch to cancel order effects (`variant_order` + `seed`) | [Variant Order](#variant-order-reducing-measurement-bias) |
 | **Multi-fixture tasks** | Run one task across several workspaces (`fixtures: [...]`) so a result isn't tied to one input | [Multiple fixtures per task](#multiple-fixtures-per-task-input-coverage-axis) |
+| **Remote fixtures** | Declare a fixture by `url` + `sha256` (dataset-as-code); fetched, cached, and verified | [Remote fixtures](#remote-fixtures-dataset-as-code) |
 | **Self-consistency** | Sample each judge N times and aggregate (`judge_samples` + `judge_aggregate`) to damp judge noise | [Judge Self-Consistency](#judge-self-consistency--reliability) |
 | **Output instruction** | Customize or disable the sentence appended to every prompt (`output_instruction`) | [Output Instruction](#output-instruction) |
 | **Per-task health check** | Gate a run on an environment-readiness script (`health_check`) | [Health Check](#health-check) |
@@ -281,6 +282,7 @@ tasks:
     prompt: "Do something with {key}"    # {key} interpolated from vars
     enabled: true
     fixture: my-fixture                  # Directory under fixtures/ to mount at /workspace
+    # fixture: {url: https://…/set.tar.gz, sha256: "abc…"}  # Or: a remote dataset-as-code fixture
     # fixtures: [app-a, app-b]           # Or: run the task against multiple fixtures (input-coverage axis)
     timeout_seconds: null                # Override runner.timeout_seconds
     health_check: scripts/check.sh       # Script that must pass before running
@@ -685,7 +687,7 @@ in `examples/prompt-language` and `examples/judge-calibration`.
 
 ## Fixtures
 
-Place files under `<config-dir>/fixtures/<fixture-name>/`. They are copied to a temp directory and mounted at `/workspace` inside the container (read-write). An `output/` subdirectory is automatically created.
+Place files under `<config-dir>/fixtures/<fixture-name>/`. They are copied to a temp directory and mounted at `/workspace` inside the container (read-write). An `output/` subdirectory is automatically created. A fixture can also be a [remote dataset](#remote-fixtures-dataset-as-code) declared by `url` + `sha256` instead of a local directory.
 
 ### Multiple fixtures per task (input-coverage axis)
 
@@ -701,6 +703,36 @@ tasks:
 This expands the eval matrix from `variant × epoch` to `variant × fixture × epoch`. Each fixture is executed as its own run with its own persisted telemetry and output, keyed by a `__fixture__<name>` suffix on the run slug and an `eval.fixture` OTel resource tag. The `analyze` report pairs variants within each `(fixture, epoch)` cell and pools the paired deltas across fixtures, while per-run rows remain labelled `<fixture>#<epoch>` so the per-fixture breakdown stays visible.
 
 The singular `fixture:` form keeps working unchanged and is equivalent to a single-element `fixtures:` list (no `__fixture__` suffix, empty `eval.fixture` tag).
+
+### Remote fixtures (dataset-as-code)
+
+Instead of vendoring a large or canonical evaluation input into every repo, a fixture can be declared by a remote **URL + expected sha256**. The archive/file is fetched on first use, verified against the checksum, cached content-addressed, and then mounted exactly like a local fixture:
+
+```yaml
+tasks:
+  - name: code-review
+    prompt: "Review the changes"
+    fixture:
+      url: https://example.com/datasets/code-review-v3.tar.gz
+      sha256: "abc123…"   # required — the digest of the downloaded bytes
+      # name: code-review  # optional; derived from the URL filename when omitted
+```
+
+Remote fixtures also work as entries in a multi-fixture `fixtures:` list, mixed freely with local directory names:
+
+```yaml
+    fixtures:
+      - local-app
+      - { url: https://example.com/remote-set.zip, sha256: "def456…" }
+```
+
+**Behavior**
+
+- **Fetched + verified on first use.** On `run` (and `pin-fixtures`), each remote fixture is downloaded and its sha256 is checked. A **mismatch fails closed** — the run aborts with an actionable error before any Docker work, so an eval never executes against unverified inputs.
+- **Content-addressed cache.** Verified downloads and their extracted content are cached under `<config-dir>/.fixtures-cache/` keyed by sha256. Later runs reuse the cache without re-downloading, and an **offline run against an already-cached fixture just works** (no network access). The cache is regenerable — add `.fixtures-cache/` to `.gitignore` (the scaffolded `.gitignore` already does).
+- **Formats.** `.tar.gz` / `.tgz` / `.tar` and `.zip` archives are extracted (regular files and directories only; symlinks/special members and path-traversal entries are skipped for safety). Anything else is treated as a plain single file and placed in the workspace under its URL basename. Archives are extracted as-is — no top-level directory stripping — so the workspace layout matches the archive.
+- **Name / identity.** The fixture's `name` (declared, or derived from the URL filename with the archive extension stripped, e.g. `code-review-v3.tar.gz` → `code-review-v3`) is its identity in the eval matrix, `fixtures.lock`, and the run manifest. If a name can't be derived, declare one explicitly.
+- **Interoperates with pinning.** `pin-fixtures` fetches the remote fixture and records the **extracted content hash** in `fixtures.lock` (plus a `remote: {url, sha256}` provenance block), so `run --strict-fixtures` still gates on content reproducibility. Each run's `results.json` manifest likewise records the content hash and remote source (see below).
 
 ### Pinning fixtures (content-hash integrity)
 
@@ -734,7 +766,7 @@ At `run` time, fixtures are re-hashed and compared against the lockfile *before 
 - **Drift** (a fixture's contents changed, or a pinned fixture is missing) prints a warning but does not block the run.
 - **`run --strict-fixtures`** turns any drift — plus a missing/malformed lockfile, an unsupported lockfile `version`, a referenced-but-unpinned fixture, or an explicitly-declared fixture missing on disk — into a hard failure (exit code 1), so CI can gate on fixture reproducibility.
 
-Every run also records the fixtures' content hashes in its `results.json` manifest (under `fixtures:`) for post-hoc reproducibility auditing. After intentionally changing a fixture, re-run `pin-fixtures` to update the lockfile.
+Every run also records the fixtures' content hashes in its `results.json` manifest (under `fixtures:`) for post-hoc reproducibility auditing; for remote fixtures the entry also carries a `remote: {url, sha256}` block tying the recorded content hash to its source. After intentionally changing a fixture, re-run `pin-fixtures` to update the lockfile.
 
 
 ## Hooks

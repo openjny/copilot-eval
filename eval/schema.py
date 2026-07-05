@@ -79,6 +79,33 @@ def _name_schema(description: str) -> dict[str, Any]:
     return _string(description=description, pattern=_NAME_PATTERN, minLength=1)
 
 
+# Same pattern as `eval.config._SHA256_RE`, inlined to avoid importing a private
+# symbol; keep in sync if that pattern ever changes.
+_SHA256_PATTERN = r"^[0-9a-f]{64}$"
+
+
+def _remote_fixture_schema() -> dict[str, Any]:
+    """A remote "dataset-as-code" fixture: `{url, sha256, name?}` (issue #122)."""
+    return {
+        "type": "object",
+        "description": "Remote fixture fetched from 'url' and verified against 'sha256' "
+        "(the digest of the downloaded archive/file), cached content-addressed for reuse.",
+        "additionalProperties": False,
+        "required": ["url", "sha256"],
+        "properties": {
+            "url": _string(description="URL of the fixture archive (.tar.gz/.zip) or plain file."),
+            "sha256": _string(
+                description="Expected sha256 of the downloaded bytes; a mismatch fails closed.",
+                pattern=_SHA256_PATTERN,
+            ),
+            "name": _name_schema(
+                "Fixture identity in the matrix/lockfile/manifest. Derived from the URL "
+                "filename when omitted."
+            ),
+        },
+    }
+
+
 def _runner_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -464,15 +491,26 @@ def _task_schema() -> dict[str, Any]:
                 "default": True,
                 "description": "Set to false to skip this task without deleting it.",
             },
-            "fixture": _string(
-                description="Directory under fixtures/ to mount at /workspace. Falls back to the "
-                "task name when unset."
-            ),
+            "fixture": {
+                "description": "Fixture to mount at /workspace: either a directory name under "
+                "fixtures/ (falls back to the task name when unset), or a remote "
+                "{url, sha256} dataset fetched and verified at run time.",
+                "anyOf": [
+                    _string(description="Directory under fixtures/ to mount at /workspace."),
+                    _remote_fixture_schema(),
+                ],
+            },
             "fixtures": {
                 "type": "array",
                 "description": "Run this task against multiple fixtures (input-coverage axis) "
-                "instead of a single one.",
-                "items": _name_schema("Fixture directory name."),
+                "instead of a single one. Each entry is a local fixture directory name or a "
+                "remote {url, sha256} dataset.",
+                "items": {
+                    "anyOf": [
+                        _name_schema("Fixture directory name."),
+                        _remote_fixture_schema(),
+                    ]
+                },
                 "uniqueItems": True,
             },
             "timeout_seconds": {

@@ -11,6 +11,7 @@ from pathlib import Path
 import click
 
 from eval.config import load_config
+from eval.exceptions import RemoteFixtureError
 from eval.services.fixtures_service import pin_fixtures
 
 
@@ -19,7 +20,10 @@ from eval.services.fixtures_service import pin_fixtures
 def pin_fixtures_cmd(config_dir: str | None) -> None:
     """Pin fixtures: write fixtures.lock with per-fixture content hashes."""
     config = load_config(Path(config_dir) if config_dir else None)
-    result = pin_fixtures(config)
+    try:
+        result = pin_fixtures(config)
+    except RemoteFixtureError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     count = len(result.fixtures)
     click.echo(f"Pinned {count} fixture(s) -> {result.path}")

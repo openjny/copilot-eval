@@ -212,6 +212,13 @@ def check_fixtures(config: Config, tasks: list[Task] | None = None) -> list[Chec
             if fixture in seen:
                 continue
             seen.add(fixture)
+            # Remote fixtures (issue #122) have no local directory — they are
+            # fetched + verified from their URL at run time — so a missing dir
+            # is expected and not worth flagging.
+            rf = task.remote_fixtures.get(fixture)
+            if rf is not None:
+                results.append(_ok(f"fixture:{fixture}", f"Remote fixture (fetched from {rf.url})"))
+                continue
             path = fixtures_dir / fixture
             if path.is_dir():
                 results.append(_ok(f"fixture:{fixture}", f"Found at {path}"))

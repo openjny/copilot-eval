@@ -482,16 +482,77 @@
                 "type": "array"
               },
               "fixture": {
-                "description": "Directory under fixtures/ to mount at /workspace. Falls back to the task name when unset.",
-                "type": "string"
+                "anyOf": [
+                  {
+                    "description": "Directory under fixtures/ to mount at /workspace.",
+                    "type": "string"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "description": "Remote fixture fetched from 'url' and verified against 'sha256' (the digest of the downloaded archive/file), cached content-addressed for reuse.",
+                    "properties": {
+                      "name": {
+                        "description": "Fixture identity in the matrix/lockfile/manifest. Derived from the URL filename when omitted.",
+                        "minLength": 1,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                        "type": "string"
+                      },
+                      "sha256": {
+                        "description": "Expected sha256 of the downloaded bytes; a mismatch fails closed.",
+                        "pattern": "^[0-9a-f]{64}$",
+                        "type": "string"
+                      },
+                      "url": {
+                        "description": "URL of the fixture archive (.tar.gz/.zip) or plain file.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "url",
+                      "sha256"
+                    ],
+                    "type": "object"
+                  }
+                ],
+                "description": "Fixture to mount at /workspace: either a directory name under fixtures/ (falls back to the task name when unset), or a remote {url, sha256} dataset fetched and verified at run time."
               },
               "fixtures": {
-                "description": "Run this task against multiple fixtures (input-coverage axis) instead of a single one.",
+                "description": "Run this task against multiple fixtures (input-coverage axis) instead of a single one. Each entry is a local fixture directory name or a remote {url, sha256} dataset.",
                 "items": {
-                  "description": "Fixture directory name.",
-                  "minLength": 1,
-                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "description": "Fixture directory name.",
+                      "minLength": 1,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "description": "Remote fixture fetched from 'url' and verified against 'sha256' (the digest of the downloaded archive/file), cached content-addressed for reuse.",
+                      "properties": {
+                        "name": {
+                          "description": "Fixture identity in the matrix/lockfile/manifest. Derived from the URL filename when omitted.",
+                          "minLength": 1,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                          "type": "string"
+                        },
+                        "sha256": {
+                          "description": "Expected sha256 of the downloaded bytes; a mismatch fails closed.",
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "url": {
+                          "description": "URL of the fixture archive (.tar.gz/.zip) or plain file.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "url",
+                        "sha256"
+                      ],
+                      "type": "object"
+                    }
+                  ]
                 },
                 "type": "array",
                 "uniqueItems": true
@@ -836,16 +897,77 @@
                 "type": "array"
               },
               "fixture": {
-                "description": "Directory under fixtures/ to mount at /workspace. Falls back to the task name when unset.",
-                "type": "string"
+                "anyOf": [
+                  {
+                    "description": "Directory under fixtures/ to mount at /workspace.",
+                    "type": "string"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "description": "Remote fixture fetched from 'url' and verified against 'sha256' (the digest of the downloaded archive/file), cached content-addressed for reuse.",
+                    "properties": {
+                      "name": {
+                        "description": "Fixture identity in the matrix/lockfile/manifest. Derived from the URL filename when omitted.",
+                        "minLength": 1,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                        "type": "string"
+                      },
+                      "sha256": {
+                        "description": "Expected sha256 of the downloaded bytes; a mismatch fails closed.",
+                        "pattern": "^[0-9a-f]{64}$",
+                        "type": "string"
+                      },
+                      "url": {
+                        "description": "URL of the fixture archive (.tar.gz/.zip) or plain file.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "url",
+                      "sha256"
+                    ],
+                    "type": "object"
+                  }
+                ],
+                "description": "Fixture to mount at /workspace: either a directory name under fixtures/ (falls back to the task name when unset), or a remote {url, sha256} dataset fetched and verified at run time."
               },
               "fixtures": {
-                "description": "Run this task against multiple fixtures (input-coverage axis) instead of a single one.",
+                "description": "Run this task against multiple fixtures (input-coverage axis) instead of a single one. Each entry is a local fixture directory name or a remote {url, sha256} dataset.",
                 "items": {
-                  "description": "Fixture directory name.",
-                  "minLength": 1,
-                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "description": "Fixture directory name.",
+                      "minLength": 1,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "description": "Remote fixture fetched from 'url' and verified against 'sha256' (the digest of the downloaded archive/file), cached content-addressed for reuse.",
+                      "properties": {
+                        "name": {
+                          "description": "Fixture identity in the matrix/lockfile/manifest. Derived from the URL filename when omitted.",
+                          "minLength": 1,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                          "type": "string"
+                        },
+                        "sha256": {
+                          "description": "Expected sha256 of the downloaded bytes; a mismatch fails closed.",
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "url": {
+                          "description": "URL of the fixture archive (.tar.gz/.zip) or plain file.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "url",
+                        "sha256"
+                      ],
+                      "type": "object"
+                    }
+                  ]
                 },
                 "type": "array",
                 "uniqueItems": true
