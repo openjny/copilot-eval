@@ -491,11 +491,14 @@ def test_cli_validate_passes_for_valid_config(tmp_path: Path):
     assert "passed" in result.output.lower()
 
 
-def test_cli_validate_warns_but_passes_for_missing_fixture(tmp_path: Path):
+def test_cli_validate_warns_but_passes_for_missing_fixture(tmp_path: Path, monkeypatch):
     """A missing fixture dir is surfaced as a warning, not a blocking failure —
     `eval.runner.run_one` tolerates it, so `validate` must exit 0 (regression
     test for the azure-skills `compliance-audit` task, which has no fixture
     dir at all and relies solely on a `before_run` hook)."""
+    # `validate` auto-enables --strict under CI (issue #128); clear the ambient
+    # signal so this asserts the lenient default regardless of host environment.
+    monkeypatch.delenv("CI", raising=False)
     config_dir = tmp_path / "cfg"
     _write_yaml_config(
         config_dir,
@@ -883,7 +886,10 @@ def test_any_warnings_true_for_missing_fixture(tmp_path: Path):
     assert not any_failed(results)
 
 
-def test_cli_validate_strict_promotes_warning_to_failure(tmp_path: Path):
+def test_cli_validate_strict_promotes_warning_to_failure(tmp_path: Path, monkeypatch):
+    # `validate` auto-enables --strict under CI (issue #128); clear the ambient
+    # signal so the lenient (no-flag) leg asserts the default, not the CI override.
+    monkeypatch.delenv("CI", raising=False)
     config_dir = tmp_path / "cfg"
     _write_yaml_config(
         config_dir,
