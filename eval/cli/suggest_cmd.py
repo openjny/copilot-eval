@@ -16,6 +16,7 @@ from eval.config import Config, RunnerConfig, load_config
 from eval.exceptions import EvalError
 from eval.judge_executor import JudgeExecutor
 from eval.services.suggest_service import (
+    _read_capped,
     build_meta_prompt,
     suggest_evaluators,
     summarize_fixture,
@@ -138,7 +139,7 @@ def suggest_evaluators_cmd(
 
     if dry_run:
         fixture_summary = summarize_fixture(fixture) if fixture else ""
-        sample_texts = [p.read_text(errors="replace") for p in sample_outputs]
+        sample_texts = [_read_capped(p) for p in sample_outputs]
         click.echo(build_meta_prompt(prompt_text, fixture_summary, sample_texts))
         return
 
@@ -158,7 +159,7 @@ def suggest_evaluators_cmd(
 
     n_judge = sum(1 for e in result.evaluators if e.type == "judge")
     n_det = len(result.evaluators) - n_judge
-    mode = "prompt-only" if result.prompt_only else "with samples"
+    mode = "prompt-only" if result.prompt_only else "with context"
     click.echo(f"Wrote {output} ({mode})")
     click.echo(f"  task: {result.task_name}")
     click.echo(f"  evaluators: {len(result.evaluators)} ({n_judge} judge, {n_det} deterministic)")

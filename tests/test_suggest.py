@@ -377,3 +377,179 @@ def test_cli_reads_prompt_from_file(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0, result.output
     doc = yaml.safe_load(out.read_text())
     assert "Task prompt from a file" in doc["prompt"]
+
+
+# --- council fixes --------------------------------------------------------
+
+
+def test_slugify_task_name_coerces_invalid_names():
+    assert svc.slugify_task_name("Security Review") == "Security-Review"
+    assert svc.slugify_task_name("  spaced  out  ") == "spaced-out"
+    assert svc.slugify_task_name("--weird--") == "weird"
+    assert svc.slugify_task_name("!!!") == "suggested-task"
+    assert svc.slugify_task_name("") == "suggested-task"
+
+
+def test_suggest_evaluators_slugifies_name_and_passes_validate(tmp_path: Path):
+    # A human-friendly --task-name with spaces would otherwise fail validate.
+    project = tmp_path / "proj"
+    project.mkdir()
+    _scaffold_project(project)
+
+    out = project / "tasks" / "review.yaml"
+    result = svc.suggest_evaluators(
+        task_prompt="Review this PR",
+        task_name="Security Review",
+        output_path=out,
+        config=_config(tmp_path),
+        token=None,
+        executor=_FakeExecutor(_GOOD_RESPONSE),
+    )
+    assert result.task_name == "Security-Review"
+    doc = yaml.safe_load(out.read_text())
+    assert doc["name"] == "Security-Review"
+
+    runner = CliRunner()
+    validated = runner.invoke(main, ["validate", "--config-dir", str(project)])
+    assert validated.exit_code == 0, validated.output
+
+
+def test_ensure_coverage_dedupes_default_judge_name():
+    # Model already used "overall-quality" (the default judge name) on a regex,
+    # and there is no judge — the fallback judge must not collide.
+    evs = [Evaluator(name="overall-quality", type="regex", value="x")]
+    covered = svc.ensure_coverage(evs)
+    names = [e.name for e in covered]
+    assert len(names) == len(set(names)), names
+    assert any(e.type == "judge" for e in covered)
+
+
+def test_ensure_coverage_dedupes_default_gate_name():
+    # Model used "cost-gate" on a judge, and there is no deterministic anchor —
+    # the fallback metric gate must not collide.
+    evs = [
+        Evaluator(name="cost-gate", type="judge", criterion="Rate.", rubric={1: "no", 10: "yes"})
+    ]
+    covered = svc.ensure_coverage(evs)
+    names = [e.name for e in covered]
+    assert len(names) == len(set(names)), names
+    assert any(e.type in ("regex", "contains", "metric") for e in covered)
+
+
+def test_name_collision_response_passes_validate(tmp_path: Path):
+    # Model returns a single regex literally named "overall-quality"; the added
+    # judge fallback must be renamed so the generated file still validates.
+    resp = json.dumps({"evaluators": [{"name": "overall-quality", "type": "regex", "value": "ok"}]})
+    project = tmp_path / "proj"
+    project.mkdir()
+    _scaffold_project(project)
+    out = project / "tasks" / "gen.yaml"
+    result = svc.suggest_evaluators(
+        task_prompt="Task",
+        task_name="gen",
+        output_path=out,
+        config=_config(tmp_path),
+        token=None,
+        executor=_FakeExecutor(resp),
+    )
+    names = [e.name for e in result.evaluators]
+    assert len(names) == len(set(names)), names
+    runner = CliRunner()
+    validated = runner.invoke(main, ["validate", "--config-dir", str(project)])
+    assert validated.exit_code == 0, validated.output
+
+
+def test_validate_evaluators_drops_invalid_regex():
+    raw = [
+        {"name": "good", "type": "contains", "value": "ok"},
+        {"name": "bad-regex", "type": "regex", "value": "([unclosed"},
+    ]
+    valid = svc._validate_evaluators(raw)
+    assert [e.name for e in valid] == ["good"]
+
+
+def test_parse_suggestions_handles_bare_top_level_array():
+    resp = json.dumps(
+        [
+            {"name": "r", "type": "regex", "value": "x"},
+            {
+                "name": "j",
+                "type": "judge",
+                "criterion": "Rate.",
+                "rubric": {"1": "no", "10": "yes"},
+            },
+        ]
+    )
+    parsed = svc.parse_suggestions(resp)
+    types = {e["type"] for e in parsed}
+    assert {"regex", "judge"} <= types
+
+
+def test_parse_suggestions_handles_fenced_top_level_array():
+    inner = json.dumps([{"name": "r", "type": "regex", "value": "x"}])
+    resp = "Sure:\n```json\n" + inner + "\n```"
+    parsed = svc.parse_suggestions(resp)
+    assert parsed[0]["type"] == "regex"
+
+
+def test_suggest_evaluators_emits_fixture_field(tmp_path: Path):
+    fixture = tmp_path / "my-fixture"
+    fixture.mkdir()
+    (fixture / "input.md").write_text("some input")
+    out = tmp_path / "tasks" / "t.yaml"
+    svc.suggest_evaluators(
+        task_prompt="Task",
+        task_name="t",
+        output_path=out,
+        config=_config(tmp_path),
+        token=None,
+        fixture_dir=fixture,
+        executor=_FakeExecutor(_GOOD_RESPONSE),
+    )
+    doc = yaml.safe_load(out.read_text())
+    assert doc["fixture"] == "my-fixture"
+
+
+def test_summarize_fixture_skips_hidden_files(tmp_path: Path):
+    fixture = tmp_path / "fx"
+    fixture.mkdir()
+    (fixture / "visible.md").write_text("visible content")
+    (fixture / ".secret").write_text("hidden content")
+    summary = svc.summarize_fixture(fixture)
+    assert "visible.md" in summary
+    assert ".secret" not in summary
+
+
+def test_suggest_evaluators_masks_secrets_in_prompt(tmp_path: Path):
+    secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    sample = tmp_path / "sample.md"
+    sample.write_text(f"the token is {secret} do not leak it")
+    out = tmp_path / "t.yaml"
+    fake = _FakeExecutor(_GOOD_RESPONSE)
+    svc.suggest_evaluators(
+        task_prompt="Task",
+        task_name="t",
+        output_path=out,
+        config=_config(tmp_path),
+        token=secret,
+        sample_output_paths=[sample],
+        executor=fake,
+    )
+    assert secret not in (fake.last_prompt or "")
+    assert "REDACTED" in (fake.last_prompt or "")
+
+
+def test_suggest_evaluators_empty_sample_is_prompt_only(tmp_path: Path):
+    sample = tmp_path / "empty.md"
+    sample.write_text("   \n\t  \n")
+    out = tmp_path / "t.yaml"
+    result = svc.suggest_evaluators(
+        task_prompt="Task",
+        task_name="t",
+        output_path=out,
+        config=_config(tmp_path),
+        token=None,
+        sample_output_paths=[sample],
+        executor=_FakeExecutor(_GOOD_RESPONSE),
+    )
+    assert result.prompt_only is True

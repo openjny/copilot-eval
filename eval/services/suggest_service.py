@@ -22,14 +22,22 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from eval.config import Config, ConfigError, Evaluator, _parse_evaluators
-from eval.exceptions import JudgeParseError
+from eval.config import (
+    _NAME_RE,
+    Config,
+    ConfigError,
+    Evaluator,
+    _parse_evaluators,
+    _parse_task,
+)
+from eval.env_utils import collect_secrets, mask_secrets
+from eval.exceptions import EvalError, JudgeParseError
 from eval.judge_executor import JudgeExecutor, _parse_json
 
 # Deterministic evaluator types: non-judge criteria that anchor the judge with
@@ -71,15 +79,28 @@ def _read_capped(path: Path) -> str:
     return text
 
 
+def _is_hidden(path: Path, root: Path) -> bool:
+    """True when any path segment below ``root`` starts with a dot.
+
+    Dotfiles (``.env``, ``.git/…``, ``.aws/credentials``) commonly hold secrets;
+    they're skipped from the fixture summary so they never enter the meta-prompt.
+    """
+    return any(part.startswith(".") for part in path.relative_to(root).parts)
+
+
 def summarize_fixture(fixture_dir: Path) -> str:
     """Summarize a fixture directory as a file listing plus small text snippets.
 
-    Only the first :data:`_MAX_FIXTURE_FILES` files are listed, and each text
-    file contributes a capped snippet, so the meta-prompt stays bounded.
+    Only the first :data:`_MAX_FIXTURE_FILES` non-hidden files are listed, and
+    each text file contributes a capped snippet, so the meta-prompt stays
+    bounded. Hidden files/directories (dotfiles) are skipped to avoid leaking
+    credentials into the prompt.
     """
     if not fixture_dir.is_dir():
         return ""
-    files = sorted(p for p in fixture_dir.rglob("*") if p.is_file())
+    files = sorted(
+        p for p in fixture_dir.rglob("*") if p.is_file() and not _is_hidden(p, fixture_dir)
+    )
     if not files:
         return ""
     lines: list[str] = []
@@ -231,20 +252,43 @@ def _normalize_raw_evaluator(raw: Any) -> dict[str, Any] | None:
     return None
 
 
+def _loose_json_array(text: str) -> list[Any] | None:
+    """Recover a top-level JSON array from raw or code-fenced text.
+
+    Some models return the evaluators as a bare ``[ ... ]`` array (no wrapping
+    object), optionally inside a ```` ```json ... ``` ```` fence. Try the fenced
+    content first, then the raw text, then a first-``[`` .. last-``]`` slice.
+    """
+    stripped = text.strip()
+    candidates: list[str] = []
+    fence = re.search(r"```(?:json)?\s*(.*?)```", stripped, re.DOTALL | re.IGNORECASE)
+    if fence:
+        candidates.append(fence.group(1).strip())
+    candidates.append(stripped)
+    start, end = stripped.find("["), stripped.rfind("]")
+    if start != -1 and end > start:
+        candidates.append(stripped[start : end + 1])
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, list):
+            return data
+    return None
+
+
 def parse_suggestions(text: str) -> list[dict[str, Any]]:
     """Extract the ``evaluators`` array from a (possibly noisy) judge response.
 
-    Raises :class:`JudgeParseError` when no JSON object with an ``evaluators``
-    list can be recovered.
+    Accepts a JSON object with an ``evaluators`` list, or a bare top-level array
+    (raw or code-fenced). Raises :class:`JudgeParseError` when no evaluator list
+    can be recovered at all.
     """
     data = _parse_json(text, require_keys=("evaluators",))
     if data is None:
-        # Some models wrap the array at the top level or under a different key.
-        try:
-            loose = json.loads(text)
-        except (json.JSONDecodeError, ValueError):
-            loose = None
-        if isinstance(loose, list):
+        loose = _loose_json_array(text)
+        if loose is not None:
             data = {"evaluators": loose}
         else:
             raise JudgeParseError(
@@ -306,25 +350,35 @@ _DEFAULT_METRIC_GATE = Evaluator(
 )
 
 
+def _unique_name(base: str, taken: set[str]) -> str:
+    """Return ``base`` or ``base-2``, ``base-3``, … so it doesn't collide."""
+    if base not in taken:
+        return base
+    i = 2
+    while f"{base}-{i}" in taken:
+        i += 1
+    return f"{base}-{i}"
+
+
 def ensure_coverage(evaluators: list[Evaluator]) -> list[Evaluator]:
     """Guarantee both a judge rubric and a deterministic anchor are present.
 
-    Issue #93 requires the output to include BOTH. When the model omits one,
-    a sensible, valid default is added (an overall-quality judge rubric and/or a
+    Issue #93 requires the output to include BOTH. When the model omits one, a
+    sensible, valid default is added (an overall-quality judge rubric and/or a
     cost gate) so the emitted task file is immediately runnable and editable.
+    Default names are de-duplicated against the model-proposed evaluators so a
+    name clash can never produce a task file that fails ``validate``.
     """
     result = list(evaluators[:_MAX_EVALUATORS])
     names = {e.name for e in result}
     if not any(e.type == "judge" for e in result):
-        result.insert(0, _DEFAULT_JUDGE)
-        names.add(_DEFAULT_JUDGE.name)
+        judge = replace(_DEFAULT_JUDGE, name=_unique_name(_DEFAULT_JUDGE.name, names))
+        result.insert(0, judge)
+        names.add(judge.name)
     if not any(e.type in _DETERMINISTIC_TYPES for e in result):
-        gate = _DEFAULT_METRIC_GATE
-        if gate.name in names:  # pragma: no cover - defensive against a name clash
-            gate = Evaluator(
-                name="cost-budget-gate", type="metric", metric="cost", op="<=", threshold=0.50
-            )
+        gate = replace(_DEFAULT_METRIC_GATE, name=_unique_name(_DEFAULT_METRIC_GATE.name, names))
         result.append(gate)
+        names.add(gate.name)
     return result
 
 
@@ -369,19 +423,46 @@ def _evaluator_to_dict(ev: Evaluator) -> dict[str, Any]:
     return out
 
 
-def build_task_yaml(task_name: str, task_prompt: str, evaluators: list[Evaluator]) -> str:
+def slugify_task_name(raw: str) -> str:
+    """Coerce an arbitrary string into a valid task/evaluator name.
+
+    Task names must match ``eval.config._NAME_RE``
+    (``^[A-Za-z0-9][A-Za-z0-9._-]*$``). A name derived from a filename or
+    ``--task-name`` (e.g. ``"Security Review"``) would otherwise make the
+    generated task file fail ``validate``, so it is slugified: invalid runs
+    become ``-``, leading junk is stripped, and an empty result falls back to a
+    safe default.
+    """
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", raw.strip())
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    slug = slug.lstrip("._-")
+    if not slug or not _NAME_RE.match(slug):
+        return "suggested-task"
+    return slug
+
+
+def build_task_yaml(
+    task_name: str,
+    task_prompt: str,
+    evaluators: list[Evaluator],
+    fixture: str | None = None,
+) -> str:
     """Render a standalone ``tasks/<name>.yaml`` task file.
 
     The file bundles the task prompt with the suggested evaluators so it can be
     dropped straight into a project's ``tasks/`` directory and validated/run.
     Multi-line strings (notably the prompt) are emitted as literal blocks (``|``)
-    to match the hand-written task files under ``examples/``.
+    to match the hand-written task files under ``examples/``. When ``fixture`` is
+    given, a ``fixture:`` field records the input the rubric was designed against
+    (otherwise a run would default to ``fixtures/<task-name>/``).
     """
     doc: dict[str, Any] = {
         "name": task_name,
         "prompt": task_prompt.rstrip() + "\n",
-        "evaluators": [_evaluator_to_dict(e) for e in evaluators],
     }
+    if fixture:
+        doc["fixture"] = fixture
+    doc["evaluators"] = [_evaluator_to_dict(e) for e in evaluators]
     body = yaml.dump(
         doc,
         Dumper=_BlockDumper,
@@ -417,10 +498,23 @@ def suggest_evaluators(
     :meth:`JudgeExecutor.complete`, validates the proposed evaluators, guarantees
     judge + deterministic coverage, and writes the resulting task file to
     ``output_path``. ``executor`` is injectable for testing.
+
+    The task name is slugified and the fully assembled task is re-parsed through
+    the config loader before writing, so the emitted file is guaranteed to pass
+    ``validate`` (or a clear :class:`EvalError` is raised instead of writing an
+    invalid file). Fixture/sample text fed into the meta-prompt is secret-masked.
     """
-    fixture_summary = summarize_fixture(fixture_dir) if fixture_dir else ""
-    sample_texts = [_read_capped(p) for p in (sample_output_paths or [])]
-    prompt_only = not fixture_summary and not sample_texts
+    secrets = collect_secrets(config, token)
+    fixture_summary = ""
+    if fixture_dir is not None:
+        fixture_summary = mask_secrets(summarize_fixture(fixture_dir), secrets) or ""
+    try:
+        sample_texts = [
+            mask_secrets(_read_capped(p), secrets) or "" for p in (sample_output_paths or [])
+        ]
+    except OSError as exc:
+        raise EvalError(f"could not read sample output: {exc}") from exc
+    prompt_only = not fixture_summary.strip() and not any(t.strip() for t in sample_texts)
 
     meta_prompt = build_meta_prompt(task_prompt, fixture_summary, sample_texts)
     executor = executor or JudgeExecutor(config)
@@ -430,12 +524,25 @@ def suggest_evaluators(
     validated = _validate_evaluators(raw)
     evaluators = ensure_coverage(validated)
 
-    yaml_text = build_task_yaml(task_name, task_prompt, evaluators)
+    name = slugify_task_name(task_name)
+    fixture_ref = None
+    if fixture_dir is not None and _NAME_RE.match(fixture_dir.name):
+        fixture_ref = fixture_dir.name
+    yaml_text = build_task_yaml(name, task_prompt, evaluators, fixture=fixture_ref)
+
+    # Final guarantee: the assembled task must load cleanly (name, evaluators,
+    # and cross-evaluator invariants like unique names) — anything else is a bug
+    # in this service, surfaced before an invalid file is written.
+    try:
+        _parse_task(yaml.safe_load(yaml_text))
+    except ConfigError as exc:  # pragma: no cover - defensive; fixes above prevent this
+        raise EvalError(f"internal error: generated task would not validate: {exc}") from exc
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(yaml_text)
 
     return SuggestionResult(
-        task_name=task_name,
+        task_name=name,
         evaluators=evaluators,
         yaml_text=yaml_text,
         prompt_only=prompt_only,

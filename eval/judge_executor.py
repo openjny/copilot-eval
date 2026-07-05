@@ -599,7 +599,8 @@ class JudgeExecutor:
         except OSError as exc:
             raise JudgeInvocationError(f"judge model invocation failed: {exc}") from exc
         if proc.returncode != 0:
-            stderr = (proc.stderr or "").strip()
+            secrets = collect_secrets(self.config, token)
+            stderr = mask_secrets((proc.stderr or "").strip(), secrets) or ""
             detail = f" — {stderr[:_STDERR_SNIPPET_CHARS]}" if stderr else ""
             raise JudgeInvocationError(f"judge model exited with rc={proc.returncode}{detail}")
         return proc.stdout or ""

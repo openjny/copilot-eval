@@ -504,3 +504,77 @@ def test_judge_executor_uses_custom_copilot_cmd(tmp_path, monkeypatch):
     executor = JudgeExecutor(_judge_config(tmp_path), copilot_cmd=["custom-copilot"])
     executor.execute_single(_ev(), JudgeContext(conversation="c"))
     assert seen_cmd["cmd"][0] == "custom-copilot"
+
+
+# --- complete() shared judge-invocation path (issue #93) ---
+
+
+def test_complete_returns_stdout_on_success(tmp_path, monkeypatch):
+    _patch_judge(monkeypatch, proc=_FakeProc(stdout="raw model text", returncode=0))
+    executor = JudgeExecutor(_judge_config(tmp_path))
+    assert executor.complete("meta prompt", token=None) == "raw model text"
+
+
+def test_complete_uses_model_override_and_disables_otel(tmp_path, monkeypatch):
+    from eval import judge_executor as je_mod
+
+    monkeypatch.setattr(je_mod, "host_copilot_version", lambda: "copilot/1.0.18")
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["env"] = kwargs.get("env", {})
+        return _FakeProc(stdout="ok", returncode=0)
+
+    monkeypatch.setattr(je_mod.subprocess, "run", fake_run)
+    config = _judge_config(tmp_path, judge_model="gpt-4.1")
+    JudgeExecutor(config).complete("hi", token="tok")
+    assert "--model" in seen["cmd"]
+    assert "gpt-4.1" in seen["cmd"]
+    assert seen["env"].get("COPILOT_OTEL_ENABLED") == "false"
+
+
+def test_complete_raises_on_nonzero_returncode(tmp_path, monkeypatch):
+    from eval.exceptions import JudgeInvocationError
+
+    _patch_judge(monkeypatch, proc=_FakeProc(stdout="", stderr="boom detail", returncode=2))
+    executor = JudgeExecutor(_judge_config(tmp_path))
+    with pytest.raises(JudgeInvocationError) as excinfo:
+        executor.complete("p", token=None)
+    assert "rc=2" in str(excinfo.value)
+    assert "boom detail" in str(excinfo.value)
+
+
+def test_complete_masks_secret_in_stderr(tmp_path, monkeypatch):
+    from eval.exceptions import JudgeInvocationError
+
+    secret = "ghp_SECRETTOKENVALUE1234567890"
+    _patch_judge(
+        monkeypatch,
+        proc=_FakeProc(stdout="", stderr=f"auth failed for {secret}", returncode=1),
+    )
+    executor = JudgeExecutor(_judge_config(tmp_path))
+    with pytest.raises(JudgeInvocationError) as excinfo:
+        executor.complete("p", token=secret)
+    assert secret not in str(excinfo.value)
+
+
+def test_complete_raises_on_timeout(tmp_path, monkeypatch):
+    import subprocess as sp
+
+    from eval.exceptions import JudgeInvocationError
+
+    _patch_judge(monkeypatch, exc=sp.TimeoutExpired(cmd="copilot", timeout=60))
+    executor = JudgeExecutor(_judge_config(tmp_path))
+    with pytest.raises(JudgeInvocationError) as excinfo:
+        executor.complete("p", token=None)
+    assert "timed out" in str(excinfo.value)
+
+
+def test_complete_raises_when_cli_missing(tmp_path, monkeypatch):
+    from eval.exceptions import JudgeInvocationError
+
+    _patch_judge(monkeypatch, exc=FileNotFoundError())
+    executor = JudgeExecutor(_judge_config(tmp_path))
+    with pytest.raises(JudgeInvocationError):
+        executor.complete("p", token=None)
