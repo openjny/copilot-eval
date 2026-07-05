@@ -1304,9 +1304,7 @@ def _stdout_supports_color(stream: Any = None) -> bool:
     return bool(isatty and isatty())
 
 
-def _colorize_delta(
-    text: str, row: SummaryRow, *, lower_is_better: bool, enabled: bool
-) -> str:
+def _colorize_delta(text: str, row: SummaryRow, *, lower_is_better: bool, enabled: bool) -> str:
     """Wrap an already-justified Delta cell in ANSI color when ``enabled``.
 
     Significant improvements render green + bold, significant regressions
@@ -1425,7 +1423,10 @@ def format_table(reports: list[Report], *, color: bool | None = None) -> str:
             for row in report.pass_k:
                 cols = "".join(f"{_fmt_pass_k_value(row, v):>22}" for v in report.variants)
                 delta = _colorize_delta(
-                    f"{_fmt_pass_k_delta(row):>26}", row, lower_is_better=False, enabled=color_enabled
+                    f"{_fmt_pass_k_delta(row):>26}",
+                    row,
+                    lower_is_better=False,
+                    enabled=color_enabled,
                 )
                 lines.append(f"{row.metric:<24} {cols} {delta}")
 
