@@ -339,6 +339,7 @@ def test_to_dict_structure():
         "finished_at": None,
         "duration_seconds": None,
         "retry_count": 0,
+        "cached": False,
         "scores": [
             {"name": "a", "type": "contains", "score": 1, "reason": "found", "passed": True},
         ],

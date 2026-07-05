@@ -162,6 +162,88 @@ strategy (`runner.parallel`, `variant_order`, `seed`) between the original
 run and a resume, however, only prints a warning — the merged manifest may
 then mix scheduling strategies across the original and resumed cells.
 
+## Content-hash cache (`run --cache`)
+
+`run --cache` is an **opt-in** cross-run cache that skips a matrix cell when an
+*identical* cell — same environment-complete inputs — was already executed and
+stored by a prior run, reusing its whole result (log, scores, output artifacts,
+and trace) instead of launching another container. It complements `--resume`
+(which only re-runs failed/missing cells *within one run*) by reusing
+**completed, unchanged cells across runs** — the common case when you iterate on
+one variant and don't want to pay Docker + Copilot-token cost to re-run the
+others.
+
+```bash
+uv run copilot-eval run --config-dir <dir> --cache
+uv run copilot-eval run --config-dir <dir> --cache --cache-dir /path/to/cache
+```
+
+It is **off by default** — the golden path is unchanged, and no external service
+is required (the cache is a plain directory, `results/.cache` by default;
+`--cache-dir` overrides it and implies `--cache`).
+
+**Cache key (environment-complete).** A cell is only reused when *every* input
+that can change the agent's behavior — or the artifacts scored later — matches.
+The key hashes:
+
+- the variant **image digest** (`docker image inspect`),
+- the fully-resolved **prompt** (post-interpolation, including the output
+  instruction),
+- the **fixture content hash** (the same `fixtures.lock` hashing used by
+  `--strict-fixtures`; see [Pinning fixtures](#pinning-fixtures-content-hash-integrity)),
+- **model**, **reasoning effort**, **max turns**, **timeout**, and **collector**,
+- the **run-time inputs that are mounted/read rather than baked into the image**:
+  the variant **run script**, the task **hooks** (`before_run` / `after_run`) and
+  **health check**, the **inline runtime evaluators** (`contains` / `regex` /
+  `script`, whose pass/fail is stored in the cached scores), the **`.env`** file,
+  and **`output_format`** / **`capture_content`** / container **resource limits**,
+- and the cell's **task / variant / epoch / fixture** identity.
+
+Change any of them — bump the image, edit the prompt, retouch a fixture, switch
+model or effort, edit a setup script or a `contains` assertion — and the affected
+cells are busted and re-executed; everything else is still reused. Judge/metric
+evaluators are deliberately **not** in the key: they run in `analyze` off the
+reused trace, so re-scoring them never needs a container re-run. If a cell's
+image digest can't be resolved (Docker unavailable), that cell is simply not
+cached — the mutable tag is never used as a fallback key.
+
+**Statistical-honesty guarantees.** Caching is designed so it can never
+fake-inflate confidence:
+
+- **Whole prior cells only, epoch-safe.** The key includes the `epoch` index, so
+  epoch *e* of a new run can only reuse epoch *e* of a prior run. Caching reuses
+  whole prior-run cells one-for-one and **never collapses or dedupes epochs**
+  within a run — the per-run sample size is preserved.
+- **All completed cells are cached, pass or fail.** Any cell whose container ran
+  to completion is stored and reused; caching never keeps only the *passing*
+  cells (which would bias point estimates upward as failures get re-rolled across
+  repeated cached runs). Infrastructure failures (`failed` / `timeout` /
+  `setup_failed`) are never cached, so a re-run always re-executes them.
+- **Reused traces are analyzed under the current run.** On a hit the exported
+  trace is re-homed onto the new `run_id` (its `test_id` and all other tags
+  preserved) so `analyze` ingests it exactly as if freshly produced. Because this
+  re-homing is only possible for the file exporter, caching requires
+  `runner.collector: file` (the zero-dependency default); with the Jaeger backend
+  the cache is skipped with a notice.
+- **Cached cells count as real data — the fresh/cached split is always
+  surfaced.** Because the cache key is environment-complete (image digest +
+  fixture hash + resolved prompt + model + reasoning effort + the run-time
+  inputs above), a cache hit is a *genuine* independent draw from the identical,
+  key-verified distribution — not a fabricated or duplicated sample. So cached
+  cells **count toward point estimates, confidence intervals, and the
+  `--min-epochs` power gate**, exactly like fresh ones. This makes the primary
+  "reuse the baseline, iterate only the experiment" workflow satisfy a
+  satisfiable `--min-epochs` gate.
+
+  Statistical honesty is preserved by **transparency**, not by discounting real
+  data: cached cells are recorded in the manifest / `results.json` with
+  `"cached": true`, and `analyze` **always** reports the fresh/cached breakdown
+  (`cached_variant_n` / `fresh_variant_n` / `fresh_paired_n` in JSON, a `cache.*`
+  property per variant in JUnit, and a `Sample composition: baseline=10 (3 fresh,
+  7 cached); …` line in the table/markdown/HTML). When a variant's cached
+  fraction exceeds **50%**, a `high_cache_fraction` warning fires so a
+  mostly-reused run is never mistaken for a fully fresh one.
+
 ## Advanced Configuration
 
 Beyond the basic `runner`/`variants`/`tasks` shape, several knobs tune *how* the

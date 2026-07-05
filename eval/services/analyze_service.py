@@ -59,9 +59,17 @@ _FORMATTERS = {
 def _gate_epochs(report: Report) -> int:
     """Epoch count `--min-epochs` should gate on.
 
-    Paired reports gate on the shared paired-epoch count (the number of
-    deltas actually being compared); everything else (single variant, or
-    median/mean aggregate) falls back to the smallest per-variant sample.
+    Counts ALL real samples — fresh *and* cache-reused (issue #131, Option C).
+    Because the content-hash cache key is environment-complete (variant image
+    digest + fixture hash + resolved prompt + model + reasoning effort + the
+    run-time inputs), a cache hit is a genuine independent draw from the same
+    key-verified distribution, so it legitimately contributes statistical
+    power. Statistical honesty is preserved by TRANSPARENCY instead — the
+    report always surfaces the fresh/cached split and warns when the cached
+    fraction is high — not by refusing to count real data. Paired reports gate
+    on the shared paired-epoch count (the number of deltas actually being
+    compared); everything else (single variant, or median/mean aggregate)
+    falls back to the smallest per-variant sample.
     """
     if report.aggregate == "paired" and len(report.variants) == 2:
         return report.paired_n
