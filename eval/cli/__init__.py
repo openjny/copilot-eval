@@ -52,6 +52,7 @@ from eval.cli.baseline_cmd import baseline  # noqa: E402
 from eval.cli.build_cmd import build  # noqa: E402
 from eval.cli.init_cmd import init  # noqa: E402
 from eval.cli.list_cmd import list_tasks  # noqa: E402
+from eval.cli.pin_fixtures_cmd import pin_fixtures_cmd  # noqa: E402
 from eval.cli.run_cmd import run  # noqa: E402
 from eval.cli.validate_cmd import validate  # noqa: E402
 
@@ -61,6 +62,7 @@ main.add_command(baseline)
 main.add_command(build)
 main.add_command(init)
 main.add_command(list_tasks)
+main.add_command(pin_fixtures_cmd)
 main.add_command(validate)
 
 # --- Backward-compat re-exports ---

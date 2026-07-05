@@ -26,9 +26,12 @@ def write_manifest(
     results: list[RunResult],
     schedule: dict[str, Any] | None = None,
     cost_estimate: dict[str, Any] | None = None,
+    fixtures: dict[str, Any] | None = None,
 ) -> None:
     """Persist the full set of runs so `analyze` can detect missing/failed ones."""
-    write_manifest_dicts(run_dir, run_id, [r.to_dict() for r in results], schedule, cost_estimate)
+    write_manifest_dicts(
+        run_dir, run_id, [r.to_dict() for r in results], schedule, cost_estimate, fixtures
+    )
 
 
 def write_manifest_dicts(
@@ -37,6 +40,7 @@ def write_manifest_dicts(
     runs: list[dict[str, Any]],
     schedule: dict[str, Any] | None = None,
     cost_estimate: dict[str, Any] | None = None,
+    fixtures: dict[str, Any] | None = None,
 ) -> None:
     """Same as :func:`write_manifest`, but takes already-serialized run dicts.
 
@@ -50,6 +54,10 @@ def write_manifest_dicts(
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "schedule": schedule or {},
+        # Fixture identity (issue #89): content hashes of the fixtures consumed
+        # by this run, so a later audit can prove two runs used identical
+        # inputs even if the fixture directories were modified afterwards.
+        "fixtures": fixtures or {},
         # Cost governance (issue #70): the pre-flight estimate computed before
         # this run started, plus the judge token usage actually observed
         # across this run's scores (see eval.judge_executor).

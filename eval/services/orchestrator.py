@@ -29,6 +29,12 @@ from eval.runner import RunResult, get_github_token, run_one
 from eval.services.build_service import _ensure_images
 from eval.services.check_report import print_check_results
 from eval.services.cost_service import estimate_run_cost, format_cost_report
+from eval.services.fixtures_service import (
+    FIXTURE_LOCKFILE_NAME,
+    FixtureLockError,
+    compute_fixture_hashes,
+    verify_fixtures,
+)
 from eval.services.manifest import write_manifest, write_manifest_dicts
 from eval.services.resume_service import (
     CellKey,
@@ -441,6 +447,48 @@ def _print_summary(
     click.echo("=" * 50)
 
 
+def _verify_fixtures_or_abort(
+    config: Config, tasks: list[Task], strict_fixtures: bool
+) -> None:
+    """Verify the run's fixtures against ``fixtures.lock`` (issue #89).
+
+    Drift is a non-blocking warning by default; ``--strict-fixtures`` turns any
+    drift (or a missing/unreadable lockfile, or referenced-but-unpinned
+    fixtures) into a hard abort so CI can gate reproducibility.
+    """
+    try:
+        verification = verify_fixtures(config, tasks)
+    except FixtureLockError as exc:
+        if strict_fixtures:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"WARNING: {exc} (skipping fixture verification)", err=True)
+        return
+
+    if not verification.lockfile_present:
+        if strict_fixtures:
+            raise click.ClickException(
+                f"--strict-fixtures set but no {FIXTURE_LOCKFILE_NAME} found. "
+                "Run `copilot-eval pin-fixtures` first."
+            )
+        return
+
+    for message in verification.problems:
+        prefix = "Fixture drift" if strict_fixtures else "WARNING: fixture drift"
+        click.echo(f"{prefix}: {message}", err=True)
+
+    if verification.has_problems:
+        if strict_fixtures:
+            raise click.ClickException(
+                "Fixture drift detected (--strict-fixtures). Re-pin with "
+                "`copilot-eval pin-fixtures` or restore the fixtures to match the lockfile."
+            )
+    elif verification.matched:
+        click.echo(
+            f"Fixtures verified against {FIXTURE_LOCKFILE_NAME}: "
+            f"{len(verification.matched)} fixture(s) match."
+        )
+
+
 def run_command(
     config: Config,
     *,
@@ -456,6 +504,7 @@ def run_command(
     estimate: bool = False,
     yes: bool = False,
     budget_limit: float | None = None,
+    strict_fixtures: bool = False,
 ) -> None:
     """Business logic for the `run` CLI command: select tasks, print the plan,
     pre-flight, build/ensure images, schedule runs, and persist the manifest.
@@ -588,6 +637,12 @@ def run_command(
     if not no_build:
         _ensure_images(config, github_token)
 
+    # Fixture integrity (issue #89): verify against fixtures.lock (warn on
+    # drift, or abort under --strict-fixtures) and capture the content hashes
+    # so they can be recorded in the run manifest below.
+    _verify_fixtures_or_abort(config, tasks, strict_fixtures)
+    fixture_hashes = compute_fixture_hashes(config, tasks)
+
     reporter = create_reporter(no_progress=no_progress)
     results = _execute_schedule(
         config, tasks, resolved_epochs, run_id, run_dir, github_token, reporter, skip_cells
@@ -601,13 +656,15 @@ def run_command(
     }
     if resume:
         merged_runs = merge_manifest_runs(existing_index, results)
-        write_manifest_dicts(run_dir, run_id, merged_runs, schedule, cost_estimate.to_dict())
+        write_manifest_dicts(
+            run_dir, run_id, merged_runs, schedule, cost_estimate.to_dict(), fixture_hashes
+        )
         passed = sum(1 for r in merged_runs if r.get("passed"))
         click.echo(
             f" Resume merged: {passed}/{len(merged_runs)} cell(s) passing overall "
             f"({len(results)} re-executed this run)"
         )
     else:
-        write_manifest(run_dir, run_id, results, schedule, cost_estimate.to_dict())
+        write_manifest(run_dir, run_id, results, schedule, cost_estimate.to_dict(), fixture_hashes)
 
     _print_summary(config, run_id, results, config_dir)
