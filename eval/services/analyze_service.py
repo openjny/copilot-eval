@@ -82,6 +82,7 @@ def run_analysis(
     no_progress: bool = False,
     baseline_name: str | None = None,
     fail_on_regression: bool | None = None,
+    allow_empty: bool = False,
 ) -> None:
     """Analyze traces from a previous eval run and print the A/B report."""
     config = load_config(Path(config_dir) if config_dir else None)
@@ -145,7 +146,23 @@ def run_analysis(
         )
         if failed_gates:
             raise click.ClickException(f"Metric gate failed: {'; '.join(failed_gates)}")
-        return
+        # Fail CLOSED so a mistyped/never-executed --run-id can't pass a CI gate
+        # with exit 0 (issue #126), mirroring the `resume` "Run not found"
+        # precedent in orchestrator.py. Distinguish an unknown run (results dir
+        # absent) from a known run that produced nothing analyzable, and offer
+        # --allow-empty as an explicit escape hatch.
+        if allow_empty:
+            return
+        if not results_dir.exists():
+            raise click.ClickException(
+                f"Run '{run_id}' not found under {config.results_dir}. "
+                "Pass an existing --run-id to analyze, or --allow-empty to treat "
+                "a missing/empty run as success."
+            )
+        raise click.ClickException(
+            f"Run '{run_id}' produced no analyzable data (no traces and no manifest to "
+            "reconcile against). Pass --allow-empty to treat an empty run as success."
+        )
     if not metrics:
         click.echo("No surviving traces; reporting reliability from the manifest only.", err=True)
 

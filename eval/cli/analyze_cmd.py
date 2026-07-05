@@ -97,6 +97,16 @@ from eval.services.analyze_service import run_analysis
         "set, disabled otherwise."
     ),
 )
+@click.option(
+    "--allow-empty",
+    is_flag=True,
+    help=(
+        "Treat an unknown or empty run as success instead of failing closed. "
+        "By default `analyze` exits non-zero when --run-id does not exist or "
+        "yielded no traces and no manifest, so a mistyped/never-executed run "
+        "can't pass a CI gate."
+    ),
+)
 def analyze(
     run_id: str,
     output: str,
@@ -111,6 +121,7 @@ def analyze(
     no_progress: bool,
     baseline_name: str | None,
     fail_on_regression: bool | None,
+    allow_empty: bool,
 ) -> None:
     """Analyze traces from a previous eval run."""
     run_analysis(
@@ -127,4 +138,5 @@ def analyze(
         no_progress=no_progress,
         baseline_name=baseline_name,
         fail_on_regression=fail_on_regression,
+        allow_empty=allow_empty,
     )

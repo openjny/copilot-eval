@@ -956,6 +956,74 @@ def test_run_metric_evaluators_missing_telemetry_fails_closed_regardless_of_stat
     assert "telemetry missing" in failed[0]
 
 
+# --- analyze fail-closed on unknown / empty run (issue #126) ---
+def _no_gate_config(tmp_path: Path) -> Config:
+    """Build a Config with a single task and NO metric evaluators, so exit-code
+    behaviour is driven purely by run existence, not by a metric gate."""
+    from eval.config import Task
+
+    task = Task(name="t", prompt="p", evaluators=[])
+    return Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[task],
+        variants=_variants("v"),
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+
+
+def test_analyze_exits_nonzero_when_run_id_unknown(tmp_path: Path, monkeypatch):
+    """A mistyped/never-executed --run-id whose results dir does not exist must
+    fail CLOSED (non-zero exit + "not found") instead of silently exiting 0, so a
+    typo'd run can't pass a CI gate as green."""
+    from eval.services import analyze_service
+
+    config = _no_gate_config(tmp_path)
+    # results/<run_id> deliberately NOT created — the run is unknown.
+    monkeypatch.setattr(analyze_service, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr(analyze_service, "_collect_file_traces", lambda *a, **k: [])
+
+    result = CliRunner().invoke(main, ["analyze", "--run-id", "typo-run", "--skip-eval"])
+
+    assert result.exit_code != 0, result.output
+    assert "not found" in result.output
+    assert "typo-run" in result.output
+
+
+def test_analyze_exits_nonzero_when_known_run_has_no_analyzable_data(tmp_path: Path, monkeypatch):
+    """A known run (results dir exists) that produced no traces and no manifest
+    can't be analyzed, so `analyze` must fail CLOSED instead of exiting 0."""
+    from eval.services import analyze_service
+
+    config = _no_gate_config(tmp_path)
+    run_id = "empty-run"
+    (config.results_dir / run_id).mkdir(parents=True)
+    monkeypatch.setattr(analyze_service, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr(analyze_service, "_collect_file_traces", lambda *a, **k: [])
+
+    result = CliRunner().invoke(main, ["analyze", "--run-id", run_id, "--skip-eval"])
+
+    assert result.exit_code != 0, result.output
+    assert "no analyzable data" in result.output
+
+
+def test_analyze_allow_empty_exits_zero_on_unknown_run(tmp_path: Path, monkeypatch):
+    """--allow-empty is the explicit escape hatch: an unknown/empty run exits 0
+    for the rare "I know it's empty and that's fine" case."""
+    from eval.services import analyze_service
+
+    config = _no_gate_config(tmp_path)
+    monkeypatch.setattr(analyze_service, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr(analyze_service, "_collect_file_traces", lambda *a, **k: [])
+
+    result = CliRunner().invoke(
+        main, ["analyze", "--run-id", "typo-run", "--skip-eval", "--allow-empty"]
+    )
+
+    assert result.exit_code == 0, result.output
+
+
 # --- analyze --min-epochs (statistical power CI gate) ---
 
 
