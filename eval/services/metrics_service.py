@@ -16,13 +16,24 @@ from eval.protocols import EvalContext, EvalScore, score_to_dict
 from eval.trace import Trace, extract_metrics
 
 
-def _run_metric_evaluators(config: Config, traces: list[Trace], results_dir: Path) -> list[str]:
+def _run_metric_evaluators(
+    config: Config,
+    traces: list[Trace],
+    results_dir: Path,
+    manifest_runs: list[dict[str, Any]] | None = None,
+) -> list[str]:
     """Score type=metric evaluators from parsed telemetry.
 
     Deterministic and LLM-free: for each trace, thresholds the requested
     ``RunMetrics`` fields and merges the 1/0 pass/fail scores into the run's
     ``*.scores.json`` file (alongside judge/contains/regex scores). Recomputed on
     every ``analyze`` since it's cheap and telemetry-driven.
+
+    When ``manifest_runs`` is provided (the persisted full set of attempted
+    runs), metric-gated runs that produced **no usable trace** — e.g. telemetry
+    dropped or a timed-out run that never emitted a span — are cross-referenced
+    and failed CLOSED too, so a gate is never silently skipped just because its
+    run's telemetry went entirely missing (survivorship bias).
 
     Returns a list of human-readable labels for every metric gate that did **not**
     pass — including gates whose value was unavailable (``score is None``), which
@@ -90,6 +101,70 @@ def _run_metric_evaluators(config: Config, traces: list[Trace], results_dir: Pat
             if not s.passed:
                 reason = s.reason.split(" → ", 1)[0]  # drop the trailing "→ FAIL"
                 failed_gates.append(f"{s.name} [{scenario}{fx}/{variant}/e{epoch}]: {reason}")
+
+    failed_gates.extend(
+        _fail_missing_telemetry_runs(tasks_by_name, manifest_runs, results_dir, seen)
+    )
+    return failed_gates
+
+
+def _fail_missing_telemetry_runs(
+    tasks_by_name: dict[str, Any],
+    manifest_runs: list[dict[str, Any]] | None,
+    results_dir: Path,
+    seen: set[Path],
+) -> list[str]:
+    """Fail CLOSED for metric-gated manifest runs that produced no usable trace.
+
+    The trace loop only sees runs that actually emitted an ingested trace; a run
+    whose telemetry went entirely missing (dropped, or a timed-out run that never
+    produced a span) never appears there, so its gate would silently pass. Each
+    such run is reconciled against the persisted manifest via its ``run_slug`` and
+    failed here — writing a null (score=None, passed=False) score so the report
+    reflects it — unless the trace loop already scored (or failed) that run.
+    """
+    if not manifest_runs:
+        return []
+
+    failed_gates: list[str] = []
+    for run in manifest_runs:
+        task = tasks_by_name.get(str(run.get("task", "")))
+        if not task:
+            continue
+        metric_evaluators = [ev for ev in task.evaluators if ev.type == "metric"]
+        if not metric_evaluators:
+            continue
+
+        fixture = str(run.get("fixture") or "")
+        scores_file = results_dir / (
+            run_slug(
+                str(run.get("task", "")),
+                str(run.get("variant", "")),
+                run.get("epoch", ""),
+                fixture,
+            )
+            + ".scores.json"
+        )
+        if scores_file in seen:
+            continue  # already scored (or failed closed) from an ingested trace
+        seen.add(scores_file)
+
+        fx = f"/{fixture}" if fixture else ""
+        label = f"{run.get('task')}{fx}/{run.get('variant')}/e{run.get('epoch')}"
+        new_scores = [
+            EvalScore(
+                name=ev.name,
+                type="metric",
+                score=None,
+                reason="telemetry missing for run (no usable trace)",
+                passed=False,
+            )
+            for ev in metric_evaluators
+        ]
+        _merge_scores_file(scores_file, new_scores, replace_type="metric")
+        for s in new_scores:
+            click.echo(f"    [{label}] {s.name} (metric): n/a — {s.reason}", err=True)
+            failed_gates.append(f"{s.name} [{label}]: {s.reason}")
 
     return failed_gates
 

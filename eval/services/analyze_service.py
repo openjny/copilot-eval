@@ -106,36 +106,48 @@ def run_analysis(
     # are surfaced instead of silently dropped (survivorship bias).
     if manifest_runs is not None:
         _report_run_coverage(manifest_runs, traces)
-    elif not metrics:
-        click.echo(
-            "No traces found for this run ID, and no manifest to reconcile against.", err=True
-        )
-        return
 
-    # With no surviving traces we can't show metrics, but a manifest still lets us
-    # report reliability (success/failure rates) — which is exactly when a run
-    # with all-failed/timed-out variants needs it most. Only bail when there is
-    # neither trace data nor a manifest to fall back on.
-    if not metrics and manifest_runs is None:
-        click.echo("No traces found for this run ID.", err=True)
-        return
-    if not metrics:
-        click.echo("No surviving traces; reporting reliability from the manifest only.", err=True)
+    # Metric evaluators are deterministic (no LLM), so they run on every analyze —
+    # even with --skip-eval, even when no metrics survived, and even when there is
+    # no manifest — so CI gates always reflect the current telemetry. Running them
+    # BEFORE the "no traces" early-returns below is what makes a metric-gated run
+    # with absent/partial/dropped telemetry fail CLOSED instead of slipping through
+    # an early return with exit 0. No results_dir.exists() guard: _merge_scores_file
+    # creates the directory as needed (so gating still runs when `run` and `analyze`
+    # are separate CI jobs, or a non-file collector was used); the judge pass below
+    # preserves these metric scores when it rewrites each scores file.
+    failed_gates = _run_metric_evaluators(config, traces, results_dir, manifest_runs)
+    # A metric-gated config that yielded zero usable telemetry AND has no manifest
+    # to enumerate expected runs can verify its gates from neither source — fail
+    # CLOSED rather than exit 0 on entirely-absent telemetry. (Partial telemetry is
+    # already handled: the trace loop fails closed on unparseable traces and the
+    # manifest loop on runs that emitted no trace.)
+    has_metric_gate = any(ev.type == "metric" for task in config.tasks for ev in task.evaluators)
+    if not metrics and manifest_runs is None and has_metric_gate and not failed_gates:
+        failed_gates.append("metric gate unverifiable: no telemetry and no manifest for this run")
 
     # Run judge evaluators if not skipped
     if not skip_eval and results_dir.exists():
         reporter = create_reporter(no_progress=no_progress)
         _run_judges(config, traces, results_dir, force=re_eval, reporter=reporter)
         _warn_unscored_judges(config, traces, results_dir)
-    # Metric evaluators are deterministic (no LLM), so they run every analyze —
-    # even with --skip-eval — so CI gates always reflect the current telemetry.
-    # No results_dir.exists() guard: _merge_scores_file creates the directory as
-    # needed, so gating still runs when `run` and `analyze` are separate CI jobs
-    # (or a non-file collector) and the results dir wasn't pre-created. A skipped
-    # gate here would silently exit 0 and defeat the CI gate.
-    failed_gates = _run_metric_evaluators(config, traces, results_dir)
     if results_dir.exists():
         _report_judge_reliability(results_dir)
+
+    # With no surviving traces we can't render a metrics report, but a manifest
+    # still lets us report reliability (success/failure rates) — which is exactly
+    # when a run with all-failed/timed-out variants needs it most. Bail out only
+    # after gating above (so a failed metric gate is still raised, not swallowed)
+    # when there is neither trace data nor a manifest to fall back on.
+    if not metrics and manifest_runs is None:
+        click.echo(
+            "No traces found for this run ID, and no manifest to reconcile against.", err=True
+        )
+        if failed_gates:
+            raise click.ClickException(f"Metric gate failed: {'; '.join(failed_gates)}")
+        return
+    if not metrics:
+        click.echo("No surviving traces; reporting reliability from the manifest only.", err=True)
 
     variant_order = [v.name for v in config.variants]
     raw_tids = {t.resource_tags.get("eval.test_id") for t in traces}
