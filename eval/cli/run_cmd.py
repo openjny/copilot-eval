@@ -11,16 +11,29 @@ from eval.services.orchestrator import run_command
 
 
 @click.command()
-@click.option("--task", "-p", default=None, help="Run a specific task (overrides enabled flag)")
+@click.option(
+    "--task",
+    "-p",
+    default=None,
+    help="Run only this task by name (overrides the per-task 'enabled' flag)",
+)
 @click.option(
     "--epochs",
     "-n",
     default=None,
     type=int,
-    help="Number of epochs (default: from config, typically 1)",
+    help="Repetitions per variant × fixture cell (default: runner.epochs, typically 1)",
 )
-@click.option("--dry-run", is_flag=True, help="Show plan without executing")
-@click.option("--no-build", is_flag=True, help="Skip auto-build of Docker images")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print the plan and matrix size, then exit without building images or running anything",
+)
+@click.option(
+    "--no-build",
+    is_flag=True,
+    help="Skip auto-building Docker images (assume they already exist)",
+)
 @click.option(
     "--skip-preflight",
     is_flag=True,
@@ -58,7 +71,12 @@ from eval.services.orchestrator import run_command
     type=float,
     help="Abort if the pre-flight cost estimate (USD) exceeds this value (overrides runner.budget_limit)",
 )
-@click.option("--config-dir", default=None, type=click.Path(exists=True), help="Project directory")
+@click.option(
+    "--config-dir",
+    default=None,
+    type=click.Path(exists=True),
+    help="Project directory containing eval-config.yaml (defaults to the repo root)",
+)
 def run(
     task: str | None,
     epochs: int | None,

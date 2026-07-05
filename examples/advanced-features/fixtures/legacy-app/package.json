@@ -1,0 +1,8 @@
+{
+  "name": "legacy-app",
+  "version": "0.4.2",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

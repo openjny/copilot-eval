@@ -118,6 +118,28 @@ strategy (`runner.parallel`, `variant_order`, `seed`) between the original
 run and a resume, however, only prints a warning — the merged manifest may
 then mix scheduling strategies across the original and resumed cells.
 
+## Advanced Configuration
+
+Beyond the basic `runner`/`variants`/`tasks` shape, several knobs tune *how* the
+matrix is scheduled, sampled, and validated. They are opt-in — every default
+reproduces the simplest behavior — so reach for them once you're past a first
+working eval and want less measurement noise or broader input coverage:
+
+| Feature | What it does | Details |
+|---------|--------------|---------|
+| **Dry-run mode** | Preview the plan + matrix size without building images or running anything | [Dry-Run Mode](#dry-run-mode) |
+| **Variant ordering** | Rotate/shuffle which variant runs first per epoch to cancel order effects (`variant_order` + `seed`) | [Variant Order](#variant-order-reducing-measurement-bias) |
+| **Multi-fixture tasks** | Run one task across several workspaces (`fixtures: [...]`) so a result isn't tied to one input | [Multiple fixtures per task](#multiple-fixtures-per-task-input-coverage-axis) |
+| **Self-consistency** | Sample each judge N times and aggregate (`judge_samples` + `judge_aggregate`) to damp judge noise | [Judge Self-Consistency](#judge-self-consistency--reliability) |
+| **Output instruction** | Customize or disable the sentence appended to every prompt (`output_instruction`) | [Output Instruction](#output-instruction) |
+| **Per-task health check** | Gate a run on an environment-readiness script (`health_check`) | [Health Check](#health-check) |
+
+A runnable, dependency-free config that exercises the config-level knobs (variant
+ordering, multi-fixture, self-consistency, output instruction, health check) lives
+in [`examples/advanced-features/`](../examples/advanced-features/) — `validate` it,
+then `run --dry-run` it (the sixth feature) to see the whole matrix without
+touching Docker.
+
 ## eval-config.yaml
 
 Each eval set is defined by a single `eval-config.yaml` file. It contains global settings, variants, and tasks.
@@ -235,14 +257,41 @@ tasks:
 
 Variables are merged in order: `global vars` → `task vars` → `variant vars`. Later values override earlier ones.
 
-The prompt also gets an output-path instruction appended automatically so that generated files are available to judges. By default this is `"\n\nSave all output files under /workspace/output/."`. Configure it via `runner.output_instruction`:
+The prompt also gets an output-path instruction appended automatically so that generated files are available to judges — see [Output Instruction](#output-instruction) below to customize or disable it.
 
-- **unset** → the default sentence above (backward compatible),
-- **`""`** → nothing is appended (disable it, e.g. when the task prompt already specifies the output path, or to avoid injecting English into a non-English prompt),
-- **`null`** → same as unset (the default sentence),
-- **custom string** → appended verbatim, with the same `{var}` interpolation as the prompt (so it can adapt per variant, e.g. `Respond in {language}.`).
+## Output Instruction
 
-When non-empty, the instruction is appended after a `\n\n` separator.
+Judges score the files a run produces, so they need to end up somewhere the
+framework can collect (`/workspace/output/`). To guarantee that, the framework
+appends a short instruction to **every** task prompt (after a `\n\n` separator).
+By default this is `"Save all output files under /workspace/output/."`. Control
+it with `runner.output_instruction`:
+
+| Value | Behavior |
+|-------|----------|
+| unset | The default sentence above (backward compatible). |
+| `null` | Same as unset (the default sentence). |
+| `""` (empty string) | Nothing is appended — disable it entirely. |
+| custom string | Appended verbatim, with the same `{var}` interpolation as prompts (so it can adapt per variant). |
+
+```yaml
+runner:
+  # Custom instruction, interpolated per variant (e.g. vars: { language: Japanese }):
+  output_instruction: "Write any files under /workspace/output/. Respond in {language}."
+```
+
+**When to override or disable:**
+
+- **Disable (`""`)** when the task prompt already names its own output path (a
+  fixed appended sentence would be redundant), or to avoid injecting English
+  into a non-English prompt where it would confound the comparison. See
+  `examples/prompt-language`, which sets `output_instruction: ""` for exactly
+  this reason.
+- **Customize** when your workflow writes elsewhere, or to add per-variant
+  guidance via `{var}` interpolation.
+
+Because the instruction is interpolated like a prompt, `copilot-eval validate`
+also checks that every `{var}` placeholder in it resolves for each variant.
 
 ## Trace Collector
 
@@ -461,7 +510,13 @@ Rules:
 Single-shot judge scores are noisy. Set `runner.judge_samples > 1` to sample each
 judge multiple times and aggregate the successful scores via `runner.judge_aggregate`
 (`median` — default, `mean`, or `majority`). Each sample's outcome is classified as
-`ok` / `parse_error` / `timeout` / `error`.
+`ok` / `parse_error` / `timeout` / `error` (among others).
+
+Scores are integers, so `median`/`mean` round to the nearest integer using
+**round-half-up** (an average of `6.5` becomes `7`, not Python's banker's-rounding
+`6`), and `majority` breaks ties toward the **lower** score for determinism. Pick
+`median` (robust to outliers) unless you specifically want the mean's sensitivity
+or a mode-style `majority` vote.
 
 The aggregated `.scores.json` entry for a judge records this metadata (additive — older
 consumers ignore the extra keys):
@@ -683,7 +738,44 @@ uv run copilot-eval run --budget-limit 5.0   # per-invocation override
 
 ## Health Check
 
-A script that validates the environment is ready before running Copilot. If it exits non-zero, the run is skipped with `status: setup_failed`.
+A per-task script that validates the environment is ready *before* Copilot runs.
+Use it when a task depends on external state that a hook set up (a deployed
+resource, a reachable service, a seeded database) and you'd rather skip a run
+than let it execute against a half-ready environment and pollute the metrics.
+
+```yaml
+tasks:
+  - name: deploy-check
+    prompt: "Diagnose why the app returns 500s and fix it."
+    health_check: scripts/health-check.sh   # path relative to the config dir
+```
+
+**Execution & format:**
+
+- The path is resolved relative to the **config dir** first, then the project
+  root. A **missing script is treated as a pass** (the check is skipped), so a
+  broken path never silently blocks runs — `copilot-eval validate` flags an
+  unresolvable `health_check` reference for you.
+- The script runs on the **host** (like hooks, not inside Docker) via `bash`,
+  after the `before_run` hook and before the container starts. Resolved
+  task/variant vars are exported as `EVAL_<KEY>` (e.g. `variant_label` →
+  `EVAL_VARIANT_LABEL`), alongside the process environment and `.env` values.
+- **Exit code 0 → ready**, the run proceeds. **Non-zero → the run is skipped**
+  with `status: setup_failed` (it is never executed, and no telemetry/output is
+  produced for that cell). Script stdout/stderr is appended to the run log.
+- If the script itself fails to *launch* (e.g. `bash` is unavailable or the OS
+  refuses to start the subprocess), that raises a `HookError` for the cell,
+  which the runner isolates as `setup_failed` — it never aborts the rest of the
+  batch. (The script is invoked as `bash <script>`, so a missing execute bit or
+  shebang does not by itself cause a launch failure.)
+
+**Interaction with hooks:** the order per run is `before_run` hook →
+`health_check` → container. The hook sets the environment up; the health check
+verifies it. Their failure semantics differ: `before_run` obeys
+`hooks.on_failure` (`fail` aborts the run, `warn` continues), whereas a failed
+`health_check` **always** skips the run. See
+[`examples/advanced-features/scripts/health-check.sh`](../examples/advanced-features/scripts/health-check.sh)
+for a minimal script.
 
 ## Container Resource Limits
 
@@ -720,6 +812,66 @@ During `analyze`, judge evaluators are always run in parallel across traces (up 
 `rich` is an optional dependency (`pip install copilot-eval[progress]` / `uv sync --extra progress`); without it, output falls back to the plain log-line format even on a TTY.
 
 Pass `--no-progress` to `run` or `analyze` to disable all progress output (useful for scripts that parse stdout, or to keep logs minimal).
+
+## Dry-Run Mode
+
+`run --dry-run` previews *what* a run would do without doing it — no Docker
+build, no pre-flight readiness checks, no containers, no telemetry. Use it to
+sanity-check the resolved plan and the matrix size before committing minutes (or
+budget) to a real run:
+
+```bash
+uv run copilot-eval run --config-dir examples/advanced-features --dry-run
+```
+
+```text
+==================================================
+ Copilot Eval Runner
+==================================================
+ Model:    gpt-5.4-mini
+ Effort:   default
+ Max turns:unlimited
+ Epochs:   4
+ Timeout:  120s
+ Parallel: off
+ Collector: file
+ Order:    counterbalance
+ Run ID:   20260101-120000-abc123
+ Vars:     {'language': 'English'}
+ Variants:
+   - baseline
+   - experimental
+ Tasks:
+   - fix-bug
+==================================================
+[dry-run] Would run 4 epoch(s) × 2 variants × fixtures for each task (16 runs total).
+```
+
+**What it validates:** the config loads and passes schema/dataclass checks
+(otherwise `run` errors before reaching dry-run), the task selection resolves
+(`--task` names a real task; enabled tasks otherwise), and the effective
+scheduling knobs — model, effort, epochs, `parallel`, `collector`, and
+`variant_order` (with `seed`, shown as `Order: random (seed=42)`). The final line
+reports the total matrix size: `epochs × variants × fixtures` summed over the
+selected tasks (multi-fixture tasks count once per fixture).
+
+**What it does *not* do:** dry-run returns *before* pre-flight, so it does **not**
+check Docker, auth, disk space, or that fixture directories exist — use
+[`validate`](#validation) for on-disk reference checks. It also skips image
+builds and never executes hooks, health checks, or Copilot.
+
+**Budget gate still applies:** the one thing that happens before the dry-run
+early-return is the pre-flight cost estimate. It is always computed, and if it
+exceeds `runner.budget_limit` / `--budget-limit` the command **aborts with an
+error even under `--dry-run`** (see [Cost governance](#cost-governance)). With no
+budget limit set (the default), dry-run always prints the plan.
+
+**With `--resume`:** dry-run reports how many cells remain versus the full
+matrix, e.g. `[dry-run] Would run 5 cell(s) out of 16 in the matrix (skipping 11
+already completed).`
+
+**With `--estimate`:** the full cost breakdown is additionally printed, but dry-run
+skips the interactive "Proceed?" confirmation, since nothing runs anyway.
 
 ## Variant Order (reducing measurement bias)
 

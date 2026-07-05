@@ -1,0 +1,72 @@
+# yaml-language-server: $schema=../../schemas/eval-config.schema.json
+#
+# Advanced features showcase (issue #92).
+#
+# This eval set is a documentation companion: every "advanced" knob described in
+# docs/configuration.md#advanced-configuration is exercised here in one place.
+# The variants only differ by a var (no custom Dockerfile), so the set stays
+# dependency-free and is meant to be read, `validate`d, and `run --dry-run` — not
+# necessarily executed end-to-end.
+vars:
+  language: English
+
+runner:
+  epochs: 4                    # a multiple of the variant count so counterbalance visits every position evenly
+
+  # (1) Variant ordering — rotate which variant runs first each epoch so
+  #     order effects (cache warmup, rate limits, time-of-day drift) don't
+  #     always land on the same variant. `seed` makes `random` reproducible;
+  #     it is ignored by `counterbalance` (which is already deterministic).
+  variant_order: counterbalance   # fixed | counterbalance | random
+  seed: 42                        # only used when variant_order: random
+
+  # (2) Self-consistency — sample each judge multiple times and aggregate the
+  #     successful scores to damp single-shot judge noise.
+  judge_samples: 3                # 1 = legacy single-shot
+  judge_aggregate: median         # median (default) | mean | majority
+
+  # (3) Output instruction — the sentence appended to every prompt so generated
+  #     files reach the judges. These tasks name their own output path, so a
+  #     custom instruction is used here; set it to "" to disable entirely.
+  output_instruction: "Write any files you produce under /workspace/output/."
+
+  parallel: "off"                 # serial: variant_order is fully honored
+  timeout_seconds: 120
+  model: gpt-5.4-mini
+  judge_model: gpt-4.1
+
+variants:
+  - name: baseline
+    description: "Plain Copilot, no customization"
+    vars: { variant_label: baseline }
+
+  - name: experimental
+    description: "The customization under test"
+    vars: { variant_label: experimental }
+
+tasks:
+  - name: fix-bug
+    prompt: "Find and fix the bug in this project. Respond in {language}. Write a short summary of the fix to /workspace/output/summary.md."
+
+    # (4) Multi-fixture matrix — run the task against several workspaces so the
+    #     comparison isn't tied to one possibly cherry-picked input. Expands the
+    #     matrix to variant × fixture × epoch. Use `fixtures:` (plural) instead
+    #     of the singular `fixture:`.
+    fixtures: [small-app, legacy-app]
+
+    # (5) Per-task health check — a host script run after before_run and before
+    #     the container. Non-zero exit skips the run as setup_failed.
+    health_check: scripts/health-check.sh
+
+    evaluators:
+      - name: fix-quality
+        type: judge
+        criterion: "Rate whether the summary correctly identifies and fixes the bug in the project."
+        rubric:
+          "10": "Bug correctly identified and a correct fix described"
+          "5": "Bug identified but the fix is wrong or vague"
+          "1": "Bug not identified"
+      # Deterministic anchor next to the noisier judge (language-neutral token).
+      - name: gt-mentions-fix
+        type: regex
+        value: "(?i)fix"
