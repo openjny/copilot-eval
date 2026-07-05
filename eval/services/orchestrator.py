@@ -39,6 +39,7 @@ from eval.services.fixtures_service import (
 )
 from eval.services.manifest import (
     load_manifest_fixtures,
+    load_manifest_replayed,
     write_manifest,
     write_manifest_dicts,
 )
@@ -669,11 +670,28 @@ def run_command(
                 "Pre-flight validation failed. Fix the issues above and re-run."
             )
 
-    if config.runner.collector == "jaeger":
-        _ensure_jaeger(config)
-    github_token = get_github_token()
-    if not no_build:
-        _ensure_images(config, github_token)
+    from eval.runners import runner_is_synthetic
+
+    replayed = runner_is_synthetic(config.runner.backend)
+    # A synthetic (offline test/dev) runner launches no container and calls no
+    # model, so it needs no GitHub token and no image build, and must never
+    # touch Docker/Jaeger (issue #132). The jaeger collector requires a live
+    # Docker backend, so reject it up front rather than spinning one up. The
+    # real Docker path (non-synthetic backends) is completely unchanged.
+    if replayed:
+        if config.runner.collector == "jaeger":
+            raise click.ClickException(
+                f"Runner backend '{config.runner.backend}' is an offline synthetic "
+                "harness and cannot use the 'jaeger' collector (which requires "
+                "Docker). Set runner.collector: file."
+            )
+        github_token = ""
+    else:
+        if config.runner.collector == "jaeger":
+            _ensure_jaeger(config)
+        github_token = get_github_token()
+        if not no_build:
+            _ensure_images(config, github_token)
 
     # Reuse the hashes computed during verification above (fixtures are hashed
     # once per run) as the manifest's fixture-identity record (issue #89).
@@ -690,14 +708,29 @@ def run_command(
         "variant_order": config.runner.variant_order,
         "seed": config.runner.seed,
     }
+    # Stamp the manifest as replayed/synthetic when the offline replay runner
+    # produced it (issue #132), so `analyze` can mark the report accordingly and
+    # a replayed run can never be confused with a real, isolated measurement.
     if resume:
+        # Never drop the synthetic marker on resume: if the existing run dir was
+        # already stamped replayed (or this pass is replayed), the merged
+        # manifest stays replayed. Otherwise resuming a replayed run with a real
+        # backend would launder the carried-over synthetic cells as genuine
+        # measurements (issue #132).
+        replayed = replayed or load_manifest_replayed(run_dir)
         merged_runs = merge_manifest_runs(existing_index, results)
         # Preserve the fixture hashes of cells carried over from the original
         # run; only the fixtures re-executed this resume get fresh values, so
         # the audit record for already-completed cells stays intact.
         merged_fixtures = {**load_manifest_fixtures(run_dir), **fixture_hashes}
         write_manifest_dicts(
-            run_dir, run_id, merged_runs, schedule, cost_estimate.to_dict(), merged_fixtures
+            run_dir,
+            run_id,
+            merged_runs,
+            schedule,
+            cost_estimate.to_dict(),
+            merged_fixtures,
+            replayed,
         )
         passed = sum(1 for r in merged_runs if r.get("passed"))
         click.echo(
@@ -705,6 +738,8 @@ def run_command(
             f"({len(results)} re-executed this run)"
         )
     else:
-        write_manifest(run_dir, run_id, results, schedule, cost_estimate.to_dict(), fixture_hashes)
+        write_manifest(
+            run_dir, run_id, results, schedule, cost_estimate.to_dict(), fixture_hashes, replayed
+        )
 
     _print_summary(config, run_id, results, config_dir)

@@ -51,6 +51,19 @@ class FixtureError(EvalError):
     """A task's fixture directory/files could not be prepared for a run."""
 
 
+class ReplayError(EvalError):
+    """A replay (offline/mock) runner could not find or read recorded fixtures.
+
+    Raised by :class:`eval.runners.replay_runner.ReplayRunner` when the
+    directory of pre-recorded agent outputs/traces it is asked to replay is
+    missing or empty. The replay runner is a *test/dev-only* harness (issue
+    #132): it exists to drive the evaluator → report pipeline offline (no
+    Docker, no Copilot auth), never to produce a real, isolated measurement, so
+    a misconfigured recording should fail loudly rather than silently emit an
+    empty "run".
+    """
+
+
 class RemoteFixtureError(FixtureError):
     """A remote "dataset-as-code" fixture could not be fetched or verified.
 

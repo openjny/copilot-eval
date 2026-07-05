@@ -11,6 +11,7 @@ import click
 
 from eval.config import load_config
 from eval.services.baseline_service import delete_baseline, list_baselines, save_baseline
+from eval.services.manifest import load_manifest_replayed
 from eval.services.trace_service import load_run_metrics
 
 
@@ -28,7 +29,8 @@ def save(run_id: str, name: str, jaeger_url: str | None, config_dir: str | None)
     """Save a run's OTel metrics as a named baseline snapshot."""
     config = load_config(Path(config_dir) if config_dir else None)
     metrics = load_run_metrics(config, run_id, jaeger_url)
-    path = save_baseline(config, run_id, name, metrics)
+    replayed = load_manifest_replayed(config.results_dir / run_id)
+    path = save_baseline(config, run_id, name, metrics, replayed=replayed)
     click.echo(f"Saved baseline {name!r} from run {run_id} -> {path}")
 
 

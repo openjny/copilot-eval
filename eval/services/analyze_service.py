@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -35,7 +36,7 @@ from eval.services.judge_service import (
     _run_judges,
     _warn_unscored_judges,
 )
-from eval.services.manifest import load_manifest
+from eval.services.manifest import load_manifest, load_manifest_replayed
 from eval.services.metrics_service import _run_metric_evaluators
 from eval.services.orchestrator import _ensure_jaeger
 from eval.services.trace_service import (
@@ -177,6 +178,19 @@ def run_analysis(
     variant_order = [v.name for v in config.variants]
     raw_tids = {t.resource_tags.get("eval.test_id") for t in traces}
     trace_test_ids = {t for t in raw_tids if t is not None}
+
+    # Load the baseline (if any) before building the report so a *synthetic*
+    # baseline forces the replayed/synthetic banner even when this run is real:
+    # comparing genuine numbers against a replayed baseline must never render as
+    # a clean, real comparison (issue #132). `save_baseline` already refuses to
+    # snapshot a replayed run, so this is defense-in-depth for any pre-existing
+    # or hand-crafted synthetic baseline.
+    baseline_data: dict[str, Any] | None = None
+    if baseline_name:
+        baseline_data = load_baseline(config, baseline_name)
+    report_replayed = load_manifest_replayed(results_dir) or (
+        bool(baseline_data.get("replayed")) if baseline_data else False
+    )
     reports = build_report(
         metrics,
         results_dir if results_dir.exists() else None,
@@ -185,6 +199,7 @@ def run_analysis(
         manifest_runs=manifest_runs,
         trace_test_ids=trace_test_ids,
         mc_correction=mc_correction,
+        replayed=report_replayed,
     )
     if not reports:
         click.echo("No reports generated.", err=True)
@@ -195,8 +210,7 @@ def run_analysis(
     # unpaired bootstrap, since the two runs share no epoch to pair on.
     baseline_comparisons: list[BaselineComparison] = []
     baseline_missing: list[str] = []
-    if baseline_name:
-        baseline_data = load_baseline(config, baseline_name)
+    if baseline_name and baseline_data is not None:
         baseline_comparisons, baseline_missing = build_baseline_comparisons(
             metrics, baseline_data, variant_order, mc_correction
         )

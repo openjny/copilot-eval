@@ -24,6 +24,11 @@ _CONTAINER_RUN_SCRIPT = "/workspace/eval-setup.sh"
 class DockerCLIRunner:
     """Docker-based Copilot CLI runner."""
 
+    # Real, environment-isolated backend: requires Docker + a GitHub token and
+    # produces genuine measurements. See ``is_synthetic`` on the runner
+    # capability contract in ``eval.runners`` (``runner_is_synthetic``).
+    is_synthetic = False
+
     def __init__(
         self,
         github_token: str,

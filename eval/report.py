@@ -55,6 +55,24 @@ _CI_CONFIDENCE = 0.95
 # silently letting `gh pr comment` reject an oversized report.
 PR_COMMENT_CHAR_LIMIT = 65536
 
+# Synthetic-run banners (issue #132). Emitted at the top of a report whenever it
+# was built from a replayed run (``Report.replayed``), so the output can never
+# be mistaken for a real, isolated A/B measurement. One line per format flavor.
+_REPLAYED_BANNER_TEXT = (
+    "⚠️  REPLAYED / SYNTHETIC — offline replay runner output, NOT a real "
+    "measurement. For evaluator/report pipeline testing only."
+)
+_REPLAYED_BANNER_MARKDOWN = f"> {_REPLAYED_BANNER_TEXT}"
+_REPLAYED_BANNER_HTML = (
+    '<div class="warning"><strong>REPLAYED / SYNTHETIC</strong> — offline replay '
+    "runner output, NOT a real measurement. For evaluator/report pipeline "
+    "testing only.</div>"
+)
+
+
+def _any_replayed(reports: list[Report]) -> bool:
+    return any(r.replayed for r in reports)
+
 
 @dataclass
 class SummaryRow:
@@ -129,6 +147,12 @@ class Report:
     # actually corrected (0 when correction is disabled or nothing was testable).
     mc_correction: str = "none"
     mc_tests: int = 0
+    # Synthetic-run marker (issue #132): true only when this report was built
+    # from a run produced by the offline replay runner. When set, every
+    # formatter emits a loud replayed/synthetic banner (and `format_json` a
+    # top-level flag) so a replayed report can never be confused with a real,
+    # isolated A/B measurement. Defaults to False so real runs are unaffected.
+    replayed: bool = False
 
 
 # Each entry is (label, RunMetrics attribute, decimal precision). Precision drives
@@ -834,6 +858,7 @@ def build_report(
     manifest_runs: list[dict[str, Any]] | None = None,
     trace_test_ids: set[str] | None = None,
     mc_correction: str = "holm",
+    replayed: bool = False,
 ) -> list[Report]:
     """Build per-task A/B comparison reports.
 
@@ -849,6 +874,10 @@ def build_report(
     Holm-Bonferroni), ``"benjamini-hochberg"``/``"bh"`` (FDR, less
     conservative), or ``"none"`` to disable (the `analyze` CLI's
     ``--no-mc-correction`` flag).
+
+    ``replayed`` stamps every returned :class:`Report` as synthetic (issue
+    #132) so the formatters emit a replayed/synthetic banner; it is set by
+    `analyze` from the run manifest's ``replayed`` marker and defaults to False.
     """
     if not results and not manifest_runs:
         return []
@@ -984,6 +1013,7 @@ def build_report(
                 warnings=warnings,
                 mc_correction=mc_correction if mc_tests else "none",
                 mc_tests=mc_tests,
+                replayed=replayed,
             )
         )
 
@@ -1452,6 +1482,8 @@ def format_table(reports: list[Report], *, color: bool | None = None) -> str:
             f"* = {star_meaning}, ns = {ns_meaning}, low-n = fewer than {MIN_RELIABLE_N} "
             f"paired samples (significance not assessed).{' ' + trailing_note if trailing_note else ''}"
         )
+    if _any_replayed(reports):
+        body = f"{_REPLAYED_BANNER_TEXT}\n{body}"
     return body
 
 
@@ -1473,7 +1505,7 @@ def _summary_row_json(r: SummaryRow, key_name: str) -> dict[str, Any]:
 
 
 def format_json(reports: list[Report]) -> str:
-    data = {
+    data: dict[str, Any] = {
         "tasks": [
             {
                 "task": report.task,
@@ -1516,6 +1548,10 @@ def format_json(reports: list[Report]) -> str:
             for report in reports
         ],
     }
+    # Only surface the marker on replayed reports so real-run JSON output stays
+    # byte-identical (golden fixtures depend on it).
+    if _any_replayed(reports):
+        data["replayed"] = True
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 
@@ -1649,6 +1685,8 @@ def format_markdown(reports: list[Report]) -> str:
             f"{MIN_RELIABLE_N} paired samples (significance not assessed)."
             f"{' ' + trailing_note if trailing_note else ''}_"
         )
+    if _any_replayed(reports):
+        body = f"{_REPLAYED_BANNER_MARKDOWN}\n\n{body}"
     return body
 
 
@@ -1771,6 +1809,8 @@ def format_markdown_compact(reports: list[Report]) -> str:
         sections.append("\n".join(lines))
 
     body = "\n\n---\n\n".join(sections)
+    if _any_replayed(reports):
+        body = f"{_REPLAYED_BANNER_MARKDOWN}\n\n{body}"
     return _truncate_for_pr_comment(body)
 
 
@@ -1892,6 +1932,10 @@ def format_junit(reports: list[Report]) -> str:
     testsuites.set("name", "copilot-eval")
     testsuites.set("tests", str(total_tests))
     testsuites.set("failures", str(total_failures))
+    # Synthetic-run marker (issue #132): only set on replayed reports so real-run
+    # XML stays byte-identical for existing consumers/tests.
+    if _any_replayed(reports):
+        testsuites.set("replayed", "true")
     ET.indent(testsuites, space="  ")
     body = ET.tostring(testsuites, encoding="unicode")
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + body + "\n"
@@ -2081,6 +2125,7 @@ def format_html(reports: list[Report]) -> str:
         "<title>copilot-eval report</title>"
         f"<style>{_HTML_CSS}</style></head><body>"
         "<h1>copilot-eval A/B report</h1>"
+        f"{_REPLAYED_BANNER_HTML if _any_replayed(reports) else ''}"
         f"{''.join(body)}"
         f"{legend}"
         "</body></html>\n"

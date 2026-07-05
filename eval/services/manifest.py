@@ -27,10 +27,17 @@ def write_manifest(
     schedule: dict[str, Any] | None = None,
     cost_estimate: dict[str, Any] | None = None,
     fixtures: dict[str, Any] | None = None,
+    replayed: bool = False,
 ) -> None:
     """Persist the full set of runs so `analyze` can detect missing/failed ones."""
     write_manifest_dicts(
-        run_dir, run_id, [r.to_dict() for r in results], schedule, cost_estimate, fixtures
+        run_dir,
+        run_id,
+        [r.to_dict() for r in results],
+        schedule,
+        cost_estimate,
+        fixtures,
+        replayed,
     )
 
 
@@ -41,6 +48,7 @@ def write_manifest_dicts(
     schedule: dict[str, Any] | None = None,
     cost_estimate: dict[str, Any] | None = None,
     fixtures: dict[str, Any] | None = None,
+    replayed: bool = False,
 ) -> None:
     """Same as :func:`write_manifest`, but takes already-serialized run dicts.
 
@@ -53,6 +61,11 @@ def write_manifest_dicts(
     manifest = {
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        # Synthetic-run marker (issue #132): true only when this run was
+        # produced by the offline replay runner (``runner.backend: replay``).
+        # `analyze` reads this to stamp the report as replayed/synthetic so a
+        # replayed run can never be mistaken for a real, isolated measurement.
+        "replayed": replayed,
         "schedule": schedule or {},
         # Fixture identity (issue #89): content hashes of the fixtures consumed
         # by this run, so a later audit can prove two runs used identical
@@ -117,3 +130,19 @@ def load_manifest_fixtures(results_dir: Path) -> dict[str, Any]:
         return {}
     fixtures = data.get("fixtures") if isinstance(data, dict) else None
     return fixtures if isinstance(fixtures, dict) else {}
+
+
+def load_manifest_replayed(results_dir: Path) -> bool:
+    """Return the manifest's top-level ``replayed`` marker (issue #132).
+
+    True only when the run was produced by the offline replay runner. Absent /
+    unreadable manifests read as False (a real run), so this never spuriously
+    stamps a genuine run as synthetic."""
+    manifest_file = results_dir / MANIFEST_NAME
+    if not manifest_file.exists():
+        return False
+    try:
+        data = json.loads(manifest_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+    return bool(data.get("replayed")) if isinstance(data, dict) else False
