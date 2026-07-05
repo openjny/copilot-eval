@@ -135,6 +135,13 @@ class Report:
     # Per-variant run count (traces with extracted metrics) and shared paired n.
     variant_n: dict[str, int] = field(default_factory=dict)
     paired_n: int = 0
+    # Effective (freshly-produced, non-cached) sample sizes (issue #131). When a
+    # run reuses cached cells (`run --cache`), those samples are NOT independent
+    # draws, so statistics must be read against these effective counts, not the
+    # apparent totals above. Equal to variant_n / paired_n when nothing is cached.
+    cached_variant_n: dict[str, int] = field(default_factory=dict)
+    effective_variant_n: dict[str, int] = field(default_factory=dict)
+    effective_paired_n: int = 0
     # Success/failure reliability table (empty when no manifest is available).
     reliability: list[ReliabilityRow] = field(default_factory=list)
     # Data-sufficiency / significance caveats shown at the top of the report.
@@ -970,6 +977,26 @@ def build_report(
             e1 = {r.epoch for r in by_variant[variants[1]]} - {"?"}
             paired_n = len(e0 & e1)
 
+        # Effective (non-cached) sample sizes (issue #131). Cells reused from a
+        # prior run via `run --cache` are recorded in the manifest with
+        # ``cached: true``; their reused trace carries the original test_id, so
+        # matching the 8-char metric test_id against the manifest's cached
+        # test_ids tells us which surviving samples are NOT independent draws.
+        cached_prefixes = _cached_test_id_prefixes(manifest_runs)
+        cached_variant_n = {
+            v: sum(1 for r in by_variant[v] if r.test_id in cached_prefixes) for v in variants
+        }
+        effective_variant_n = {v: variant_n[v] - cached_variant_n[v] for v in variants}
+        effective_paired_n = paired_n
+        if aggregate == "paired" and len(variants) == 2:
+            fresh0 = {
+                r.epoch for r in by_variant[variants[0]] if r.test_id not in cached_prefixes
+            } - {"?"}
+            fresh1 = {
+                r.epoch for r in by_variant[variants[1]] if r.test_id not in cached_prefixes
+            } - {"?"}
+            effective_paired_n = len(fresh0 & fresh1)
+
         reliability = _build_reliability(
             task_name,
             variants,
@@ -979,6 +1006,11 @@ def build_report(
             epoch_judges if judge_names else None,
         )
         warnings = _build_warnings(variants, variant_n, paired_n, aggregate)
+        cached_warning = _build_cache_warning(
+            variants, variant_n, cached_variant_n, effective_variant_n
+        )
+        if cached_warning is not None:
+            warnings.append(cached_warning)
         if min_k is not None and min_k < MIN_RELIABLE_K:
             warnings.append(
                 {
@@ -1009,6 +1041,9 @@ def build_report(
                 aggregate=aggregate,
                 variant_n=variant_n,
                 paired_n=paired_n,
+                cached_variant_n=cached_variant_n,
+                effective_variant_n=effective_variant_n,
+                effective_paired_n=effective_paired_n,
                 reliability=reliability,
                 warnings=warnings,
                 mc_correction=mc_correction if mc_tests else "none",
@@ -1106,6 +1141,56 @@ def _build_warnings(
                 }
             )
     return warnings
+
+
+def _cached_test_id_prefixes(manifest_runs: list[dict[str, Any]] | None) -> set[str]:
+    """8-char test_id prefixes of manifest cells reused from the cache (issue
+    #131). Empty when there's no manifest or nothing was cached — so runs
+    without ``--cache`` behave exactly as before (effective == total)."""
+    if not manifest_runs:
+        return set()
+    prefixes: set[str] = set()
+    for mr in manifest_runs:
+        if isinstance(mr, dict) and mr.get("cached"):
+            tid = mr.get("test_id")
+            if tid:
+                prefixes.add(str(tid)[:8])
+    return prefixes
+
+
+def _build_cache_warning(
+    variants: list[str],
+    variant_n: dict[str, int],
+    cached_variant_n: dict[str, int],
+    effective_variant_n: dict[str, int],
+) -> dict[str, Any] | None:
+    """Warn when cached (reused) samples inflate the apparent sample size so the
+    effective independent sample size isn't misread (issue #131). Returns
+    ``None`` when nothing was cached."""
+    total_cached = sum(cached_variant_n.get(v, 0) for v in variants)
+    if total_cached == 0:
+        return None
+    detail = ", ".join(
+        f"{v}: {effective_variant_n.get(v, 0)}/{variant_n.get(v, 0)}"
+        for v in variants
+        if cached_variant_n.get(v, 0)
+    )
+    return {
+        "type": "cached_samples",
+        "message": (
+            f"{total_cached} sample(s) reused from the content-hash cache and are NOT "
+            f"independent draws. Effective (non-cached) sample size — {detail} — is what "
+            "CIs/power should be read against."
+        ),
+        "cached_variant_n": {v: cached_variant_n.get(v, 0) for v in variants},
+        "effective_variant_n": {v: effective_variant_n.get(v, 0) for v in variants},
+    }
+
+
+def _has_cached_samples(report: Report) -> bool:
+    """True when any of this report's surviving samples were reused from the
+    content-hash cache (issue #131) — i.e. total and effective counts differ."""
+    return any(report.cached_variant_n.get(v, 0) for v in report.variants)
 
 
 def _build_reliability(
@@ -1387,6 +1472,14 @@ def format_table(reports: list[Report], *, color: bool | None = None) -> str:
         if report.aggregate == "paired" and len(report.variants) == 2:
             sample_line += f"; paired epochs={report.paired_n}"
         lines.append("\n" + sample_line)
+        if _has_cached_samples(report):
+            eff_desc = ", ".join(
+                f"{v}={report.effective_variant_n.get(v, 0)}" for v in report.variants
+            )
+            eff_line = f"Effective (non-cached): {eff_desc}"
+            if report.aggregate == "paired" and len(report.variants) == 2:
+                eff_line += f"; paired epochs={report.effective_paired_n}"
+            lines.append(eff_line)
         if mc_line := _mc_correction_line(report):
             lines.append(mc_line)
         for w in report.warnings:
@@ -1506,53 +1599,60 @@ def _summary_row_json(r: SummaryRow, key_name: str) -> dict[str, Any]:
 
 def format_json(reports: list[Report]) -> str:
     data: dict[str, Any] = {
-        "tasks": [
-            {
-                "task": report.task,
-                "aggregate": report.aggregate,
-                "variants": report.variants,
-                "variant_n": report.variant_n,
-                "paired_n": report.paired_n,
-                "warnings": report.warnings,
-                "mc_correction": report.mc_correction,
-                "mc_tests": report.mc_tests,
-                "reliability": [
-                    {"metric": rr.metric, "values": rr.values} for rr in report.reliability
-                ],
-                "runs": [
-                    {
-                        "variant": r.variant,
-                        "epoch": r.epoch,
-                        "duration": r.duration,
-                        "turn_count": r.turn_count,
-                        "total_spans": r.total_spans,
-                        "tool_count": r.tool_count,
-                        "input_tokens": r.total_input_tokens,
-                        "output_tokens": r.total_output_tokens,
-                        "cache_tokens": r.total_cache_tokens,
-                        "tool_duration": r.tool_duration,
-                        "tool_names": r.tool_names,
-                        "model": r.model,
-                        "cost": r.cost,
-                        "judges": report.epoch_judges.get((r.variant, r.epoch), {}),
-                        "judge_stddevs": report.epoch_stddevs.get((r.variant, r.epoch), {}),
-                    }
-                    for r in report.runs
-                ],
-                "summary": [_summary_row_json(r, "metric") for r in report.summary],
-                "tool_patterns": report.tool_patterns,
-                "judge_scores": [_summary_row_json(r, "judge") for r in report.judge_scores],
-                "pass_k": [_summary_row_json(r, "metric") for r in report.pass_k],
-                "judge_runtime": report.judge_runtime,
-            }
-            for report in reports
-        ],
+        "tasks": [_report_json(report) for report in reports],
     }
     # Only surface the marker on replayed reports so real-run JSON output stays
     # byte-identical (golden fixtures depend on it).
     if _any_replayed(reports):
         data["replayed"] = True
     return json.dumps(data, indent=2, ensure_ascii=False)
+
+
+def _report_json(report: Report) -> dict[str, Any]:
+    task_json: dict[str, Any] = {
+        "task": report.task,
+        "aggregate": report.aggregate,
+        "variants": report.variants,
+        "variant_n": report.variant_n,
+        "paired_n": report.paired_n,
+        "warnings": report.warnings,
+        "mc_correction": report.mc_correction,
+        "mc_tests": report.mc_tests,
+        "reliability": [{"metric": rr.metric, "values": rr.values} for rr in report.reliability],
+        "runs": [
+            {
+                "variant": r.variant,
+                "epoch": r.epoch,
+                "duration": r.duration,
+                "turn_count": r.turn_count,
+                "total_spans": r.total_spans,
+                "tool_count": r.tool_count,
+                "input_tokens": r.total_input_tokens,
+                "output_tokens": r.total_output_tokens,
+                "cache_tokens": r.total_cache_tokens,
+                "tool_duration": r.tool_duration,
+                "tool_names": r.tool_names,
+                "model": r.model,
+                "cost": r.cost,
+                "judges": report.epoch_judges.get((r.variant, r.epoch), {}),
+                "judge_stddevs": report.epoch_stddevs.get((r.variant, r.epoch), {}),
+            }
+            for r in report.runs
+        ],
+        "summary": [_summary_row_json(r, "metric") for r in report.summary],
+        "tool_patterns": report.tool_patterns,
+        "judge_scores": [_summary_row_json(r, "judge") for r in report.judge_scores],
+        "pass_k": [_summary_row_json(r, "metric") for r in report.pass_k],
+        "judge_runtime": report.judge_runtime,
+    }
+    # Effective (non-cached) sample sizes are only emitted when the cache
+    # actually reused samples (issue #131), so non-cached output stays
+    # byte-identical to before this feature (matching the golden files).
+    if _has_cached_samples(report):
+        task_json["cached_variant_n"] = report.cached_variant_n
+        task_json["effective_variant_n"] = report.effective_variant_n
+        task_json["effective_paired_n"] = report.effective_paired_n
+    return task_json
 
 
 def format_markdown(reports: list[Report]) -> str:
@@ -1567,6 +1667,14 @@ def format_markdown(reports: list[Report]) -> str:
         if report.aggregate == "paired" and len(report.variants) == 2:
             sample_line += f"; paired epochs={report.paired_n}"
         lines.append(sample_line)
+        if _has_cached_samples(report):
+            eff_desc = ", ".join(
+                f"{v}={report.effective_variant_n.get(v, 0)}" for v in report.variants
+            )
+            eff_line = f"**Effective (non-cached):** {eff_desc}"
+            if report.aggregate == "paired" and len(report.variants) == 2:
+                eff_line += f"; paired epochs={report.effective_paired_n}"
+            lines.append(eff_line)
         if mc_line := _mc_correction_line(report):
             lines.append(f"**{mc_line}**")
         for w in report.warnings:

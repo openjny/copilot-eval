@@ -162,6 +162,60 @@ strategy (`runner.parallel`, `variant_order`, `seed`) between the original
 run and a resume, however, only prints a warning — the merged manifest may
 then mix scheduling strategies across the original and resumed cells.
 
+## Content-hash cache (`run --cache`)
+
+`run --cache` is an **opt-in** cross-run cache that skips a matrix cell when an
+*identical* cell — same environment-complete inputs — was already executed and
+stored by a prior run, reusing its whole result (log, scores, output artifacts,
+and trace) instead of launching another container. It complements `--resume`
+(which only re-runs failed/missing cells *within one run*) by reusing
+**completed, unchanged cells across runs** — the common case when you iterate on
+one variant and don't want to pay Docker + Copilot-token cost to re-run the
+others.
+
+```bash
+uv run copilot-eval run --config-dir <dir> --cache
+uv run copilot-eval run --config-dir <dir> --cache --cache-dir /path/to/cache
+```
+
+It is **off by default** — the golden path is unchanged, and no external service
+is required (the cache is a plain directory, `results/.cache` by default;
+`--cache-dir` overrides it and implies `--cache`).
+
+**Cache key (environment-complete).** A cell is only reused when *every* input
+that can change the agent's behavior matches. The key hashes:
+
+- the variant **image digest** (`docker image inspect`),
+- the fully-resolved **prompt** (post-interpolation, including the output
+  instruction),
+- the **fixture content hash** (the same `fixtures.lock` hashing used by
+  `--strict-fixtures`; see [Pinning fixtures](#pinning-fixtures-content-hash-integrity)),
+- **model**, **reasoning effort**, **max turns**, **timeout**, and **collector**,
+- and the cell's **task / variant / epoch / fixture** identity.
+
+Change any of them — bump the image, edit the prompt, retouch a fixture, switch
+model or effort — and the affected cells are busted and re-executed; everything
+else is still reused.
+
+**Statistical-honesty guarantees.** Caching is designed so it can never
+fake-inflate confidence:
+
+- **Whole prior cells only, epoch-safe.** The key includes the `epoch` index, so
+  epoch *e* of a new run can only reuse epoch *e* of a prior run. Caching reuses
+  whole prior-run cells one-for-one and **never collapses or dedupes epochs**
+  within a run — the per-run sample size is preserved.
+- **Effective sample size is reported.** Cached cells are recorded in the
+  manifest / `results.json` with `"cached": true`, and `analyze` reports the
+  **effective (non-cached) sample size** separately (`effective_variant_n` /
+  `effective_paired_n` in JSON, an "Effective (non-cached)" line in the
+  table/markdown, plus a `cached_samples` warning). Reused samples are **not**
+  independent draws, so CIs, power, and the `--min-epochs` gate are read against
+  the effective count — only genuinely fresh samples satisfy a power gate.
+
+Only successful cells are cached; a `failed`/`timeout`/`setup_failed` cell is
+never stored, so a re-run always re-executes it. A cached cell's reused trace
+keeps its original `test_id`, so `analyze` still correlates it correctly.
+
 ## Advanced Configuration
 
 Beyond the basic `runner`/`variants`/`tasks` shape, several knobs tune *how* the

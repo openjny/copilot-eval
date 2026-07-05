@@ -77,6 +77,17 @@ from eval.services.orchestrator import run_command
     help="Fail the run if fixtures drift from fixtures.lock (see `pin-fixtures`)",
 )
 @click.option(
+    "--cache",
+    is_flag=True,
+    help="Reuse unchanged matrix cells from prior runs (opt-in content-hash cache, issue #131)",
+)
+@click.option(
+    "--cache-dir",
+    default=None,
+    type=click.Path(),
+    help="Directory for the content-hash cache (default: <results>/.cache; implies --cache)",
+)
+@click.option(
     "--config-dir",
     default=None,
     type=click.Path(exists=True),
@@ -95,6 +106,8 @@ def run(
     yes: bool,
     budget_limit: float | None,
     strict_fixtures: bool,
+    cache: bool,
+    cache_dir: str | None,
     config_dir: str | None,
 ) -> None:
     """Run A/B eval for one or more tasks."""
@@ -114,4 +127,6 @@ def run(
         yes=yes,
         budget_limit=budget_limit,
         strict_fixtures=strict_fixtures,
+        cache=cache or cache_dir is not None,
+        cache_dir=cache_dir,
     )

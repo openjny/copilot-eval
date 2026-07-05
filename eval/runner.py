@@ -84,6 +84,11 @@ class RunResult:
     # Number of transient-failure retries performed before this result was
     # produced (0 = succeeded/failed on the first attempt). See issue #69.
     retry_count: int = 0
+    # True when this cell was not freshly executed but reused verbatim from a
+    # prior run's cached result (issue #131, `run --cache`). Cached cells are
+    # statistically NOT independent draws, so `analyze` reports the effective
+    # (non-cached) sample size separately — see eval.report.
+    cached: bool = False
 
     @property
     def passed(self) -> bool:
@@ -107,6 +112,7 @@ class RunResult:
             "finished_at": self.finished_at,
             "duration_seconds": self.duration_seconds,
             "retry_count": self.retry_count,
+            "cached": self.cached,
             "scores": [score_to_dict(s) for s in self.scores],
         }
 

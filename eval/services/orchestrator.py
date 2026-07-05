@@ -27,6 +27,13 @@ from eval.progress import NullProgress, ProgressReporter, create_reporter
 from eval.protocols import RunStatus
 from eval.runner import RunResult, get_github_token, run_one
 from eval.services.build_service import _ensure_images
+from eval.services.cache_service import (
+    CACHE_DIRNAME,
+    CacheKeyInputs,
+    RunCache,
+    resolve_cache_hits,
+    store_fresh_results,
+)
 from eval.services.check_report import print_check_results
 from eval.services.cost_service import estimate_run_cost, format_cost_report
 from eval.services.fixtures_service import (
@@ -432,6 +439,9 @@ def _print_summary(
     click.echo(f" Results: {passed} passed, {failed} failed")
     if timed_out or errored:
         click.echo(f"   (of which {timed_out} timed out, {errored} errored)")
+    cached = sum(1 for r in results if r.cached)
+    if cached:
+        click.echo(f" Cached:  {cached} cell(s) reused from prior runs (not re-executed)")
     judge_tokens_in = sum(
         (s.meta.get("judge_tokens_in") or 0) for r in results for s in r.scores if s.type == "judge"
     )
@@ -532,6 +542,8 @@ def run_command(
     yes: bool = False,
     budget_limit: float | None = None,
     strict_fixtures: bool = False,
+    cache: bool = False,
+    cache_dir: str | None = None,
 ) -> None:
     """Business logic for the `run` CLI command: select tasks, print the plan,
     pre-flight, build/ensure images, schedule runs, and persist the manifest.
@@ -547,6 +559,13 @@ def run_command(
     aborts the run before any Docker/agent work if the estimate exceeds it.
     ``estimate=True`` additionally prints the full cost breakdown and, unless
     ``yes`` is set, asks for interactive confirmation before proceeding.
+
+    Content-hash cache (issue #131, opt-in via ``cache``): when enabled, each
+    matrix cell whose environment-complete inputs match a stored prior-run cell
+    is skipped and its whole result reused (``cache_dir`` overrides the default
+    ``results/.cache``). Off by default, so the golden path is unchanged. Caching
+    only ever reuses whole prior cells one-for-one per epoch — it never collapses
+    epochs — and ``analyze`` reports the effective (non-cached) sample size.
     """
     resolved_epochs = epochs or config.runner.epochs
 
@@ -697,10 +716,47 @@ def run_command(
     # once per run) as the manifest's fixture-identity record (issue #89).
     fixture_hashes = compact_hashes(verification.current_hashes)
 
+    # Content-hash cache (issue #131, opt-in): consult the cache for every cell
+    # not already skipped by --resume, materializing hits into this run's dir so
+    # the scheduler skips them. Done after images are ensured so image digests
+    # resolve. Cell keys/inputs for the misses are kept to store fresh results.
+    cache_hits: list[RunResult] = []
+    cache_obj: RunCache | None = None
+    cache_keys: dict[CellKey, str] = {}
+    cache_inputs: dict[CellKey, CacheKeyInputs] = {}
+    if cache:
+        cache_root = Path(cache_dir) if cache_dir else config.results_dir / CACHE_DIRNAME
+        cache_obj = RunCache(cache_root)
+        resolution = resolve_cache_hits(
+            config,
+            tasks,
+            resolved_epochs,
+            run_id,
+            run_dir,
+            cache_obj,
+            fixture_hashes,
+            skip_cells,
+        )
+        cache_hits = resolution.hits
+        cache_keys = resolution.keys
+        cache_inputs = resolution.inputs
+        skip_cells = skip_cells | resolution.hit_cells
+        click.echo(
+            f"Cache: {len(cache_hits)} cell(s) reused from prior runs (cache dir: {cache_root})."
+        )
+
     reporter = create_reporter(no_progress=no_progress)
     results = _execute_schedule(
         config, tasks, resolved_epochs, run_id, run_dir, github_token, reporter, skip_cells
     )
+
+    if cache_obj is not None:
+        store_fresh_results(cache_obj, run_dir, results, cache_keys, cache_inputs)
+        # Cached cells are part of this run's results for manifest/summary
+        # purposes; the scheduler skipped executing them but they still cover
+        # their matrix cells (marked cached=True so analyze reports the
+        # effective, non-cached sample size).
+        results = results + cache_hits
 
     schedule = {
         "parallel": config.runner.parallel,

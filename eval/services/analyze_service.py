@@ -59,13 +59,15 @@ _FORMATTERS = {
 def _gate_epochs(report: Report) -> int:
     """Epoch count `--min-epochs` should gate on.
 
-    Paired reports gate on the shared paired-epoch count (the number of
-    deltas actually being compared); everything else (single variant, or
-    median/mean aggregate) falls back to the smallest per-variant sample.
+    Uses the EFFECTIVE (non-cached) sample size (issue #131) so reused cache
+    hits can't satisfy a statistical-power gate — only genuinely independent
+    samples count. Paired reports gate on the shared paired-epoch count (the
+    number of deltas actually being compared); everything else (single variant,
+    or median/mean aggregate) falls back to the smallest per-variant sample.
     """
     if report.aggregate == "paired" and len(report.variants) == 2:
-        return report.paired_n
-    return min(report.variant_n.values(), default=0)
+        return report.effective_paired_n
+    return min(report.effective_variant_n.values(), default=0)
 
 
 def run_analysis(
