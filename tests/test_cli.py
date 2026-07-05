@@ -708,6 +708,143 @@ def test_analyze_exits_nonzero_when_one_fixture_fails_metric_gate(tmp_path: Path
     assert "fixB" in result.output
 
 
+def _patch_analyze_with(tmp_path: Path, monkeypatch, config: Config, traces, manifest=None) -> str:
+    """Point analyze at a config + results dir with arbitrary traces and an
+    optional persisted manifest (results.json)."""
+    from eval.services import analyze_service
+
+    run_id = "run-1"
+    results_dir = config.results_dir / run_id
+    results_dir.mkdir(parents=True, exist_ok=True)
+    if manifest is not None:
+        (results_dir / "results.json").write_text(json.dumps({"runs": manifest}))
+    monkeypatch.setattr(analyze_service, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr(analyze_service, "_collect_file_traces", lambda *a, **k: traces)
+    return run_id
+
+
+def test_analyze_exits_nonzero_when_cost_tag_absent(tmp_path: Path, monkeypatch):
+    """Case 1 (issue #64) end-to-end: a cost gate whose `github.copilot.cost` tag
+    is absent must make `analyze` exit non-zero — even with a threshold the coerced
+    0.0 would have passed (0.0 < 0.5)."""
+    from click.testing import CliRunner
+
+    from eval.cli import main
+
+    config = _analyze_gate_config(tmp_path, budget_threshold=0.5)
+    run_id = _patch_analyze_with(tmp_path, monkeypatch, config, [_metric_trace_no_cost()])
+
+    result = CliRunner().invoke(main, ["analyze", "--run-id", run_id, "--skip-eval"])
+
+    assert result.exit_code != 0, result.output
+    assert "Metric gate failed" in result.output
+    assert "budget" in result.output
+
+
+def test_analyze_exits_nonzero_when_trace_yields_no_metrics_and_no_manifest(
+    tmp_path: Path, monkeypatch
+):
+    """Regression (issue #64): an ingested-but-unparseable trace for a metric-gated
+    task, with no manifest, must fail CLOSED — not slip through the "no traces"
+    early return with exit 0."""
+    from click.testing import CliRunner
+
+    from eval.cli import main
+
+    config = _analyze_gate_config(tmp_path, budget_threshold=0.5)
+    run_id = _patch_analyze_with(tmp_path, monkeypatch, config, [_metric_trace_no_root()])
+
+    result = CliRunner().invoke(main, ["analyze", "--run-id", run_id, "--skip-eval"])
+
+    assert result.exit_code != 0, result.output
+    assert "Metric gate failed" in result.output
+
+
+def test_analyze_exits_nonzero_when_no_telemetry_and_no_manifest(tmp_path: Path, monkeypatch):
+    """Regression (issue #64): a metric-gated config that produced zero telemetry
+    and has no manifest can verify its gates from neither source, so `analyze` must
+    fail CLOSED rather than exit 0 on entirely-absent telemetry."""
+    from click.testing import CliRunner
+
+    from eval.cli import main
+
+    config = _analyze_gate_config(tmp_path, budget_threshold=0.5)
+    run_id = _patch_analyze_with(tmp_path, monkeypatch, config, [])
+
+    result = CliRunner().invoke(main, ["analyze", "--run-id", run_id, "--skip-eval"])
+
+    assert result.exit_code != 0, result.output
+    assert "Metric gate failed" in result.output
+
+
+def test_analyze_exits_nonzero_when_manifest_run_missing_telemetry(tmp_path: Path, monkeypatch):
+    """Case 2 (issue #64) end-to-end: a metric-gated run recorded in the manifest
+    that produced no trace must make `analyze` exit non-zero."""
+    from click.testing import CliRunner
+
+    from eval.cli import main
+
+    config = _analyze_gate_config(tmp_path, budget_threshold=0.5)
+    manifest = [
+        {
+            "task": "t",
+            "variant": "v",
+            "epoch": 0,
+            "fixture": "",
+            "test_id": "gone",
+            "status": "success",
+        }
+    ]
+    run_id = _patch_analyze_with(tmp_path, monkeypatch, config, [], manifest=manifest)
+
+    result = CliRunner().invoke(main, ["analyze", "--run-id", run_id, "--skip-eval"])
+
+    assert result.exit_code != 0, result.output
+    assert "Metric gate failed" in result.output
+    assert "budget" in result.output
+
+
+def test_run_metric_evaluators_missing_telemetry_fails_closed_regardless_of_status(tmp_path: Path):
+    """The manifest cross-reference fails CLOSED for a metric-gated run with no
+    trace even when its recorded status is timeout/failed (a dropped/timed-out run
+    still can't verify its gate)."""
+    from eval.config import Evaluator, Task
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    task = Task(
+        name="t",
+        prompt="p",
+        evaluators=[
+            Evaluator(name="budget", type="metric", metric="cost", op="<", threshold=0.5),
+        ],
+    )
+    config = Config(
+        vars={},
+        runner=RunnerConfig(),
+        tasks=[task],
+        variants=_variants("v"),
+        project_dir=tmp_path,
+        config_dir=tmp_path,
+    )
+    manifest_runs = [
+        {
+            "task": "t",
+            "variant": "v",
+            "epoch": 0,
+            "fixture": "",
+            "test_id": "x",
+            "status": "timeout",
+        }
+    ]
+
+    failed = _run_metric_evaluators(config, [], results_dir, manifest_runs)
+
+    assert len(failed) == 1
+    assert "budget" in failed[0]
+    assert "telemetry missing" in failed[0]
+
+
 # --- analyze --min-epochs (statistical power CI gate) ---
 
 
