@@ -691,6 +691,8 @@ in `examples/prompt-language` and `examples/judge-calibration`.
 
 Place files under `<config-dir>/fixtures/<fixture-name>/`. They are copied to a temp directory and mounted at `/workspace` inside the container (read-write). An `output/` subdirectory is automatically created. A fixture can also be a [remote dataset](#remote-fixtures-dataset-as-code) declared by `url` + `sha256` instead of a local directory.
 
+> **`validate` and implicit fixtures.** When a task has no `fixture:`/`fixtures:` of its own, it falls back to a fixture named after the task. That implicit fallback is treated as "runs without a fixture" and is **not** checked for a matching directory, so fixed-answer tasks validate cleanly. The flip side: a typo'd *task name* won't be caught as a missing fixture. If a task genuinely depends on `fixtures/<name>/`, declare `fixture: <name>` explicitly — then `validate` warns when the directory is absent (and `validate --strict` fails on it).
+
 ### Multiple fixtures per task (input-coverage axis)
 
 A task can be run against several fixtures so a customization is A/B-compared across diverse workspaces instead of a single, possibly cherry-picked one. Use the `fixtures` list instead of the singular `fixture`:

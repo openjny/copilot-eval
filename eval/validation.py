@@ -146,16 +146,18 @@ def check_config_schema(config_dir: Path | None) -> tuple[Config | None, CheckRe
     return config, _ok("config_schema", "eval-config.yaml is valid")
 
 
-def _item_subschema(schema: dict[str, Any], key: str, required: list[str]) -> dict[str, Any] | None:
+def _item_subschema(schema: dict[str, Any], key: str) -> dict[str, Any] | None:
     """Extract the per-item sub-schema for a `tasks`/`variants` split file.
 
     The generated schema (`eval/schema.py`) inlines the task/variant item shape
     under `properties.<key>` — as `items` for `variants`, and inside an `anyOf`
     array branch for `tasks`. Split files hold a *single* task/variant body, so
-    we validate each document against that item schema directly, with `required`
-    relaxed (a split file's `name` is optional — the loader falls back to the
-    file stem). All `$ref`s in the generated schema are already inlined, so the
-    extracted sub-schema is self-contained.
+    we validate each document against that item schema directly, with `name`
+    dropped from `required` (a split file's `name` is optional — the loader
+    falls back to the file stem). `required` is derived from the item schema
+    (minus `name`) rather than hardcoded, so a future required field is honored
+    automatically. All `$ref`s in the generated schema are already inlined, so
+    the extracted sub-schema is self-contained.
     """
     node = schema.get("properties", {}).get(key, {})
     item: dict[str, Any] | None = None
@@ -168,6 +170,7 @@ def _item_subschema(schema: dict[str, Any], key: str, required: list[str]) -> di
                 break
     if item is None:
         return None
+    required = [r for r in item.get("required", []) if r != "name"]
     return {**item, "required": required}
 
 
@@ -225,31 +228,46 @@ def check_json_schema(config_dir: Path | None) -> CheckResult:
     except yaml.YAMLError:
         # check_config_schema already reports YAML syntax errors as blocking.
         return _warn("json_schema", "Skipped: eval-config.yaml has a YAML syntax error.", "")
-    covered.append("eval-config.yaml")
-    for e in validator.iter_errors(raw):
-        problems.append(("eval-config.yaml", e))
 
-    # Split-file layouts: validate each tasks/*.yaml and variants/*.yaml against
-    # the relevant item sub-schema. This mirrors eval.config._load_tasks /
-    # _load_variants, which read these directories as the primary layout.
+    # Split-file layouts: gather each tasks/*.yaml and variants/*.yaml. This
+    # mirrors eval.config._load_tasks / _load_variants, which read these
+    # directories as the *primary* layout. Two loader rules are mirrored here so
+    # a valid config is never falsely blocked:
+    #   1. Empty / comment-only documents are skipped (loader's `if p:` / `if v:`).
+    #   2. When a split dir yields at least one real document, it *shadows* the
+    #      inline `tasks:` / `variants:` block (loader's `if not tasks:` fallback),
+    #      so the stale inline block must not be validated at the top level.
+    split_docs: dict[str, list[tuple[str, Any]]] = {}
     for key in ("tasks", "variants"):
         split_dir = directory / key
         if not split_dir.is_dir():
             continue
-        yaml_files = sorted(split_dir.glob("*.yaml"))
-        if not yaml_files:
-            continue
-        subschema = _item_subschema(schema, key, required=["prompt"] if key == "tasks" else [])
+        docs: list[tuple[str, Any]] = []
+        for yaml_file in sorted(split_dir.glob("*.yaml")):
+            rel = f"{key}/{yaml_file.name}"
+            try:
+                doc = yaml.safe_load(yaml_file.read_text())
+            except yaml.YAMLError:
+                return _warn("json_schema", f"Skipped: {rel} has a YAML syntax error.", "")
+            if not doc:  # empty / comment-only file — loader skips it
+                continue
+            docs.append((rel, doc))
+        if docs:
+            split_docs[key] = docs
+
+    # Validate the top-level config, dropping any key that a split dir shadows.
+    top_level = {k: v for k, v in raw.items() if k not in split_docs}
+    covered.append("eval-config.yaml")
+    for e in validator.iter_errors(top_level):
+        problems.append(("eval-config.yaml", e))
+
+    for key, docs in split_docs.items():
+        subschema = _item_subschema(schema, key)
         if subschema is None:
             continue
         sub_validator = jsonschema.Draft202012Validator(subschema)
         covered.append(f"{key}/*.yaml")
-        for yaml_file in yaml_files:
-            rel = f"{key}/{yaml_file.name}"
-            try:
-                doc = yaml.safe_load(yaml_file.read_text()) or {}
-            except yaml.YAMLError:
-                return _warn("json_schema", f"Skipped: {rel} has a YAML syntax error.", "")
+        for rel, doc in docs:
             for e in sub_validator.iter_errors(doc):
                 problems.append((rel, e))
 

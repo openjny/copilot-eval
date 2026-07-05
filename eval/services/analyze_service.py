@@ -6,12 +6,12 @@ on metric thresholds.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import click
 
 from eval.config import load_config
+from eval.env_utils import ci_env_enabled
 from eval.progress import create_reporter
 from eval.report import (
     BaselineComparison,
@@ -243,7 +243,7 @@ def run_analysis(
         # other CI providers set) unless the user passed an explicit
         # --fail-on-regression/--no-fail-on-regression override.
         resolved_fail_on_regression = (
-            fail_on_regression if fail_on_regression is not None else bool(os.environ.get("CI"))
+            fail_on_regression if fail_on_regression is not None else ci_env_enabled()
         )
         if resolved_fail_on_regression:
             regressed = [f"{c.task}/{c.variant}" for c in baseline_comparisons if c.has_regression]

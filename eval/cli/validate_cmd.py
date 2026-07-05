@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import click
 
+from eval.env_utils import ci_env_enabled
 from eval.services.check_report import print_check_results
 from eval.validation import (
     CheckResult,
@@ -52,7 +52,7 @@ def validate(config_dir: str | None, strict: bool | None) -> None:
     exit non-zero — a single authoritative pre-run gate for CI.
     """
     if strict is None:
-        strict = bool(os.environ.get("CI"))
+        strict = ci_env_enabled()
 
     config_path = Path(config_dir) if config_dir else None
     config, schema_result = check_config_schema(config_path)

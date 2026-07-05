@@ -190,6 +190,32 @@ def test_strip_quotes_leaves_unmatched_or_bare():
     assert _strip_quotes('"') == '"'
 
 
+# --- ci_env_enabled ---
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", "anything"])
+def test_ci_env_enabled_truthy(monkeypatch, value: str):
+    from eval.env_utils import ci_env_enabled
+
+    monkeypatch.setenv("CI", value)
+    assert ci_env_enabled() is True
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "False", "no", "off", "  "])
+def test_ci_env_enabled_falsey(monkeypatch, value: str):
+    from eval.env_utils import ci_env_enabled
+
+    monkeypatch.setenv("CI", value)
+    assert ci_env_enabled() is False
+
+
+def test_ci_env_enabled_unset(monkeypatch):
+    from eval.env_utils import ci_env_enabled
+
+    monkeypatch.delenv("CI", raising=False)
+    assert ci_env_enabled() is False
+
+
 # --- read_files_from_dir ---
 
 

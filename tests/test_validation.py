@@ -778,6 +778,52 @@ def test_cli_validate_fails_for_split_file_typo(tmp_path: Path):
     assert "tasks/typo.yaml" in result.output
 
 
+def test_check_json_schema_empty_split_file_is_skipped(tmp_path: Path):
+    # An empty / comment-only split file is skipped by the loader (`if p:` /
+    # `if v:`), so the validator must not validate `{}` against the item schema
+    # (which would falsely block on the missing required `prompt`). See #127.
+    _write_split_config(
+        tmp_path,
+        {"vars": {}},
+        tasks={"good": {"prompt": "do a thing"}},
+    )
+    (tmp_path / "tasks" / "empty.yaml").write_text("# just a comment\n", encoding="utf-8")
+    (tmp_path / "variants").mkdir(exist_ok=True)
+    (tmp_path / "variants" / "blank.yaml").write_text("\n", encoding="utf-8")
+    result = check_json_schema(tmp_path)
+    assert result.passed, result.message
+
+
+def test_check_json_schema_split_shadows_stale_inline(tmp_path: Path):
+    # When a non-empty split dir exists, the loader ignores the inline
+    # tasks:/variants: block (`if not tasks:` fallback). A stale, even malformed,
+    # inline block that the loader never reads must not be validated / block. #127
+    _write_split_config(
+        tmp_path,
+        {"vars": {}, "tasks": [{"prompt": "hi", "timeout_secods": 30}]},
+        tasks={"good": {"prompt": "do a thing"}},
+    )
+    result = check_json_schema(tmp_path)
+    assert result.passed, result.message
+    # The live split file is still covered/validated.
+    assert "tasks/*.yaml" in result.message
+
+
+def test_check_json_schema_empty_split_dir_keeps_inline(tmp_path: Path):
+    # A tasks/ dir that holds only empty files does NOT shadow inline tasks
+    # (loader falls back to inline), so an inline typo must still be caught. #127
+    _write_split_config(
+        tmp_path,
+        {"vars": {}, "tasks": [{"name": "t", "prompt": "hi", "timeout_secods": 30}]},
+    )
+    (tmp_path / "tasks").mkdir(exist_ok=True)
+    (tmp_path / "tasks" / "empty.yaml").write_text("# nothing here\n", encoding="utf-8")
+    result = check_json_schema(tmp_path)
+    assert not result.passed
+    assert result.blocking
+    assert "timeout_secods" in result.message
+
+
 # --- check_fixtures: implicit vs explicit (issue #129) ---
 
 
@@ -867,6 +913,22 @@ def test_cli_validate_strict_auto_enabled_under_ci(tmp_path: Path, monkeypatch):
     # --no-strict overrides the CI default.
     override = runner.invoke(main, ["validate", "--config-dir", str(config_dir), "--no-strict"])
     assert override.exit_code == 0, override.output
+
+
+@pytest.mark.parametrize("ci_value", ["", "0", "false", "False", "no", "off"])
+def test_cli_validate_ci_falsey_does_not_auto_enable_strict(
+    tmp_path: Path, monkeypatch, ci_value: str
+):
+    # A developer exporting CI=false locally must not silently get --strict. #128
+    config_dir = tmp_path / "cfg"
+    _write_yaml_config(
+        config_dir,
+        {"tasks": [{"name": "t1", "prompt": "hi", "fixture": "gone"}]},
+    )
+    runner = CliRunner()
+    monkeypatch.setenv("CI", ci_value)
+    result = runner.invoke(main, ["validate", "--config-dir", str(config_dir)])
+    assert result.exit_code == 0, result.output
 
 
 def test_cli_validate_strict_passes_when_no_warnings(tmp_path: Path):
