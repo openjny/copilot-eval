@@ -82,6 +82,7 @@ def run_analysis(
     no_progress: bool = False,
     baseline_name: str | None = None,
     fail_on_regression: bool | None = None,
+    allow_empty: bool = False,
 ) -> None:
     """Analyze traces from a previous eval run and print the A/B report."""
     config = load_config(Path(config_dir) if config_dir else None)
@@ -145,7 +146,31 @@ def run_analysis(
         )
         if failed_gates:
             raise click.ClickException(f"Metric gate failed: {'; '.join(failed_gates)}")
-        return
+        # Fail CLOSED so a mistyped/never-executed --run-id can't pass a CI gate
+        # with exit 0 (issue #126), mirroring the `resume` "Run not found"
+        # precedent in orchestrator.py. Distinguish an unknown run (results dir
+        # absent AND nothing was even collected) from a known run that produced
+        # nothing analyzable, and offer --allow-empty as an explicit escape hatch.
+        # NOTE: this is only reachable for configs WITHOUT a metric gate — a
+        # metric-gated run with no telemetry/manifest already raised above via the
+        # synthesized "unverifiable" failed_gate (fail-closed per #64/#121), which
+        # --allow-empty deliberately does NOT bypass.
+        if allow_empty:
+            return
+        # Only "not found" when nothing was collected AND no results dir exists:
+        # with the Jaeger collector (or separate CI jobs) traces can be fetched
+        # while no local results dir exists, so raw traces present — even if none
+        # parsed into metrics — means the run existed and is "empty", not unknown.
+        if not results_dir.exists() and not traces:
+            raise click.ClickException(
+                f"Run '{run_id}' not found under {config.results_dir}. "
+                "Pass an existing --run-id to analyze, or --allow-empty to treat "
+                "a missing/empty run as success."
+            )
+        raise click.ClickException(
+            f"Run '{run_id}' produced no analyzable data (no traces and no manifest to "
+            "reconcile against). Pass --allow-empty to treat an empty run as success."
+        )
     if not metrics:
         click.echo("No surviving traces; reporting reliability from the manifest only.", err=True)
 
