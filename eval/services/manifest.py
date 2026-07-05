@@ -101,3 +101,19 @@ def load_manifest(results_dir: Path) -> list[dict[str, Any]] | None:
         return None
     runs = data.get("runs") if isinstance(data, dict) else None
     return runs if isinstance(runs, list) else None
+
+
+def load_manifest_fixtures(results_dir: Path) -> dict[str, Any]:
+    """Load the top-level ``fixtures`` block from a run's manifest (empty if
+    absent/unreadable). Used by `run --resume` to carry forward the fixture
+    hashes of cells that already completed in the original run instead of
+    overwriting them with values recomputed at resume time (issue #89)."""
+    manifest_file = results_dir / MANIFEST_NAME
+    if not manifest_file.exists():
+        return {}
+    try:
+        data = json.loads(manifest_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    fixtures = data.get("fixtures") if isinstance(data, dict) else None
+    return fixtures if isinstance(fixtures, dict) else {}

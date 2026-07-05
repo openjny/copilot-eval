@@ -21,6 +21,7 @@ and git diffs stay meaningful.
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,10 @@ FIXTURE_LOCKFILE_NAME = "fixtures.lock"
 LOCKFILE_VERSION = 1
 
 _CHUNK = 65536
+
+
+class FixtureLockError(ValueError):
+    """Raised when the lockfile exists but cannot be parsed/understood."""
 
 
 def fixtures_dir(config: Config) -> Path:
@@ -63,6 +68,24 @@ def referenced_fixtures(tasks: list[Task]) -> list[str]:
     return names
 
 
+def explicit_fixtures(tasks: list[Task]) -> set[str]:
+    """Fixture names a task *explicitly* declares via ``fixture:``/``fixtures:``.
+
+    Excludes the implicit task-name fallback (``Task.fixture_names`` returns the
+    task name when nothing is declared). Used by :func:`verify_fixtures` so
+    ``--strict-fixtures`` can fail on an explicitly-configured fixture that is
+    missing on disk and unpinned, while still tolerating a task that simply has
+    no fixture directory at all.
+    """
+    names: set[str] = set()
+    for task in tasks:
+        if task.fixtures:
+            names.update(task.fixtures)
+        elif task.fixture:
+            names.add(task.fixture)
+    return names
+
+
 def _hash_file(path: Path) -> tuple[str, int]:
     """Stream a file through sha256, returning ``(hexdigest, size_bytes)``."""
     hasher = hashlib.sha256()
@@ -75,9 +98,20 @@ def _hash_file(path: Path) -> tuple[str, int]:
 
 
 def _iter_fixture_files(fixture_path: Path) -> list[Path]:
-    """Regular files under `fixture_path`, sorted by relative POSIX path so the
-    fixture digest is deterministic across machines and filesystems."""
-    files = [p for p in fixture_path.rglob("*") if p.is_file() and not p.is_symlink()]
+    """Files under `fixture_path` whose content reaches the run sandbox, sorted
+    by relative POSIX path so the fixture digest is deterministic across
+    machines and filesystems.
+
+    ``Path.is_file()`` follows symlinks, so a symlink pointing at a file is
+    included and hashed by its *target* content — mirroring the runner, which
+    copies fixtures with ``shutil.copytree(..., symlinks=False)`` and therefore
+    dereferences file symlinks into real files. Broken/dangling symlinks
+    (``is_file()`` is False) are skipped. Not covered (and thus outside the
+    integrity guarantee): empty directories, directory symlinks — which
+    ``rglob`` does not descend — and POSIX file modes; these rarely change a
+    fixture's effective input.
+    """
+    files = [p for p in fixture_path.rglob("*") if p.is_file()]
     return sorted(files, key=lambda p: p.relative_to(fixture_path).as_posix())
 
 
@@ -86,17 +120,23 @@ def hash_fixture(fixture_path: Path) -> dict[str, Any]:
 
     Returns a dict with the per-fixture ``sha256`` (computed over the sorted
     ``path\\0sha256\\0size`` of every file), the per-file breakdown, and the
-    total byte size — the shape written per fixture in the lockfile.
+    total byte size — the shape written per fixture in the lockfile. NUL cannot
+    appear in a POSIX path, so the ``\\0``-delimited concatenation is injective
+    (no two distinct file sets can produce the same digest).
     """
     hasher = hashlib.sha256()
     files: list[dict[str, Any]] = []
     total_size = 0
     for file_path in _iter_fixture_files(fixture_path):
-        rel = file_path.relative_to(fixture_path).as_posix()
+        rel_path = file_path.relative_to(fixture_path)
+        rel = rel_path.as_posix()
         file_sha, size = _hash_file(file_path)
         files.append({"path": rel, "sha256": file_sha, "size": size})
         total_size += size
-        hasher.update(rel.encode("utf-8"))
+        # Hash the raw path bytes (os.fsencode) rather than a UTF-8 re-encode,
+        # so a non-UTF-8 filename (surrogate-escaped on POSIX) never crashes
+        # hashing — this runs unconditionally on the core `run` path.
+        hasher.update(os.fsencode(rel_path))
         hasher.update(b"\0")
         hasher.update(file_sha.encode("ascii"))
         hasher.update(b"\0")
@@ -151,21 +191,33 @@ def _dump_lockfile(document: dict[str, Any]) -> str:
 
 
 def load_lockfile(config: Config) -> dict[str, Any] | None:
-    """Load and shallow-validate ``fixtures.lock``. Returns None if absent."""
+    """Load and validate ``fixtures.lock``. Returns None if absent.
+
+    Any problem with a *present* lockfile (unreadable, invalid YAML,
+    unsupported ``version``, or missing/wrong-typed ``fixtures`` mapping) raises
+    :class:`FixtureLockError` so the caller can turn it into a clean warning
+    (non-strict) or a Click abort with exit code 1 (``--strict-fixtures``),
+    rather than leaking a raw traceback.
+    """
     path = lockfile_path(config)
     if not path.exists():
         return None
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise FixtureLockError(f"{path} could not be read/parsed: {exc}") from exc
     if not isinstance(data, dict):
         raise FixtureLockError(f"{path} is malformed: expected a YAML mapping.")
+    version = data.get("version")
+    if version != LOCKFILE_VERSION:
+        raise FixtureLockError(
+            f"{path} has unsupported version {version!r} (expected {LOCKFILE_VERSION}). "
+            "Re-run `copilot-eval pin-fixtures` to regenerate it."
+        )
     fixtures = data.get("fixtures")
     if not isinstance(fixtures, dict):
         raise FixtureLockError(f"{path} is malformed: missing 'fixtures' mapping.")
     return data
-
-
-class FixtureLockError(ValueError):
-    """Raised when the lockfile exists but cannot be parsed/understood."""
 
 
 @dataclass
@@ -177,6 +229,10 @@ class FixtureVerification:
     # Human-readable messages describing each detected problem.
     drifted: list[str] = field(default_factory=list)
     unpinned: list[str] = field(default_factory=list)
+    # Freshly computed full hashes (sha256/total_size/files) for every
+    # referenced fixture that exists on disk — reused by the run manifest so
+    # fixtures are hashed only once per run.
+    current_hashes: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def problems(self) -> list[str]:
@@ -215,42 +271,73 @@ def _describe_file_drift(
 def verify_fixtures(config: Config, tasks: list[Task] | None = None) -> FixtureVerification:
     """Compare fixtures referenced by `tasks` against the lockfile.
 
-    Never raises on drift — it classifies each referenced fixture as matched,
-    drifted (present in the lockfile but hashing differently, or missing on
-    disk), or unpinned (referenced but absent from the lockfile). The caller
-    decides whether to warn or fail (``--strict-fixtures``).
+    Hashes every referenced fixture that exists on disk exactly once (exposed as
+    ``current_hashes`` for the run manifest), then classifies each as matched,
+    drifted (pinned but hashing differently or missing on disk, or explicitly
+    declared yet absent-and-unpinned), or unpinned (present on disk but absent
+    from the lockfile). Never raises on drift — the caller decides whether to
+    warn or fail (``--strict-fixtures``). May raise :class:`FixtureLockError`
+    if a *present* lockfile is malformed.
     """
     tasks = config.tasks if tasks is None else tasks
     lock = load_lockfile(config)
-    if lock is None:
-        return FixtureVerification(lockfile_present=False)
-
-    locked_fixtures: dict[str, Any] = lock.get("fixtures", {})
+    locked_fixtures: dict[str, Any] = lock.get("fixtures", {}) if lock else {}
+    explicit = explicit_fixtures(tasks)
     root = fixtures_dir(config)
-    result = FixtureVerification(lockfile_present=True)
+    result = FixtureVerification(lockfile_present=lock is not None)
+
     for name in referenced_fixtures(tasks):
-        entry = locked_fixtures.get(name)
         path = root / name
+        current = hash_fixture(path) if path.is_dir() else None
+        if current is not None:
+            result.current_hashes[name] = current
+
+        if not result.lockfile_present:
+            # No lockfile to compare against; still record current_hashes above
+            # so the run manifest can capture fixture identity.
+            continue
+
+        entry = locked_fixtures.get(name)
         if entry is None:
-            # A fixture with no directory *and* no lockfile entry is simply an
-            # unused task-name fallback; only flag it when it exists on disk.
-            if path.is_dir():
+            if current is not None:
                 result.unpinned.append(
                     f"fixture '{name}' is not pinned in {FIXTURE_LOCKFILE_NAME}"
                 )
+            elif name in explicit:
+                # Explicitly declared, but neither on disk nor pinned — a real
+                # misconfiguration that strict mode should catch. (An implicit
+                # task-name fallback with no directory is tolerated silently.)
+                result.drifted.append(
+                    f"fixture '{name}' is declared but missing on disk and not "
+                    f"pinned in {FIXTURE_LOCKFILE_NAME}"
+                )
             continue
-        if not path.is_dir():
+        if current is None:
             result.drifted.append(
                 f"fixture '{name}' is pinned but missing on disk (expected at {path})"
             )
             continue
-        current = hash_fixture(path)
         if current["sha256"] == entry.get("sha256"):
             result.matched.append(name)
         else:
             detail = _describe_file_drift(entry.get("files", []), current["files"])
             result.drifted.append(f"fixture '{name}' changed since pinning ({detail})")
     return result
+
+
+def _compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Reduce a full fixture hash entry to the compact form recorded in the
+    run manifest (identity hash + size, without the per-file breakdown)."""
+    return {
+        "sha256": entry["sha256"],
+        "total_size": entry["total_size"],
+        "file_count": len(entry["files"]),
+    }
+
+
+def compact_hashes(full: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Compact every full fixture hash entry for the run manifest."""
+    return {name: _compact_entry(entry) for name, entry in full.items()}
 
 
 def compute_fixture_hashes(config: Config, tasks: list[Task]) -> dict[str, dict[str, Any]]:
@@ -266,10 +353,5 @@ def compute_fixture_hashes(config: Config, tasks: list[Task]) -> dict[str, dict[
         path = root / name
         if not path.is_dir():
             continue
-        entry = hash_fixture(path)
-        hashes[name] = {
-            "sha256": entry["sha256"],
-            "total_size": entry["total_size"],
-            "file_count": len(entry["files"]),
-        }
+        hashes[name] = _compact_entry(hash_fixture(path))
     return hashes

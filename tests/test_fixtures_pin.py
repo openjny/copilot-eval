@@ -238,3 +238,123 @@ def test_manifest_records_fixture_hashes(tmp_path: Path):
     manifest = json.loads((run_dir / MANIFEST_NAME).read_text())
     assert manifest["fixtures"] == hashes
     assert manifest["fixtures"]["app"]["sha256"]
+
+
+# --- edge cases (council review) ---------------------------------------------
+
+
+def test_hash_follows_file_symlinks(tmp_path: Path):
+    """Runner copies fixtures with copytree(symlinks=False), which dereferences
+    file symlinks — so the hash must reflect the symlink *target* content."""
+    config = load_inline(tmp_path, _base_config("app"))
+    fx = tmp_path / "fixtures" / "app"
+    fx.mkdir(parents=True)
+    target = tmp_path / "external.txt"
+    target.write_text("v1")
+    (fx / "link.txt").symlink_to(target)
+
+    pin_fixtures(config)
+    assert not verify_fixtures(config).has_problems
+
+    # Changing the symlink target must surface as drift.
+    target.write_text("v2-different")
+    verification = verify_fixtures(config)
+    assert verification.has_problems
+    assert any("link.txt" in m for m in verification.drifted)
+
+
+def test_hash_handles_non_utf8_filenames(tmp_path: Path):
+    """A non-UTF-8 filename must not crash hashing — this runs unconditionally
+    on the core `run` path via compute_fixture_hashes."""
+    import os
+
+    fx = tmp_path / "fixtures" / "app"
+    fx.mkdir(parents=True)
+    bad_name = os.fsdecode(b"weird\xffname.txt")
+    (fx / bad_name).write_bytes(b"data")
+
+    entry = hash_fixture(fx)  # must not raise
+    assert entry["sha256"]
+    assert entry["total_size"] == 4
+
+
+def test_empty_fixture_hashes_deterministically(tmp_path: Path):
+    fx = tmp_path / "empty"
+    fx.mkdir()
+    entry = hash_fixture(fx)
+    assert entry["files"] == []
+    assert entry["total_size"] == 0
+    assert entry["sha256"] == hash_fixture(fx)["sha256"]
+
+
+def test_load_lockfile_rejects_unsupported_version(tmp_path: Path):
+    import pytest
+
+    from eval.services.fixtures_service import FixtureLockError, lockfile_path
+
+    config = load_inline(tmp_path, _base_config("app"))
+    _write_fixture(tmp_path, "app", {"main.py": "x = 1\n"})
+    pin_fixtures(config)
+    lock = lockfile_path(config)
+    lock.write_text(lock.read_text().replace("version: 1", "version: 99"))
+
+    with pytest.raises(FixtureLockError, match="unsupported version"):
+        verify_fixtures(config)
+
+
+def test_load_lockfile_rejects_malformed_yaml(tmp_path: Path):
+    import pytest
+
+    from eval.services.fixtures_service import FixtureLockError, lockfile_path
+
+    config = load_inline(tmp_path, _base_config("app"))
+    lockfile_path(config).write_text("fixtures: [not: valid: yaml")
+
+    with pytest.raises(FixtureLockError):
+        verify_fixtures(config)
+
+
+def test_strict_fails_on_explicit_missing_fixture(tmp_path: Path):
+    """An explicitly declared fixture that is neither on disk nor pinned is a
+    misconfiguration strict mode should catch (not an implicit fallback)."""
+    config = load_inline(tmp_path, _base_config("app"))
+    _write_fixture(tmp_path, "app", {"main.py": "x = 1\n"})
+    pin_fixtures(config)
+    config.tasks[0].fixtures = ["app", "ghost"]  # 'ghost' never exists / pinned
+
+    verification = verify_fixtures(config)
+    assert any("ghost" in m for m in verification.drifted)
+
+
+def test_verification_exposes_current_hashes(tmp_path: Path):
+    """current_hashes is populated even without a lockfile so the manifest can
+    still record fixture identity."""
+    config = load_inline(tmp_path, _base_config("app"))
+    _write_fixture(tmp_path, "app", {"main.py": "x = 1\n"})
+    verification = verify_fixtures(config)
+    assert verification.lockfile_present is False
+    assert "app" in verification.current_hashes
+    assert verification.current_hashes["app"]["sha256"]
+
+
+def test_resume_preserves_prior_fixture_hashes(tmp_path: Path):
+    """Merging on resume must keep the hashes of carried-over fixtures instead
+    of dropping them when only a subset is re-run."""
+    from eval.services.fixtures_service import compact_hashes
+    from eval.services.manifest import MANIFEST_NAME, load_manifest_fixtures, write_manifest
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    original = {"app-a": {"sha256": "aaa", "total_size": 1, "file_count": 1}}
+    write_manifest(run_dir, "r1", [], fixtures=original)
+
+    # A resume that only re-runs app-b would compute just its hash.
+    resumed = {"app-b": {"sha256": "bbb", "total_size": 2, "file_count": 1}}
+    merged = {**load_manifest_fixtures(run_dir), **resumed}
+    write_manifest(run_dir, "r1", [], fixtures=merged)
+
+    manifest = json.loads((run_dir / MANIFEST_NAME).read_text())
+    assert set(manifest["fixtures"]) == {"app-a", "app-b"}
+    # Sanity: compact_hashes shape matches what the manifest stores.
+    entry = compact_hashes({"x": hash_fixture(_write_fixture(tmp_path, "x", {"a": "b"}))})["x"]
+    assert set(entry) == {"sha256", "total_size", "file_count"}

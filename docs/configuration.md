@@ -685,10 +685,12 @@ fixtures:
 
 The lockfile is fully content-addressed (no timestamps, deterministic ordering), so re-pinning unchanged fixtures produces an identical file and git diffs stay meaningful. Commit it alongside your config.
 
-At `run` time, fixtures are re-hashed and compared against the lockfile:
+Hashing mirrors what the runner actually materializes into the sandbox: every regular file is hashed by content, and because the runner copies fixtures with `shutil.copytree(..., symlinks=False)`, **file symlinks are followed and hashed by their target content**. Empty directories, directory symlinks, and POSIX file modes are outside the integrity guarantee (they rarely change a fixture's effective input). Filenames are hashed as raw bytes, so non-UTF-8 names never break pinning.
+
+At `run` time, fixtures are re-hashed and compared against the lockfile *before any Docker work* (so a forgotten re-pin fails fast, including under `--dry-run`):
 
 - **Drift** (a fixture's contents changed, or a pinned fixture is missing) prints a warning but does not block the run.
-- **`run --strict-fixtures`** turns any drift — plus a missing lockfile or a referenced-but-unpinned fixture — into a hard failure, so CI can gate on fixture reproducibility.
+- **`run --strict-fixtures`** turns any drift — plus a missing/malformed lockfile, an unsupported lockfile `version`, a referenced-but-unpinned fixture, or an explicitly-declared fixture missing on disk — into a hard failure (exit code 1), so CI can gate on fixture reproducibility.
 
 Every run also records the fixtures' content hashes in its `results.json` manifest (under `fixtures:`) for post-hoc reproducibility auditing. After intentionally changing a fixture, re-run `pin-fixtures` to update the lockfile.
 
