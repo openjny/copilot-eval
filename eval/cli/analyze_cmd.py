@@ -27,10 +27,20 @@ from eval.services.analyze_service import run_analysis
     "-a",
     type=click.Choice(["paired", "median", "mean"]),
     default="paired",
-    help="Aggregation method",
+    help=(
+        "How to combine per-epoch results into one comparison. 'paired' "
+        "(default) pairs variants within each (fixture, epoch) cell and "
+        "bootstraps the paired deltas — the most sensitive method; 'median'/"
+        "'mean' aggregate each variant's scores independently before comparing."
+    ),
 )
 @click.option("--jaeger-url", default=None, help="Jaeger URL override (forces jaeger collector)")
-@click.option("--config-dir", default=None, type=click.Path(exists=True))
+@click.option(
+    "--config-dir",
+    default=None,
+    type=click.Path(exists=True),
+    help="Project directory containing eval-config.yaml (defaults to the repo root)",
+)
 @click.option("--skip-eval", is_flag=True, help="Skip judge evaluation, use existing scores")
 @click.option(
     "--re-eval", is_flag=True, help="Force re-run judge evaluation (ignore cached scores)"
